@@ -93,7 +93,8 @@ class HybridSearchEngine:
         - full: All files allowed; sensitive patterns masked.
         """
         valid: List[CodeChunk] = []
-        root_path = Path(workspace_root).resolve() if workspace_root else None
+        from .file_resolver import WorkspaceFileResolver
+        root_path = WorkspaceFileResolver._resolve_root(workspace_root) if workspace_root else None
 
         for chunk in chunks:
             fpath = Path(chunk.file_path).resolve()
@@ -129,7 +130,8 @@ class HybridSearchEngine:
 
         context_parts = []
         current_len = 0
-        root_path = Path(workspace_root).resolve() if workspace_root else None
+        from .file_resolver import WorkspaceFileResolver
+        root_path = WorkspaceFileResolver._resolve_root(workspace_root) if workspace_root else None
 
         for chunk in chunks:
             # Clean relative path

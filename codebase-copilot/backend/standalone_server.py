@@ -93,13 +93,53 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             }
             self.wfile.write(json.dumps(task_data).encode("utf-8"))
 
-        elif self.path == "/api/graph/mermaid":
+        elif self.path.startswith("/api/graph/mermaid"):
             self.send_response(200)
             self._set_cors_headers()
             self.end_headers()
-            # Fetch from sqlite
-            diagram = "graph TD\n  AuthRoute -->|calls| AuthService\n  AuthService -->|calls| JWTUtil\n  AuthService -->|queries| UserDB"
-            self.wfile.write(json.dumps({"mermaid": diagram}).encode("utf-8"))
+            try:
+                import sqlite3
+                from app.main import graph_store, runtime_settings, DEFAULT_WORKSPACE
+                target_path = runtime_settings.get("repo_path") or DEFAULT_WORKSPACE
+                target_norm = str(Path(target_path).resolve())
+                diagram_lines = ["graph TD"]
+                with sqlite3.connect(graph_store.db_path) as db:
+                    cursor = db.execute("SELECT source_symbol, target_symbol, relation_type, file_path FROM relationships LIMIT 30")
+                    for src, tgt, rel, fpath in cursor.fetchall():
+                        if fpath:
+                            try:
+                                if not str(Path(fpath).resolve()).startswith(target_norm):
+                                    continue
+                            except Exception:
+                                pass
+                        clean_src = src.split("#")[-1].replace(".", "_")
+                        clean_tgt = tgt.split("#")[-1].replace(".", "_")
+                        diagram_lines.append(f"  {clean_src} -->|{rel}| {clean_tgt}")
+                if len(diagram_lines) > 1:
+                    data = {"mermaid": "\n".join(diagram_lines), "available": True}
+                else:
+                    data = {"mermaid": "", "available": False, "message": "No SQLite code graph available for this repository.\nClick 'Scan & Index Workspace' to analyze codebase structure."}
+            except Exception:
+                data = {"mermaid": "", "available": False, "message": "No SQLite code graph available for this repository.\nClick 'Scan & Index Workspace' to analyze codebase structure."}
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif self.path.startswith("/api/repo/tree"):
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(self.path)
+            qs = parse_qs(parsed.query)
+            target_path = qs.get("path", [None])[0] or "."
+            try:
+                from app.main import build_essential_file_tree
+                root = Path(target_path)
+                if not root.exists() or not root.is_dir():
+                    root = Path(__file__).resolve().parent
+                data = build_essential_file_tree(root)
+            except Exception as e:
+                data = {"status": "error", "error": str(e), "tree": [], "stats": {"total_files": 0, "total_dirs": 0, "total_lines": 0}}
+            self.send_response(200)
+            self._set_cors_headers()
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
 
         else:
             self.send_response(404)

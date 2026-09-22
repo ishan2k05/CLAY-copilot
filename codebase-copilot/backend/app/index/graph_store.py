@@ -42,6 +42,15 @@ class SQLiteGraphStore:
             db.execute("CREATE INDEX IF NOT EXISTS idx_rel_target ON relationships(target_symbol);")
             db.commit()
 
+    def _sync_clear_all(self):
+        with sqlite3.connect(self.db_path) as db:
+            db.execute("DELETE FROM relationships;")
+            db.execute("DELETE FROM symbols;")
+            db.commit()
+
+    async def clear_all(self):
+        await asyncio.to_thread(self._sync_clear_all)
+
     async def init_db(self):
         await asyncio.to_thread(self._sync_init_db)
 

@@ -20,13 +20,54 @@ class PatchEngine:
         except SyntaxError:
             return False
 
-    @staticmethod
-    def resolve_target_path(file_path: str, workspace_path: Optional[str] = None) -> Path:
+    @classmethod
+    def resolve_target_path(cls, file_path: str, workspace_path: Optional[str] = None) -> Path:
         """Resolves target path against workspace if relative."""
-        p = Path(file_path.strip().lstrip("b/").lstrip("a/"))
-        if not p.is_absolute() and workspace_path:
-            p = Path(workspace_path) / p
-        return p
+        clean_name = file_path.strip()
+        if clean_name.startswith("b/") or clean_name.startswith("a/"):
+            clean_name = clean_name[2:]
+        clean_name = clean_name.lstrip("/")
+
+        p = Path(clean_name)
+        if p.is_absolute() and p.exists():
+            return p.resolve()
+
+        if workspace_path:
+            from ..retrieval.file_resolver import WorkspaceFileResolver
+            ws = WorkspaceFileResolver._resolve_root(workspace_path)
+            direct = ws / p
+            if direct.exists():
+                return direct.resolve()
+            if ws.exists() and ws.is_dir():
+                try:
+                    for sub in ws.rglob(p.name):
+                        if sub.is_file():
+                            return sub.resolve()
+                except Exception:
+                    pass
+
+                # If requested filename is generic (solution.py, patch.diff) and doesn't exist, map to actual repo file
+                if p.name in ("solution.py", "patch.diff", "unknown"):
+                    accessible = WorkspaceFileResolver.list_accessible_files(str(ws))
+                    py_files = [f for f in accessible.values() if f.suffix == ".py"]
+                    if py_files:
+                        return py_files[0].resolve()
+                    if accessible:
+                        return list(accessible.values())[0].resolve()
+            return direct.resolve()
+
+        if p.exists():
+            return p.resolve()
+
+        for candidate_root in [Path.home() / "Desktop", Path.cwd().parent, Path("/home/ishan/.gemini/antigravity-ide/scratch")]:
+            if candidate_root.exists():
+                try:
+                    for sub in candidate_root.rglob(p.name):
+                        if sub.is_file():
+                            return sub.resolve()
+                except Exception:
+                    pass
+        return p.resolve()
 
     @classmethod
     def apply_patch_hunks(
@@ -43,6 +84,15 @@ class PatchEngine:
             return {"status": "error", "message": "Diff content is empty."}
 
         target_path = cls.resolve_target_path(file_path, workspace_path)
+
+        # Inspect diff headers for actual target filename if file_path is generic or doesn't exist
+        header_match = re.search(r"\+\+\+\s+(?:b/)?([^\s\n\r]+)", diff_text)
+        if header_match:
+            diff_file = header_match.group(1).strip()
+            if diff_file and diff_file != "/dev/null":
+                diff_file_path = cls.resolve_target_path(diff_file, workspace_path)
+                if diff_file_path.exists() or not target_path.exists():
+                    target_path = diff_file_path
 
         # Check if this is a new file creation
         is_new_file = (

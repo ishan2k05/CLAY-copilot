@@ -1,0 +1,49 @@
+import unittest
+import tempfile
+from pathlib import Path
+from app.retrieval.file_resolver import WorkspaceFileResolver
+from app.agent.patch_engine import PatchEngine
+from app.main import resolve_workspace_path
+
+class TestDiffAndPatchTargeting(unittest.TestCase):
+    def test_bare_folder_resolution(self):
+        # Resolving "Clay test" should resolve to /home/ishan/Desktop/Clay test
+        p = resolve_workspace_path("Clay test")
+        self.assertTrue(p.exists())
+        self.assertEqual(p.name, "Clay test")
+        self.assertTrue((p / "test_c.py").exists())
+
+    def test_query_files_resolution_with_bare_folder_name(self):
+        # Query asking for test_c.py with bare folder "Clay test" in sandboxed mode
+        chunks = WorkspaceFileResolver.resolve_query_files("what is in test_c.py", "Clay test", "sandboxed")
+        self.assertGreater(len(chunks), 0)
+        self.assertEqual(chunks[0].symbol_name, "test_c.py")
+        self.assertIn("users = []", chunks[0].content)
+
+    def test_patch_engine_resolves_real_repo_file(self):
+        # Even if a generic name "solution.py" is passed, if workspace only has test_c.py,
+        # it should resolve to test_c.py
+        target = PatchEngine.resolve_target_path("solution.py", "Clay test")
+        self.assertEqual(target.name, "test_c.py")
+
+    def test_patch_engine_respects_diff_header(self):
+        # If diff header has +++ b/test_c.py, it must target test_c.py
+        with tempfile.TemporaryDirectory() as td:
+            target_f = Path(td) / "test_c.py"
+            target_f.write_text("a = 10\nb = 20\n")
+            
+            diff = (
+                "--- a/test_c.py\n"
+                "+++ b/test_c.py\n"
+                "@@ -1,2 +1,2 @@\n"
+                "-a = 10\n"
+                "+a = 99\n"
+                " b = 20\n"
+            )
+            res = PatchEngine.apply_patch_hunks("solution.py", diff, td)
+            self.assertEqual(res["status"], "success")
+            self.assertEqual(res["filename"], "test_c.py")
+            self.assertIn("a = 99", target_f.read_text())
+
+if __name__ == "__main__":
+    unittest.main()

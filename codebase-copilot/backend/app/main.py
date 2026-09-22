@@ -66,20 +66,100 @@ DEFAULT_WORKSPACE = os.getenv(
     "/home/ishan/.gemini/antigravity-ide/scratch/codebase-copilot"
 )
 
-async def auto_index_workspace(workspace_dir: str):
-    """Auto-indexes workspace files into SQLite symbol graph and vector store on boot."""
-    root = Path(workspace_dir)
+current_indexed_workspace: Optional[str] = None
+
+def resolve_workspace_path(path_str: Optional[str]) -> Path:
+    """
+    Intelligently resolves workspace directory paths.
+    Handles:
+    - Absolute paths (e.g. /home/ishan/Desktop/Clay test)
+    - Tilde paths (e.g. ~/Desktop/Clay test)
+    - Bare folder names from browser directory pickers (e.g. "Clay test")
+      searches: Desktop, home, Documents, Downloads, scratch directory
+    - Fallback to current runtime repo_path or DEFAULT_WORKSPACE
+    """
+    if not path_str or not path_str.strip():
+        current = runtime_settings.get("repo_path")
+        if current and Path(current).exists() and Path(current).is_dir():
+            return Path(current).resolve()
+        return Path(DEFAULT_WORKSPACE).resolve()
+
+    p_str = path_str.strip()
+    if p_str.startswith("~"):
+        p = Path(os.path.expanduser(p_str))
+        return p.resolve()
+
+    p = Path(p_str)
+    if p.is_absolute():
+        return p.resolve()
+
+    home = Path.home()
+    candidates = [
+        home / "Desktop" / p_str,
+        home / p_str,
+        home / "Documents" / p_str,
+        home / "Downloads" / p_str,
+        Path("/home/ishan/.gemini/antigravity-ide/scratch") / p_str,
+        Path(DEFAULT_WORKSPACE) / p_str,
+        Path(__file__).resolve().parent.parent / p_str,
+        Path.cwd() / p_str,
+    ]
+    for cand in candidates:
+        if cand.exists() and cand.is_dir():
+            return cand.resolve()
+
+    for base in [home / "Desktop", home, Path("/home/ishan/.gemini/antigravity-ide/scratch")]:
+        if base.exists() and base.is_dir():
+            try:
+                for child in base.iterdir():
+                    if child.is_dir() and child.name.lower() == p_str.lower():
+                        return child.resolve()
+            except Exception:
+                pass
+
+    if p.exists() and p.is_dir():
+        return p.resolve()
+
+    current = runtime_settings.get("repo_path")
+    if current and Path(current).exists() and Path(current).is_dir():
+        return Path(current).resolve()
+    return Path(DEFAULT_WORKSPACE).resolve()
+
+async def auto_index_workspace(workspace_dir: str) -> Dict[str, int]:
+    """
+    Auto-indexes workspace files into SQLite symbol graph and vector store.
+    Resets old chunks and relationships when switching repositories.
+    """
+    global current_indexed_workspace
+    root = resolve_workspace_path(workspace_dir)
     if not root.exists():
-        return
+        return {"filesCount": 0, "symbolsCount": 0, "relationshipsCount": 0, "chunksCount": 0}
+
+    current_indexed_workspace = str(root)
+    runtime_settings["repo_path"] = str(root)
+
+    # 1. Reset vector store chunks and graph store for fresh repository context
+    vector_store.chunks = []
+    vector_store.chunk_embeddings = None
+    await graph_store.clear_all()
+
     all_symbols = []
     all_relationships = []
     all_chunks = []
+    indexed_files = 0
+
+    EXCLUDED_DIRS = {
+        "venv", ".venv", "env", "node_modules", "dist", "build",
+        "__pycache__", ".pytest_cache", ".git", ".idea", ".vscode", ".gemini"
+    }
+
+    # 2. Parse Python files with AST Chunker
     for path in root.rglob("*.py"):
         try:
             rel_parts = path.relative_to(root).parts
         except ValueError:
             rel_parts = path.parts
-        if any(part.startswith(".") or part in ["venv", "node_modules", "dist", "build", "__pycache__"] for part in rel_parts):
+        if any(part.startswith(".") or part in EXCLUDED_DIRS for part in rel_parts):
             continue
         if SecretMasker.is_file_sensitive(str(path)):
             continue
@@ -89,6 +169,50 @@ async def auto_index_workspace(workspace_dir: str):
             all_symbols.extend(symbols)
             all_relationships.extend(relationships)
             all_chunks.extend(chunks)
+            indexed_files += 1
+        except Exception:
+            continue
+
+    # 3. Index additional essential code files for multi-language context (.ts, .js, .json, .md, .html, etc.)
+    code_exts = {".ts", ".js", ".jsx", ".tsx", ".json", ".md", ".html", ".css", ".toml", ".yaml", ".yml", ".sql", ".sh"}
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in code_exts:
+            continue
+        try:
+            rel_parts = path.relative_to(root).parts
+        except ValueError:
+            rel_parts = path.parts
+        if any(part.startswith(".") or part in EXCLUDED_DIRS for part in rel_parts):
+            continue
+        if SecretMasker.is_file_sensitive(str(path)):
+            continue
+        try:
+            content = path.read_text(encoding="utf-8", errors="ignore")
+            lines = content.splitlines()
+            if not lines:
+                continue
+            step = 30
+            for i in range(0, min(len(lines), 120), step):
+                chunk_lines = lines[i:i + step]
+                chunk_body = "\n".join(chunk_lines)
+                if not chunk_body.strip():
+                    continue
+                try:
+                    rel_name = str(path.relative_to(root))
+                except Exception:
+                    rel_name = path.name
+                all_chunks.append(CodeChunk(
+                    chunk_id=f"{path}#{i+1}-{i+len(chunk_lines)}",
+                    file_path=str(path),
+                    symbol_type="file_section",
+                    symbol_name=f"{rel_name}:{i+1}",
+                    start_line=i + 1,
+                    end_line=i + len(chunk_lines),
+                    content=chunk_body
+                ))
+            indexed_files += 1
         except Exception:
             continue
 
@@ -96,6 +220,13 @@ async def auto_index_workspace(workspace_dir: str):
         await graph_store.insert_batch(all_symbols, all_relationships)
     if all_chunks:
         await vector_store.add_chunks(all_chunks)
+
+    return {
+        "filesCount": indexed_files,
+        "symbolsCount": len(all_symbols),
+        "relationshipsCount": len(all_relationships),
+        "chunksCount": len(all_chunks)
+    }
 
 @app.on_event("startup")
 async def on_startup():
@@ -208,7 +339,11 @@ async def update_settings(req: SettingsUpdateRequest):
     if req.queued_mode:
         runtime_settings["queued_mode"] = req.queued_mode
     if req.repo_path:
-        runtime_settings["repo_path"] = req.repo_path.strip()
+        new_path = req.repo_path.strip()
+        resolved = resolve_workspace_path(new_path)
+        runtime_settings["repo_path"] = str(resolved)
+        if current_indexed_workspace != str(resolved):
+            await auto_index_workspace(str(resolved))
 
     return {
         "status": "success",
@@ -235,15 +370,15 @@ class ChatRequest(BaseModel):
 
 @app.post("/api/chat")
 async def chat_endpoint(req: ChatRequest):
-    workspace_dir = req.workspace_path or runtime_settings.get("repo_path") or DEFAULT_WORKSPACE
+    raw_dir = req.workspace_path or runtime_settings.get("repo_path") or DEFAULT_WORKSPACE
+    workspace_dir = str(resolve_workspace_path(raw_dir))
+    runtime_settings["repo_path"] = workspace_dir
     sec_mode = req.security_mode or runtime_settings.get("security_mode", "sandboxed")
     if req.security_mode:
         runtime_settings["security_mode"] = req.security_mode
-    if req.workspace_path:
-        runtime_settings["repo_path"] = req.workspace_path
 
-    # If index is empty, auto-index workspace
-    if len(vector_store.chunks) == 0:
+    # If index is empty or workspace changed, re-index workspace
+    if current_indexed_workspace != workspace_dir or len(vector_store.chunks) == 0:
         await auto_index_workspace(workspace_dir)
 
     # 1. Direct file resolution via WorkspaceFileResolver (handles typos, exact matches, top-level scripts)
@@ -346,64 +481,39 @@ class ScanRequest(BaseModel):
 
 @app.post("/api/index/scan")
 async def scan_repository(req: ScanRequest):
-    root = Path(req.workspace_path)
+    root = resolve_workspace_path(req.workspace_path)
     if not root.exists():
         raise HTTPException(status_code=404, detail="Workspace directory does not exist.")
-    runtime_settings["repo_path"] = str(root.resolve())
-
-    all_symbols = []
-    all_relationships = []
-    all_chunks = []
-    indexed_files = 0
-
-    # Scan python files ignoring hidden/venv/node_modules/sensitive files
-    for path in root.rglob("*.py"):
-        try:
-            rel_parts = path.relative_to(root).parts
-        except ValueError:
-            rel_parts = path.parts
-        if any(part.startswith(".") or part in ["venv", "node_modules", "dist", "build", "__pycache__"] for part in rel_parts):
-            continue
-        if SecretMasker.is_file_sensitive(str(path)):
-            continue
-
-        try:
-            content = path.read_text(encoding="utf-8", errors="ignore")
-            symbols, relationships, chunks = ast_chunker.parse_file(str(path), content)
-            all_symbols.extend(symbols)
-            all_relationships.extend(relationships)
-            all_chunks.extend(chunks)
-            indexed_files += 1
-        except Exception:
-            continue
-
-    # Store in SQLite Relational Graph
-    await graph_store.insert_batch(all_symbols, all_relationships)
-
-    # Store in Vector Store for Semantic Similarity Search
-    await vector_store.add_chunks(all_chunks)
-
+    
+    stats = await auto_index_workspace(str(root))
     return {
         "status": "synced",
-        "filesCount": indexed_files,
-        "symbolsCount": len(all_symbols),
-        "relationshipsCount": len(all_relationships),
-        "chunksCount": len(all_chunks)
+        **stats
     }
 
 # ---------------------------------------------------------
 # 3. Dynamic Architecture Visualizer (Mermaid Graph)
 # ---------------------------------------------------------
 @app.get("/api/graph/mermaid")
-async def get_mermaid_graph():
+async def get_mermaid_graph(path: Optional[str] = None):
     """Generates a dynamic Mermaid.js diagram from indexed SQLite relationships."""
     import sqlite3
     diagram_lines = ["graph TD"]
+    target_norm = str(resolve_workspace_path(path or runtime_settings.get("repo_path")))
+
     try:
         with sqlite3.connect(graph_store.db_path) as db:
-            cursor = db.execute("SELECT source_symbol, target_symbol, relation_type FROM relationships LIMIT 20")
+            cursor = db.execute(
+                "SELECT source_symbol, target_symbol, relation_type, file_path FROM relationships LIMIT 30"
+            )
             rows = cursor.fetchall()
-            for src, tgt, rel in rows:
+            for src, tgt, rel, fpath in rows:
+                if fpath:
+                    try:
+                        if not str(Path(fpath).resolve()).startswith(target_norm):
+                            continue
+                    except Exception:
+                        pass
                 clean_src = src.split("#")[-1].replace(".", "_")
                 clean_tgt = tgt.split("#")[-1].replace(".", "_")
                 diagram_lines.append(f"  {clean_src} -->|{rel}| {clean_tgt}")
@@ -411,13 +521,134 @@ async def get_mermaid_graph():
         pass
 
     if len(diagram_lines) == 1:
-        diagram_lines.extend([
-            "  AuthRoute -->|calls| AuthService",
-            "  AuthService -->|calls| JWTUtil",
-            "  AuthService -->|queries| UserDB"
-        ])
+        return {
+            "mermaid": "",
+            "available": False,
+            "message": "No SQLite code graph available for this repository.\nClick 'Scan & Index Workspace' to analyze codebase structure."
+        }
 
-    return {"mermaid": "\n".join(diagram_lines)}
+    return {"mermaid": "\n".join(diagram_lines), "available": True}
+
+
+# ---------------------------------------------------------
+# 3b. Essential Repository Files Tree Explorer
+# ---------------------------------------------------------
+def build_essential_file_tree(root_path: Path) -> Dict[str, Any]:
+    """
+    Recursively scans root_path and returns an essential files tree.
+    Filters out __pycache__, .git, venv, node_modules, build artifacts, etc.
+    """
+    EXCLUDED_DIRS = {
+        "__pycache__", ".git", ".github", ".vscode", ".idea", ".gemini",
+        "venv", ".venv", "env", "node_modules", "dist", "build",
+        ".pytest_cache", ".mypy_cache", ".ruff_cache", ".coverage", "htmlcov",
+        ".system_generated", "eggs", ".turbo", ".next", ".nuxt"
+    }
+    EXCLUDED_FILES = {
+        ".DS_Store", "Thumbs.db", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"
+    }
+    EXCLUDED_EXTS = {
+        ".pyc", ".pyo", ".pyd", ".log", ".tmp", ".swp", ".bak"
+    }
+
+    def format_size(bytes_size: int) -> str:
+        if bytes_size < 1024:
+            return f"{bytes_size} B"
+        elif bytes_size < 1024 * 1024:
+            return f"{bytes_size / 1024:.1f} KB"
+        return f"{bytes_size / (1024 * 1024):.1f} MB"
+
+    def scan_dir(current_dir: Path) -> list:
+        entries = []
+        try:
+            items = sorted(list(current_dir.iterdir()), key=lambda x: (x.is_file(), x.name.lower()))
+        except Exception:
+            return entries
+
+        for item in items:
+            name = item.name
+            if name.startswith(".") and name not in [".gitignore", ".env.example"]:
+                continue
+            if item.is_dir():
+                if name in EXCLUDED_DIRS or name.startswith("."):
+                    continue
+                children = scan_dir(item)
+                if children:
+                    entries.append({
+                        "name": name,
+                        "type": "directory",
+                        "path": str(item.relative_to(root_path)),
+                        "children": children
+                    })
+            elif item.is_file():
+                if name in EXCLUDED_FILES or item.suffix.lower() in EXCLUDED_EXTS:
+                    continue
+                if SecretMasker.is_file_sensitive(str(item)):
+                    continue
+                
+                try:
+                    with item.open("r", encoding="utf-8", errors="ignore") as f:
+                        line_count = sum(1 for _ in f)
+                except Exception:
+                    line_count = 0
+                
+                try:
+                    fsize = item.stat().st_size
+                except Exception:
+                    fsize = 0
+
+                ext = item.suffix.lstrip(".").lower() or "file"
+                entries.append({
+                    "name": name,
+                    "type": "file",
+                    "path": str(item.relative_to(root_path)),
+                    "ext": ext,
+                    "size": format_size(fsize),
+                    "bytes": fsize,
+                    "lines": line_count
+                })
+
+        return entries
+
+    tree = scan_dir(root_path)
+
+    total_files = 0
+    total_dirs = 0
+    total_lines = 0
+
+    def count_stats(nodes):
+        nonlocal total_files, total_dirs, total_lines
+        for node in nodes:
+            if node["type"] == "directory":
+                total_dirs += 1
+                count_stats(node.get("children", []))
+            else:
+                total_files += 1
+                total_lines += node.get("lines", 0)
+
+    count_stats(tree)
+
+    return {
+        "status": "success",
+        "root": str(root_path.resolve()),
+        "stats": {
+            "total_files": total_files,
+            "total_dirs": total_dirs,
+            "total_lines": total_lines
+        },
+        "tree": tree
+    }
+
+class TreeRequest(BaseModel):
+    path: Optional[str] = None
+
+@app.get("/api/repo/tree")
+@app.post("/api/repo/tree")
+async def get_repo_tree(path: Optional[str] = None, req: Optional[TreeRequest] = None):
+    """Returns an essential files tree filtered from cache and junk files."""
+    raw_path = path or (req.path if req else None) or runtime_settings.get("repo_path")
+    root = resolve_workspace_path(raw_path)
+    return build_essential_file_tree(root)
 
 # ---------------------------------------------------------
 # 4. Agentic Task Planning & Step Breakdown
@@ -428,7 +659,11 @@ class PlanRequest(BaseModel):
 
 @app.post("/api/agent/plan")
 async def create_plan(req: PlanRequest):
-    summary = f"Repository with {len(vector_store.chunks)} indexed code chunks."
+    workspace_dir = str(resolve_workspace_path(req.workspace_path or runtime_settings.get("repo_path")))
+    if current_indexed_workspace != workspace_dir:
+        await auto_index_workspace(workspace_dir)
+
+    summary = f"Repository at '{workspace_dir}' with {len(vector_store.chunks)} indexed code chunks."
     plan_data = await planner.create_plan(req.goal, summary)
     
     global active_task
@@ -458,10 +693,15 @@ class StepExecuteRequest(BaseModel):
 @app.post("/api/agent/step")
 async def execute_agent_step(req: StepExecuteRequest):
     import re
+    workspace_dir = str(resolve_workspace_path(req.workspace_path or runtime_settings.get("repo_path")))
+    if current_indexed_workspace != workspace_dir:
+        await auto_index_workspace(workspace_dir)
+
     # Step 1: Symbol scanning and repository context retrieval
     if req.step_id == 1:
-        retrieved = await hybrid_engine.search(req.goal, top_k=3)
-        files_found = list({Path(c.file_path).name for c in retrieved})
+        retrieved = await hybrid_engine.search(req.goal, top_k=3, workspace_root=workspace_dir)
+        direct_files = WorkspaceFileResolver.resolve_query_files(req.goal, workspace_dir)
+        files_found = list({Path(c.file_path).name for c in (direct_files + retrieved)})
         msg = f"Analyzed AST symbols. Correlated files: {', '.join(files_found) if files_found else 'root workspace'}"
         return {
             "step_id": 1,
@@ -470,30 +710,89 @@ async def execute_agent_step(req: StepExecuteRequest):
         }
     # Step 2: Code synthesis / Unified Diff via Gemma 4 LLM
     elif req.step_id == 2:
-        retrieved = await hybrid_engine.search(req.goal, top_k=3)
-        context = HybridSearchEngine.build_context_prompt(retrieved)
+        direct_files = WorkspaceFileResolver.resolve_query_files(req.goal, workspace_dir)
+        all_accessible = WorkspaceFileResolver.list_accessible_files(workspace_dir)
+
+        target_filename = None
+        target_path_obj = None
+
+        if direct_files:
+            target_path_obj = Path(direct_files[0].file_path)
+            target_filename = target_path_obj.name
+        elif all_accessible:
+            py_files = [p for p in all_accessible.values() if p.suffix == ".py"]
+            if py_files:
+                target_path_obj = py_files[0]
+                target_filename = target_path_obj.name
+            else:
+                target_path_obj = list(all_accessible.values())[0]
+                target_filename = target_path_obj.name
+
+        if not target_filename:
+            words = req.goal.split()
+            for w in words:
+                clean_w = w.strip(".,;:?!'\"()[]{}<>`")
+                if "." in clean_w and not clean_w.startswith("."):
+                    target_filename = clean_w
+                    break
+            if not target_filename:
+                target_filename = "test_c.py" if (Path(workspace_dir) / "test_c.py").exists() else "main.py"
+
+        retrieved = await hybrid_engine.search(req.goal, top_k=3, workspace_root=workspace_dir)
+        combined = direct_files + [c for c in retrieved if c.file_path not in {d.file_path for d in direct_files}]
+        context = HybridSearchEngine.build_context_prompt(combined[:3], workspace_root=workspace_dir)
         prompt = (
-            f"Goal: {req.goal}\n\n"
-            "Generate the exact, clean Python code or unified diff needed to accomplish this task.\n"
-            "If creating or running new code, provide runnable code in a ```python code block.\n"
-            "If modifying an existing file, provide standard unified diff syntax inside a ```diff code block.\n"
+            f"Goal: {req.goal}\n"
+            f"Target File: {target_filename}\n\n"
+            f"Generate the exact, clean Python code or unified diff for '{target_filename}' needed to accomplish this task.\n"
+            "If creating or modifying an existing file, provide standard unified diff syntax inside a ```diff code block.\n"
+            f"Use '--- a/{target_filename}' and '+++ b/{target_filename}' headers.\n"
             "Do NOT include any conversational meta-text or emojis."
         )
         generated = await ollama_provider.generate_text(prompt, code_context=context)
+
         # Extract diff if present
         diff_match = re.search(r"```(?:diff)?\n([\s\S]*?@@[\s\S]*?)```", generated)
         diff_text = diff_match.group(1).strip() if diff_match else ""
+
         if not diff_text and "```python" in generated:
             code_match = re.search(r"```python\n([\s\S]*?)```", generated)
             if code_match:
                 code_body = code_match.group(1).strip()
-                diff_text = f"--- /dev/null\n+++ b/solution.py\n@@ -0,0 +1,{len(code_body.splitlines())} @@\n" + "\n".join(f"+{line}" for line in code_body.splitlines())
+                if target_path_obj and target_path_obj.exists():
+                    try:
+                        orig_lines = target_path_obj.read_text(encoding="utf-8", errors="ignore").splitlines()
+                        diff_text = (
+                            f"--- a/{target_filename}\n+++ b/{target_filename}\n"
+                            f"@@ -1,{max(1, len(orig_lines))} +1,{len(code_body.splitlines())} @@\n"
+                            + "\n".join(f"-{line}" for line in orig_lines) + "\n"
+                            + "\n".join(f"+{line}" for line in code_body.splitlines())
+                        )
+                    except Exception:
+                        diff_text = (
+                            f"--- /dev/null\n+++ b/{target_filename}\n"
+                            f"@@ -0,0 +1,{len(code_body.splitlines())} @@\n"
+                            + "\n".join(f"+{line}" for line in code_body.splitlines())
+                        )
+                else:
+                    diff_text = (
+                        f"--- /dev/null\n+++ b/{target_filename}\n"
+                        f"@@ -0,0 +1,{len(code_body.splitlines())} @@\n"
+                        + "\n".join(f"+{line}" for line in code_body.splitlines())
+                    )
+
+        # Extract filename from diff header if present
+        header_match = re.search(r"\+\+\+\s+b/([^\s\n\r]+)", diff_text)
+        if header_match:
+            target_filename = Path(header_match.group(1)).name
+
         return {
             "step_id": 2,
             "status": "done",
+            "target_file": target_filename,
             "diff": diff_text,
             "generated": generated,
-            "log": f"Synthesized solution via {ollama_provider.model_name}."
+            "log": f"Synthesized solution for {target_filename}."
         }
     # Step 3: AST verification & zero-regression checks
     elif req.step_id == 3:
@@ -514,10 +813,11 @@ class ApplyPatchRequest(BaseModel):
 
 @app.post("/api/agent/apply-patch")
 async def apply_patch(req: ApplyPatchRequest):
+    workspace = resolve_workspace_path(req.workspace_path)
     result = PatchEngine.apply_patch_hunks(
         file_path=req.file_path,
         diff_text=req.diff,
-        workspace_path=req.workspace_path or str(Path.cwd().parent)
+        workspace_path=str(workspace)
     )
     if result.get("status") == "error":
         raise HTTPException(status_code=400, detail=result.get("message"))

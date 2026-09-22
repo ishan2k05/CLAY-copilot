@@ -179,9 +179,12 @@ export class BackendClient {
         return await response.json() as IndexStatus;
     }
 
-    async getMermaidGraph(): Promise<string> {
+    async getMermaidGraph(workspacePath?: string): Promise<string> {
         try {
-            const res = await fetch(`${this.backendUrl}/api/graph/mermaid`);
+            const url = workspacePath
+                ? `${this.backendUrl}/api/graph/mermaid?path=${encodeURIComponent(workspacePath)}`
+                : `${this.backendUrl}/api/graph/mermaid`;
+            const res = await fetch(url);
             if (res.ok) {
                 const data = await res.json() as any;
                 return data.mermaid || '';
@@ -202,11 +205,11 @@ export class BackendClient {
         return await res.json() as AgentTask;
     }
 
-    async applyPatch(filePath: string, diff: string): Promise<any> {
+    async applyPatch(filePath: string, diff: string, workspacePath?: string): Promise<any> {
         const res = await fetch(`${this.backendUrl}/api/agent/apply-patch`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ file_path: filePath, diff })
+            body: JSON.stringify({ file_path: filePath, diff, workspace_path: workspacePath })
         });
         if (!res.ok) {
             const err = await res.text();
@@ -232,5 +235,18 @@ export class BackendClient {
             body: JSON.stringify({ task_id: taskId, decision })
         });
         return res.ok;
+    }
+
+    async getRepoTree(workspacePath?: string): Promise<{ tree: any[]; stats: any; root?: string }> {
+        try {
+            const url = workspacePath 
+                ? `${this.backendUrl}/api/repo/tree?path=${encodeURIComponent(workspacePath)}`
+                : `${this.backendUrl}/api/repo/tree`;
+            const res = await fetch(url);
+            if (res.ok) {
+                return await res.json() as any;
+            }
+        } catch {}
+        return { tree: [], stats: { total_files: 0, total_dirs: 0, total_lines: 0 } };
     }
 }

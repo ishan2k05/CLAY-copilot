@@ -1,14 +1,37 @@
-def print_pattern():
+def get_input():
+    """Prompts the user for input and returns the value."""
     try:
-        rows = int(input("Enter number of rows: "))
-        char = input("Enter character to use: ")
-        if not char:
-            char = "*"
-        
-        for i in range(1, rows + 1):
-            print(char * i)
-    except ValueError:
-        print("Please enter a valid integer for rows.")
+        return input("Enter value for x: ")
+    except EOFError:
+        return None
+
+def process_value(x):
+    """Processes the input value and returns a result."""
+    try:
+        val = float(x)
+        return f"Processed numeric value: {val * 2}"
+    except (ValueError, TypeError):
+        return f"Processed string value: {str(x).upper()}"
+
+def main():
+    """Main execution flow."""
+    x = get_input()
+    if x is not None:
+        result = process_value(x)
+        print(f"Input x is: {x}")
+        print(result)
+    else:
+        print("No input provided.")
 
 if __name__ == "__main__":
-    print_pattern()
+    main()
+
+if __name__ == "__main__":
+    main()
+def get_input():
+    user_input = input("Enter value for x: ")
+    return user_input
+
+if __name__ == "__main__":
+    x = get_input()
+    print(f"Input x is: {x}")

@@ -17,7 +17,44 @@
   let stagedDiffData = null;
   let isAgentRunning = false;
   let lastUserQuery = '';
-  const CLAY_ICON_SVG = '<svg viewBox="0 0 163 178" class="clay-cube-icon" shape-rendering="crispEdges"><path fill="#C15C3D" d="M82,6h1v6h-1z M75,7h7v5h-7z M83,7h5v5h-5z M69,10h6v3h-6z M88,10h6v3h-6z M68,11h1v5h-1z M94,12h1v4h-1z M62,13h6v4h-6z M69,13h5v3h-5z M89,13h5v3h-5z M95,13h6v4h-6z M61,16h1v3h-1z M101,16h1v3h-1z M55,17h6v5h-6z M62,17h5v2h-5z M96,17h5v2h-5z M102,17h6v5h-6z M54,19h1v4h-1z M50,20h4v6h-4z M108,20h5v3h-5z M55,22h5v1h-5z M103,22h5v1h-5z M49,23h1v3h-1z M109,23h10v3h-10z M43,24h6v2h-6z M119,24h1v5h-1z M42,26h6v3h-6z M115,26h4v3h-4z M120,26h1v4h-1z M38,27h4v6h-4z M121,27h4v6h-4z M31,30h7v3h-7z M125,30h7v3h-7z M30,33h5v3h-5z M127,33h6v1h-6z M25,34h5v2h-5z M128,34h11v2h-11z M24,35h1v4h-1z M25,36h4v3h-4z M134,36h5v1h-5z M18,37h6v2h-6z M135,37h10v2h-10z M17,39h6v1h-6z M140,39h6v1h-6z M12,40h2v10h-2z M15,40h7v2h-7z M141,40h11v2h-11z M11,41h1v9h-1z M14,41h1v11h-1z M15,42h6v1h-6z M142,42h10v1h-10z M10,43h1v7h-1z M148,43h5v95h-5z M6,44h4v90h-4z M153,44h4v90h-4z M15,47h5v6h-5z M143,47h5v48h-5z M142,48h1v47h-1z M20,50h1v4h-1z M141,50h1v45h-1z M21,51h6v5h-6z M136,51h5v26h-5z M27,54h6v3h-6z M130,54h6v20h-6z M33,56h1v4h-1z M129,56h1v19h-1z M28,57h5v3h-5z M34,57h6v5h-6z M128,57h1v18h-1z M123,58h5v17h-5z M40,60h1v3h-1z M122,60h1v91h-1z M41,61h6v5h-6z M116,61h6v93h-6z M35,62h5v1h-5z M47,64h7v3h-7z M109,64h7v18h-7z M48,67h7v3h-7z M108,67h1v17h-1z M55,68h6v5h-6z M102,68h6v17h-6z M21,71h2v6h-2z M61,71h6v4h-6z M96,71h6v20h-6z M23,72h2v8h-2z M25,73h2v7h-2z M67,73h1v4h-1z M95,73h1v41h-1z M27,74h2v10h-2z M68,74h6v6h-6z M89,74h6v41h-6z M130,74h1v1h-1z M134,74h2v1h-2z M29,75h1v14h-1z M62,75h5v2h-5z M123,75h4v1h-4z M123,76h2v1h-2z M30,77h1v13h-1z M74,77h1v3h-1z M87,77h2v95h-2z M123,77h1v74h-1z M138,77h3v17h-3z M31,78h2v15h-2z M75,78h12v5h-12z M33,79h1v18h-1z M26,80h1v3h-1z M34,81h1v17h-1z M109,82h3v1h-3z M114,82h2v1h-2z M76,83h11v1h-11z M109,83h2v1h-2z M115,83h1v72h-1z M28,84h1v3h-1z M35,84h1v16h-1z M79,84h8v88h-8z M126,84h3v40h-3z M36,85h1v15h-1z M102,85h3v2h-3z M124,85h2v41h-2z M102,87h1v3h-1z M37,88h3v13h-3z M114,89h1v44h-1z M40,90h1v28h-1z M41,91h1v26h-1z M96,91h5v3h-5z M111,91h3v41h-3z M110,92h1v41h-1z M32,93h1v1h-1z M109,93h1v40h-1z M42,94h1v23h-1z M96,94h4v16h-4z M139,94h2v1h-2z M43,95h1v22h-1z M144,95h4v43h-4z M129,97h1v14h-1z M44,98h1v16h-1z M130,99h1v8h-1z M45,100h1v14h-1z M131,100h1v5h-1z M38,101h2v18h-2z M46,101h1v13h-1z M132,101h1v3h-1z M133,102h1v1h-1z M143,102h1v39h-1z M141,103h2v38h-2z M47,105h2v5h-2z M140,105h1v39h-1z M37,106h1v13h-1z M49,106h1v4h-1z M139,106h1v38h-1z M36,107h1v14h-1z M108,107h1v13h-1z M138,107h1v37h-1z M35,108h1v13h-1z M34,109h1v12h-1z M107,109h1v10h-1z M31,110h3v12h-3z M47,110h1v1h-1z M96,110h3v1h-3z M30,111h1v13h-1z M96,111h2v3h-2z M29,112h1v14h-1z M106,112h1v6h-1z M28,113h1v13h-1z M27,114h1v12h-1z M105,114h1v3h-1z M24,115h3v10h-3z M89,115h5v53h-5z M23,116h1v8h-1z M21,117h2v7h-2z M94,118h1v48h-1z M31,122h2v2h-2z M96,122h2v43h-2z M95,123h1v42h-1z M98,123h1v42h-1z M99,124h1v41h-1z M126,124h2v1h-2z M25,125h2v1h-2z M136,125h2v19h-2z M124,126h1v1h-1z M135,128h1v17h-1z M45,129h2v7h-2z M134,129h1v19h-1z M47,130h3v8h-3z M133,130h1v18h-1z M50,131h1v8h-1z M10,132h5v6h-5z M51,132h3v7h-3z M111,132h1v1h-1z M132,132h1v16h-1z M54,133h1v8h-1z M129,133h3v15h-3z M7,134h3v3h-3z M55,134h2v7h-2z M126,134h3v16h-3z M153,134h3v2h-3z M15,135h3v3h-3z M57,135h3v8h-3z M124,135h2v16h-2z M18,136h2v5h-2z M46,136h1v1h-1z M60,136h1v8h-1z M153,136h2v2h-2z M8,137h2v1h-2z M61,137h3v8h-3z M16,138h2v3h-2z M20,138h1v4h-1z M64,138h1v8h-1z M144,138h3v3h-3z M21,139h6v6h-6z M52,139h2v1h-2z M65,139h2v7h-2z M53,140h1v1h-1z M67,140h1v2h-1z M100,140h1v25h-1z M113,140h2v18h-2z M56,141h1v1h-1z M101,141h1v22h-1z M112,141h1v17h-1z M141,141h1v3h-1z M27,142h6v3h-6z M102,142h1v20h-1z M108,142h4v16h-4z M103,143h1v18h-1z M107,143h1v18h-1z M33,144h1v4h-1z M104,144h3v17h-3z M28,145h5v3h-5z M34,145h1v5h-1z M36,145h4v6h-4z M63,145h1v1h-1z M35,146h1v5h-1z M66,146h1v1h-1z M40,147h1v4h-1z M41,149h6v4h-6z M126,150h2v1h-2z M47,152h7v3h-7z M42,153h5v2h-5z M116,154h5v1h-5z M48,155h7v3h-7z M55,156h6v5h-6z M54,158h1v1h-1z M108,158h1v1h-1z M61,159h6v4h-6z M67,160h1v5h-1z M60,161h1v1h-1z M68,162h1v4h-1z M62,163h5v2h-5z M69,163h3v5h-3z M72,164h1v4h-1z M78,165h1v7h-1z M73,166h5v5h-5z M89,168h1v3h-1z M74,171h4v1h-4z"/></svg>';
+  const CLAY_ICON_SVG = '<svg viewBox="0 0 512 512" class="clay-cube-icon" shape-rendering="crispEdges"><g transform="translate(64, 148) scale(24)"><rect x="1" y="1" width="2" height="1" fill="#C15C3D"/><rect x="2" y="2" width="2" height="1" fill="#C15C3D"/><rect x="3" y="3" width="2" height="1" fill="#C15C3D"/><rect x="4" y="4" width="2" height="1" fill="#C15C3D"/><rect x="5" y="5" width="2" height="1" fill="#C15C3D"/><rect x="4" y="6" width="2" height="1" fill="#C15C3D"/><rect x="3" y="7" width="2" height="1" fill="#C15C3D"/><rect x="2" y="8" width="2" height="1" fill="#C15C3D"/><rect x="1" y="9" width="2" height="1" fill="#C15C3D"/><rect x="8" y="8" width="6" height="2" fill="#C15C3D"/></g></svg>';
+
+  // Active repository files registry for real-time diff mapping
+  let currentRepoFilesList = [];
+
+  function extractDiffFilename(diffText) {
+    if (!diffText) return null;
+    const plusMatch = diffText.match(/\+\+\+\s+(?:b\/)?([^\s\n\r]+)/);
+    if (plusMatch && plusMatch[1] && plusMatch[1] !== '/dev/null') {
+      const parts = plusMatch[1].split(/[\\/]/);
+      return parts[parts.length - 1];
+    }
+    const minusMatch = diffText.match(/---\s+(?:a\/)?([^\s\n\r]+)/);
+    if (minusMatch && minusMatch[1] && minusMatch[1] !== '/dev/null') {
+      const parts = minusMatch[1].split(/[\\/]/);
+      return parts[parts.length - 1];
+    }
+    return null;
+  }
+
+  function getPrimaryRepoFile(hintText = '') {
+    if (currentRepoFilesList && currentRepoFilesList.length > 0) {
+      if (hintText) {
+        const lower = hintText.toLowerCase();
+        for (const f of currentRepoFilesList) {
+          if (f.name && lower.includes(f.name.toLowerCase())) {
+            return f.name;
+          }
+        }
+      }
+      const pyFile = currentRepoFilesList.find(f => f.name && f.name.endsWith('.py'));
+      if (pyFile) return pyFile.name;
+      const srcFile = currentRepoFilesList.find(f => f.name && /\.(js|ts|jsx|tsx|json|html|css|md)$/i.test(f.name));
+      if (srcFile) return srcFile.name;
+      return currentRepoFilesList[0].name;
+    }
+    return 'test_c.py';
+  }
 
 
   // Minimal non-blocking Toast System
@@ -68,6 +105,9 @@
 
     if (inputDock) {
       inputDock.style.display = target === 'chat' ? 'block' : 'none';
+    }
+    if (target === 'repo') {
+      loadRepoTree();
     }
   }
 
@@ -784,24 +824,44 @@
       currentAssistantTextEl.innerHTML = formatMarkdown(fullText);
       const card = currentAssistantTextEl.closest('.assistant-card');
 
-      // Detect unified diff
+      // Detect unified diff or code block
       const diffMatch = fullText.match(/```(?:diff)?\n([\s\S]*?@@[\s\S]*?)```/);
+      let detectedDiff = null;
+      let targetFilename = null;
+
       if (diffMatch) {
-        const rawDiff = diffMatch[1];
-        stageDiff('solution.py', rawDiff);
+        detectedDiff = diffMatch[1].trim();
+        targetFilename = extractDiffFilename(detectedDiff) || getPrimaryRepoFile(lastUserQuery || fullText);
+        stageDiff(targetFilename, detectedDiff);
+      } else {
+        const rawDiffMatch = fullText.match(/(--- (?:a\/|\/dev\/null)[^\n]+\n\+\+\+ (?:b\/|[^\n]+)[^\n]*\n@@[\s\S]*?)(?:```|$)/);
+        if (rawDiffMatch) {
+          detectedDiff = rawDiffMatch[1].trim();
+          targetFilename = extractDiffFilename(detectedDiff) || getPrimaryRepoFile(lastUserQuery || fullText);
+          stageDiff(targetFilename, detectedDiff);
+        }
+      }
+
+      // Check if there is a general code block if diff wasn't detected
+      let detectedCode = null;
+      if (!detectedDiff) {
+        const codeBlockMatch = fullText.match(/```[a-zA-Z0-9_-]*\n([\s\S]*?)```/);
+        if (codeBlockMatch) {
+          detectedCode = codeBlockMatch[1].trim();
+          targetFilename = getPrimaryRepoFile(lastUserQuery || fullText);
+        }
       }
 
       // Detect code change intent in user query or response
       const codeIntentRegex = /\b(create|write|add|implement|fix|refactor|change|update|make|delete|build|print|patch|edit|function|script|class|module|snippet)\b/i;
       const hasCodeBlock = fullText.includes('```');
 
-      if (card && (codeIntentRegex.test(lastUserQuery) || hasCodeBlock)) {
+      if (card && (codeIntentRegex.test(lastUserQuery) || hasCodeBlock || detectedDiff || detectedCode)) {
         if (!card.querySelector('.btn-run-in-agent')) {
           const actionDiv = document.createElement('div');
           actionDiv.className = 'chat-agent-action';
-          const goalTask = lastUserQuery || 'Implement requested code changes';
           actionDiv.innerHTML = `
-            <button class="btn-run-in-agent" title="Execute these exact changes in the Agent tab">
+            <button class="btn-run-in-agent" title="Apply these exact generated changes in the Agent tab">
               <svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>
               <span>Run in Agent</span>
             </button>
@@ -814,12 +874,23 @@
             card.appendChild(actionDiv);
           }
 
+          const capturedDiff = detectedDiff;
+          const capturedCode = detectedCode;
+          const capturedTarget = targetFilename || getPrimaryRepoFile(lastUserQuery || fullText);
+          const capturedGoal = lastUserQuery || 'Apply generated code changes';
+
           actionDiv.querySelector('.btn-run-in-agent').addEventListener('click', () => {
             switchTab('agent');
+            const agentTaskLabel = capturedTarget ? `Apply changes for ${capturedTarget}` : capturedGoal;
             if (agentGoalInput) {
-              agentGoalInput.value = goalTask;
+              agentGoalInput.value = agentTaskLabel;
             }
-            runAgentTask();
+            runAgentTask({
+              pregeneratedDiff: capturedDiff,
+              pregeneratedCode: capturedCode,
+              targetFile: capturedTarget,
+              sourceGoal: capturedGoal
+            });
           });
         }
       }
@@ -846,8 +917,9 @@
   const agentTerminalStatus = document.getElementById('agent-terminal-status');
   const terminalStream = document.getElementById('terminal-stream');
 
-  async function runAgentTask() {
-    const goal = agentGoalInput ? agentGoalInput.value.trim() : '';
+  async function runAgentTask(chatPayload = null) {
+    const rawGoal = agentGoalInput ? agentGoalInput.value.trim() : '';
+    const goal = rawGoal || (chatPayload && chatPayload.targetFile ? `Apply changes for ${chatPayload.targetFile}` : '');
     if (!goal) return;
 
     isAgentRunning = true;
@@ -859,43 +931,68 @@
     }
     if (agentProgressTrack) agentProgressTrack.style.display = 'block';
 
+    const isFromChat = Boolean(chatPayload && (chatPayload.pregeneratedDiff || chatPayload.pregeneratedCode));
     appendTerminalLog(`\n$ copilot-agent --execute "${goal}"`);
     appendTerminalLog(`[agent] Target Model: ${currentModel}`);
 
     // Set up step UI
-    renderInitialSteps(goal);
+    renderInitialSteps(goal, isFromChat);
 
     try {
       // Step 1: Scan AST & Symbols
       if (!isAgentRunning) return;
       updateStepUI(1, 'active');
       setAgentProgress(15, 'Step 1 of 3: Scanning repository AST symbols...');
-      const step1Res = await executeStep(1, goal);
+      const step1Target = (isFromChat && chatPayload.targetFile) ? chatPayload.targetFile : goal;
+      const step1Res = await executeStep(1, step1Target);
       if (!isAgentRunning) return;
-      updateStepUI(1, 'done', step1Res.log);
+      updateStepUI(1, 'done', step1Res.log || 'AST symbols analyzed.');
       appendTerminalLog(`[step 1] ${step1Res.log || 'AST symbols analyzed.'}`);
 
-      // Step 2: Code Synthesis via LLM
+      // Step 2: Code Synthesis / Application
       if (!isAgentRunning) return;
       updateStepUI(2, 'active');
-      setAgentProgress(60, 'Step 2 of 3: Synthesizing code solution via Gemma 4...');
-      appendTerminalLog(`[step 2] Querying ${currentModel} for code changes...`);
-      const step2Res = await executeStep(2, goal);
-      if (!isAgentRunning) return;
-      updateStepUI(2, 'done', 'Solution synthesized cleanly.');
-      appendTerminalLog(`[step 2] ${step2Res.log || 'Code synthesized.'}`);
-      if (step2Res.diff) {
-        stageDiff('solution.py', step2Res.diff);
-        appendTerminalLog(`[diff] Staged surgical diff in Diff Reviewer tab.`);
+
+      if (isFromChat) {
+        const targetFilename = chatPayload.targetFile || getPrimaryRepoFile(goal);
+        setAgentProgress(60, `Step 2 of 3: Applying generated code changes for ${targetFilename}...`);
+        appendTerminalLog(`[step 2] Applying solution generated in chat for ${targetFilename}...`);
+        await new Promise(r => setTimeout(r, 350));
+
+        let diffToApply = chatPayload.pregeneratedDiff;
+        if (!diffToApply && chatPayload.pregeneratedCode) {
+          diffToApply = `--- a/${targetFilename}\n+++ b/${targetFilename}\n@@ -1,1 +1,1 @@\n` +
+            chatPayload.pregeneratedCode.split('\n').map(l => `+${l}`).join('\n');
+        }
+
+        if (diffToApply) {
+          stageDiff(targetFilename, diffToApply);
+          appendTerminalLog(`[diff] Staged surgical diff for ${targetFilename} in Diff Reviewer tab.`);
+        }
+        updateStepUI(2, 'done', `Applied code changes for ${targetFilename}.`);
+        appendTerminalLog(`[step 2] Code changes from chat applied cleanly.`);
+      } else {
+        setAgentProgress(60, 'Step 2 of 3: Synthesizing code solution via Gemma 4...');
+        appendTerminalLog(`[step 2] Querying ${currentModel} for code changes...`);
+        const step2Res = await executeStep(2, goal);
+        if (!isAgentRunning) return;
+        updateStepUI(2, 'done', 'Solution synthesized cleanly.');
+        appendTerminalLog(`[step 2] ${step2Res.log || 'Code synthesized.'}`);
+        if (step2Res.diff) {
+          const targetFilename = step2Res.target_file || extractDiffFilename(step2Res.diff) || getPrimaryRepoFile(goal);
+          stageDiff(targetFilename, step2Res.diff);
+          appendTerminalLog(`[diff] Staged surgical diff for ${targetFilename} in Diff Reviewer tab.`);
+        }
       }
 
       // Step 3: AST Syntax Verification
       if (!isAgentRunning) return;
       updateStepUI(3, 'active');
       setAgentProgress(90, 'Step 3 of 3: Verifying syntax & integrity...');
-      const step3Res = await executeStep(3, goal);
+      const step3Target = (isFromChat && chatPayload.targetFile) ? chatPayload.targetFile : goal;
+      const step3Res = await executeStep(3, step3Target);
       if (!isAgentRunning) return;
-      updateStepUI(3, 'done', step3Res.log);
+      updateStepUI(3, 'done', step3Res.log || 'Syntax and AST verification passed.');
       appendTerminalLog(`[step 3] ${step3Res.log || 'Syntax verified.'}`);
 
       setAgentProgress(100, 'All 3 steps completed (100% complete)');
@@ -938,8 +1035,11 @@
     return await res.json();
   }
 
-  function renderInitialSteps(goal) {
+  function renderInitialSteps(goal, isFromChat = false) {
     if (!agentStepList) return;
+    const step2Title = isFromChat
+      ? '2. Apply generated code changes and stage unified diff'
+      : '2. Synthesize code changes and compute unified diff';
     agentStepList.innerHTML = `
       <div class="step-item step-queued" id="agent-step-1">
         <div class="step-bullet">[-]</div>
@@ -947,7 +1047,7 @@
       </div>
       <div class="step-item step-queued" id="agent-step-2">
         <div class="step-bullet">[-]</div>
-        <div><strong>2. Synthesize code changes and compute unified diff</strong></div>
+        <div><strong>${step2Title}</strong></div>
       </div>
       <div class="step-item step-queued" id="agent-step-3">
         <div class="step-bullet">[-]</div>
@@ -983,7 +1083,7 @@
     if (agentProgressText) agentProgressText.textContent = text;
   }
 
-  if (btnRunAgent) btnRunAgent.addEventListener('click', runAgentTask);
+  if (btnRunAgent) btnRunAgent.addEventListener('click', () => runAgentTask());
   if (btnStopAgent) btnStopAgent.addEventListener('click', () => stopAgentTask(true));
 
   if (agentGoalInput) {
@@ -1153,7 +1253,8 @@
         vscode.postMessage({
           command: 'applyPatch',
           file: stagedDiffData.file,
-          diff: stagedDiffData.diff
+          diff: stagedDiffData.diff,
+          workspacePath: currentRepoPath
         });
       } else {
         try {
@@ -1170,6 +1271,7 @@
           if (res.ok && data.status === 'success') {
             showToast(`Patch applied cleanly to ${data.filename || stagedDiffData.file}`, 'success');
             clearStagedDiff();
+            loadRepoTree(currentRepoPath);
           } else {
             showToast(data.detail || data.message || 'Error applying patch', 'error');
           }
@@ -1213,28 +1315,441 @@
   const repoStatusLabel = document.getElementById('repo-status-label');
   const mermaidCode = document.getElementById('mermaid-code');
 
+  const DEFAULT_REPO_PATH = '/home/ishan/.gemini/antigravity-ide/scratch/codebase-copilot/backend';
+  const btnBrowseRepoPath = document.getElementById('btn-browse-repo-path');
+  const repoFolderPicker = document.getElementById('repo-folder-picker');
+  const repoFileTree = document.getElementById('repo-file-tree');
+  const repoTreeCount = document.getElementById('repo-tree-count');
+  const btnRefreshTree = document.getElementById('btn-refresh-tree');
+  const btnExpandTree = document.getElementById('btn-expand-tree');
+
+  function resetRepoGraphState() {
+    if (mermaidCode) {
+      mermaidCode.textContent = "No SQLite code graph available for this repository.\nClick 'Scan & Index Workspace' to analyze codebase structure.";
+    }
+    if (repoStatusLabel) {
+      repoStatusLabel.textContent = "Ready to scan (Path updated)";
+    }
+  }
+
   if (inputRepoPath) {
     inputRepoPath.value = currentRepoPath;
-    const syncRepoPath = () => {
-      currentRepoPath = inputRepoPath.value.trim();
+    const syncRepoPath = async () => {
+      const val = inputRepoPath.value.trim();
+      if (!val) return;
+      currentRepoPath = val;
+      resetRepoGraphState();
+      if (!isVsCode) {
+        try {
+          const res = await fetch(`${BACKEND_URL}/api/settings`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ repo_path: currentRepoPath })
+          });
+          if (res.ok) {
+            const sData = await res.json();
+            if (sData.repo_path && sData.repo_path !== currentRepoPath) {
+              currentRepoPath = sData.repo_path;
+              inputRepoPath.value = currentRepoPath;
+            }
+          }
+        } catch (e) {}
+      }
       localStorage.setItem('codebase_copilot_repo_path', currentRepoPath);
-      if (!isVsCode && currentRepoPath) {
+    };
+    inputRepoPath.addEventListener('input', syncRepoPath);
+    inputRepoPath.addEventListener('change', async () => {
+      await syncRepoPath();
+      loadRepoTree(currentRepoPath);
+    });
+  }
+
+  // Reset button fix: restores default path, updates storage & backend, and refreshes file tree
+  if (btnResetRepoPath) {
+    btnResetRepoPath.addEventListener('click', () => {
+      currentRepoPath = DEFAULT_REPO_PATH;
+      if (inputRepoPath) inputRepoPath.value = currentRepoPath;
+      localStorage.setItem('codebase_copilot_repo_path', currentRepoPath);
+      resetRepoGraphState();
+      if (isVsCode) {
+        vscode.postMessage({ command: 'resetRepoPath' });
+      } else {
         fetch(`${BACKEND_URL}/api/settings`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ repo_path: currentRepoPath })
         }).catch(() => {});
       }
-    };
-    inputRepoPath.addEventListener('input', syncRepoPath);
-    inputRepoPath.addEventListener('change', syncRepoPath);
+      showToast('Repository path reset to default', 'success');
+      loadRepoTree(currentRepoPath);
+    });
   }
 
-  if (btnResetRepoPath) {
-    btnResetRepoPath.addEventListener('click', () => {
-      currentRepoPath = '/home/ishan/.gemini/antigravity-ide/scratch/codebase-copilot/backend';
-      if (inputRepoPath) inputRepoPath.value = currentRepoPath;
-      localStorage.setItem('codebase_copilot_repo_path', currentRepoPath);
+  // Browse button: explorer folder selection in VS Code or browser directory picker
+  if (btnBrowseRepoPath) {
+    btnBrowseRepoPath.addEventListener('click', async () => {
+      if (isVsCode) {
+        vscode.postMessage({ command: 'browseRepoFolder' });
+      } else {
+        if (window.showDirectoryPicker) {
+          try {
+            const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
+            const folderName = dirHandle.name;
+            const tree = await readDirectoryHandle(dirHandle);
+            inputRepoPath.value = folderName;
+            currentRepoPath = folderName;
+            resetRepoGraphState();
+            showToast(`Selected repository: ${folderName}`, 'success');
+            renderRepoTree(tree);
+
+            try {
+              const res = await fetch(`${BACKEND_URL}/api/settings`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ repo_path: currentRepoPath })
+              });
+              if (res.ok) {
+                const sData = await res.json();
+                if (sData.repo_path) {
+                  currentRepoPath = sData.repo_path;
+                  inputRepoPath.value = currentRepoPath;
+                  localStorage.setItem('codebase_copilot_repo_path', currentRepoPath);
+                  loadRepoTree(currentRepoPath);
+                }
+              }
+            } catch (err) {}
+            return;
+          } catch (err) {
+            if (err && err.name === 'AbortError') return;
+          }
+        }
+        if (repoFolderPicker) {
+          repoFolderPicker.click();
+        }
+      }
+    });
+  }
+
+  if (repoFolderPicker) {
+    repoFolderPicker.addEventListener('change', async (e) => {
+      const files = Array.from(e.target.files || []);
+      if (files.length === 0) return;
+      const firstRel = files[0].webkitRelativePath || '';
+      const rootName = firstRel.split('/')[0] || 'Selected Folder';
+      inputRepoPath.value = rootName;
+      currentRepoPath = rootName;
+      resetRepoGraphState();
+      showToast(`Selected repository: ${rootName} (${files.length} files)`, 'success');
+      const tree = buildTreeFromFiles(files);
+      renderRepoTree(tree);
+
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/settings`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repo_path: currentRepoPath })
+        });
+        if (res.ok) {
+          const sData = await res.json();
+          if (sData.repo_path) {
+            currentRepoPath = sData.repo_path;
+            inputRepoPath.value = currentRepoPath;
+            localStorage.setItem('codebase_copilot_repo_path', currentRepoPath);
+            loadRepoTree(currentRepoPath);
+          }
+        }
+      } catch (err) {}
+    });
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes) return '0 B';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1048576).toFixed(1) + ' MB';
+  }
+
+  async function readDirectoryHandle(dirHandle, relativePath = '') {
+    const EXCLUDED_DIRS = new Set([
+      '__pycache__', '.git', '.github', '.vscode', '.idea', '.gemini',
+      'venv', '.venv', 'env', 'node_modules', 'dist', 'build',
+      '.pytest_cache', '.mypy_cache', '.ruff_cache', '.coverage', 'htmlcov'
+    ]);
+    const EXCLUDED_FILES = new Set(['.DS_Store', 'Thumbs.db', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock']);
+    const EXCLUDED_EXTS = new Set(['pyc', 'pyo', 'pyd', 'log', 'tmp', 'swp', 'bak']);
+
+    const entries = [];
+    for await (const [name, handle] of dirHandle.entries()) {
+      if (name.startsWith('.') && name !== '.gitignore') continue;
+      const itemPath = relativePath ? `${relativePath}/${name}` : name;
+      if (handle.kind === 'directory') {
+        if (EXCLUDED_DIRS.has(name)) continue;
+        const children = await readDirectoryHandle(handle, itemPath);
+        if (children.length > 0) {
+          entries.push({
+            name,
+            type: 'directory',
+            path: itemPath,
+            children
+          });
+        }
+      } else if (handle.kind === 'file') {
+        const ext = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+        if (EXCLUDED_FILES.has(name) || EXCLUDED_EXTS.has(ext)) continue;
+        try {
+          const fileObj = await handle.getFile();
+          entries.push({
+            name,
+            type: 'file',
+            path: itemPath,
+            ext,
+            size: formatBytes(fileObj.size),
+            bytes: fileObj.size,
+            lines: 0
+          });
+        } catch {
+          entries.push({ name, type: 'file', path: itemPath, ext, size: '0 B', bytes: 0, lines: 0 });
+        }
+      }
+    }
+    entries.sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    return entries;
+  }
+
+  function buildTreeFromFiles(files) {
+    const EXCLUDED_DIRS = new Set([
+      '__pycache__', '.git', '.github', '.vscode', '.idea', '.gemini',
+      'venv', '.venv', 'env', 'node_modules', 'dist', 'build',
+      '.pytest_cache', '.mypy_cache', '.ruff_cache', '.coverage', 'htmlcov'
+    ]);
+    const EXCLUDED_FILES = new Set(['.DS_Store', 'Thumbs.db', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock']);
+    const EXCLUDED_EXTS = new Set(['pyc', 'pyo', 'pyd', 'log', 'tmp', 'swp', 'bak']);
+
+    const rootMap = {};
+    for (const file of files) {
+      const parts = (file.webkitRelativePath || file.name).split('/');
+      const subParts = parts.length > 1 ? parts.slice(1) : parts;
+      if (subParts.some(p => EXCLUDED_DIRS.has(p) || (p.startsWith('.') && p !== '.gitignore'))) continue;
+      const fileName = subParts[subParts.length - 1];
+      const ext = fileName.includes('.') ? fileName.split('.').pop().toLowerCase() : '';
+      if (EXCLUDED_FILES.has(fileName) || EXCLUDED_EXTS.has(ext)) continue;
+
+      let current = rootMap;
+      for (let i = 0; i < subParts.length - 1; i++) {
+        const dir = subParts[i];
+        if (!current[dir]) {
+          current[dir] = { __type: 'directory', __children: {} };
+        }
+        current = current[dir].__children;
+      }
+      current[fileName] = {
+        __type: 'file',
+        name: fileName,
+        path: subParts.join('/'),
+        ext,
+        size: formatBytes(file.size),
+        bytes: file.size,
+        lines: 0
+      };
+    }
+
+    function mapToTree(mapObj, parentPath = '') {
+      const result = [];
+      for (const key of Object.keys(mapObj).sort()) {
+        const item = mapObj[key];
+        const itemPath = parentPath ? `${parentPath}/${key}` : key;
+        if (item.__type === 'directory') {
+          const children = mapToTree(item.__children, itemPath);
+          if (children.length > 0) {
+            result.push({
+              name: key,
+              type: 'directory',
+              path: itemPath,
+              children
+            });
+          }
+        } else {
+          result.push(item);
+        }
+      }
+      result.sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+      return result;
+    }
+
+    return mapToTree(rootMap);
+  }
+
+  // File tree loader & hierarchical pixelated renderer
+  async function loadRepoTree(targetPath) {
+    const path = targetPath || (inputRepoPath ? inputRepoPath.value.trim() : currentRepoPath);
+    if (repoTreeCount) repoTreeCount.textContent = 'Loading...';
+    if (isVsCode) {
+      vscode.postMessage({ command: 'getRepoTree', path });
+    } else {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/repo/tree?path=${encodeURIComponent(path || '')}`);
+        if (res.ok) {
+          const data = await res.json();
+          renderRepoTree(data.tree, data.stats);
+        } else {
+          renderTreeError(`Server response (${res.status})`);
+        }
+      } catch (err) {
+        renderTreeError(`Backend unavailable: ${err.message}`);
+      }
+    }
+  }
+
+  function renderRepoTree(treeNodes, stats) {
+    if (!repoFileTree) return;
+    if (!treeNodes || treeNodes.length === 0) {
+      repoFileTree.innerHTML = '<div class="tree-empty-state"><span class="pixel-glyph">»</span> No files found in directory.</div>';
+      if (repoTreeCount) repoTreeCount.textContent = '0 Files';
+      return;
+    }
+
+    currentRepoFilesList = [];
+    let fileCount = 0;
+    function countFiles(nodes) {
+      if (!nodes) return;
+      nodes.forEach(n => {
+        if (n.type === 'directory') {
+          countFiles(n.children || []);
+        } else {
+          fileCount++;
+          currentRepoFilesList.push(n);
+        }
+      });
+    }
+    countFiles(treeNodes);
+
+    if (repoTreeCount) {
+      repoTreeCount.textContent = stats ? `${stats.total_files} Files` : `${fileCount} Files`;
+    }
+
+    function getTagBadge(ext) {
+      const cleanExt = (ext || '').toLowerCase();
+      switch (cleanExt) {
+        case 'py': return '<span class="pixel-tag tag-py">[PY]</span>';
+        case 'ts': return '<span class="pixel-tag tag-ts">[TS]</span>';
+        case 'js': return '<span class="pixel-tag tag-js">[JS]</span>';
+        case 'json': return '<span class="pixel-tag tag-json">[JSON]</span>';
+        case 'html': return '<span class="pixel-tag tag-html">[HTML]</span>';
+        case 'css': return '<span class="pixel-tag tag-css">[CSS]</span>';
+        case 'md': return '<span class="pixel-tag tag-md">[DOC]</span>';
+        case 'sh': return '<span class="pixel-tag tag-sh">[SH]</span>';
+        case 'sql': return '<span class="pixel-tag tag-sql">[SQL]</span>';
+        case 'yaml':
+        case 'yml':
+        case 'toml': return '<span class="pixel-tag tag-cfg">[CFG]</span>';
+        default: return `<span class="pixel-tag tag-file">[${cleanExt.slice(0, 4).toUpperCase() || 'FILE'}]</span>`;
+      }
+    }
+
+    function buildNodeHtml(node, depth = 0) {
+      const indent = depth * 14;
+      if (node.type === 'directory') {
+        const childrenHtml = (node.children || []).map(c => buildNodeHtml(c, depth + 1)).join('');
+        const childCount = (node.children || []).length;
+        return `
+          <div class="tree-dir-group" data-expanded="true">
+            <div class="tree-node tree-folder" style="padding-left: ${indent + 6}px;" title="Click to collapse/expand">
+              <span class="tree-toggle-icon">[-]</span>
+              <span class="tree-folder-name">${escapeHtml(node.name)}</span>
+              <span class="tree-item-count">(${childCount})</span>
+            </div>
+            <div class="tree-children">
+              ${childrenHtml}
+            </div>
+          </div>
+        `;
+      } else {
+        const badge = getTagBadge(node.ext);
+        const linesStr = node.lines ? `${node.lines}L` : '';
+        const sizeStr = node.size || '';
+        const metaStr = [linesStr, sizeStr].filter(Boolean).join(' • ');
+        return `
+          <div class="tree-node tree-file" style="padding-left: ${indent + 22}px;" data-file-path="${escapeHtml(node.path)}" title="${escapeHtml(node.path)} (Click to copy path)">
+            ${badge}
+            <span class="tree-file-name">${escapeHtml(node.name)}</span>
+            ${metaStr ? `<span class="tree-file-meta">${metaStr}</span>` : ''}
+          </div>
+        `;
+      }
+    }
+
+    repoFileTree.innerHTML = treeNodes.map(n => buildNodeHtml(n, 0)).join('');
+
+    // Attach folder collapse/expand listeners
+    repoFileTree.querySelectorAll('.tree-folder').forEach(folder => {
+      folder.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const group = folder.closest('.tree-dir-group');
+        if (!group) return;
+        const isExpanded = group.getAttribute('data-expanded') === 'true';
+        group.setAttribute('data-expanded', isExpanded ? 'false' : 'true');
+        const icon = folder.querySelector('.tree-toggle-icon');
+        if (icon) icon.textContent = isExpanded ? '[+]' : '[-]';
+        const children = group.querySelector('.tree-children');
+        if (children) children.style.display = isExpanded ? 'none' : 'block';
+      });
+    });
+
+    // Attach click to copy path on files
+    repoFileTree.querySelectorAll('.tree-file').forEach(fileItem => {
+      fileItem.addEventListener('click', () => {
+        const path = fileItem.getAttribute('data-file-path');
+        if (path) {
+          navigator.clipboard.writeText(path).then(() => {
+            showToast(`Copied: ${path}`, 'success');
+          }).catch(() => {
+            showToast(`Path: ${path}`, 'info');
+          });
+        }
+      });
+    });
+  }
+
+  function renderTreeError(errText) {
+    if (!repoFileTree) return;
+    repoFileTree.innerHTML = `
+      <div class="tree-empty-state" style="color: var(--primary-terracotta);">
+        <span class="pixel-glyph">!</span> ${escapeHtml(errText)}
+        <div style="margin-top: 8px;">
+          <button class="pixel-mini-btn" id="btn-tree-retry">Try Again</button>
+        </div>
+      </div>
+    `;
+    const retryBtn = document.getElementById('btn-tree-retry');
+    if (retryBtn) {
+      retryBtn.addEventListener('click', () => loadRepoTree());
+    }
+  }
+
+  if (btnRefreshTree) {
+    btnRefreshTree.addEventListener('click', () => {
+      loadRepoTree();
+      showToast('Refreshing repository files tree...', 'info');
+    });
+  }
+
+  let allExpanded = true;
+  if (btnExpandTree) {
+    btnExpandTree.addEventListener('click', () => {
+      allExpanded = !allExpanded;
+      repoFileTree.querySelectorAll('.tree-dir-group').forEach(group => {
+        group.setAttribute('data-expanded', allExpanded ? 'true' : 'false');
+        const icon = group.querySelector('.tree-toggle-icon');
+        if (icon) icon.textContent = allExpanded ? '[-]' : '[+]';
+        const children = group.querySelector('.tree-children');
+        if (children) children.style.display = allExpanded ? 'block' : 'none';
+      });
     });
   }
 
@@ -1252,11 +1767,11 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ workspace_path: path })
         });
-        const graphRes = await fetch(`${BACKEND_URL}/api/graph/mermaid`);
+        const graphRes = await fetch(`${BACKEND_URL}/api/graph/mermaid?path=${encodeURIComponent(path)}`);
 
         if (scanRes.ok) {
           const scanData = await scanRes.json();
-          const graphData = graphRes.ok ? await graphRes.json() : { mermaid: '' };
+          const graphData = graphRes.ok ? await graphRes.json() : { mermaid: '', available: false };
           applyScanResults(scanData, graphData.mermaid);
         }
       } catch (err) {
@@ -1274,8 +1789,12 @@
     if (repoStatusLabel) {
       repoStatusLabel.textContent = 'Indexed & Synced (SQLite Graph Active)';
     }
-    if (mermaidCode && mermaid) {
-      mermaidCode.textContent = mermaid;
+    if (mermaidCode) {
+      if (mermaid && mermaid.trim() && mermaid.trim() !== 'graph TD') {
+        mermaidCode.textContent = mermaid;
+      } else {
+        mermaidCode.textContent = "No SQLite code graph available for this repository.\nClick 'Scan & Index Workspace' to analyze codebase structure.";
+      }
     }
   }
 
@@ -1303,15 +1822,54 @@
 
       case 'streamComplete':
         onStreamFinished(accumulatedRawText, msg.citations);
-        if (msg.diff) stageDiff('patch.diff', msg.diff);
+        if (msg.diff) {
+          const targetFilename = extractDiffFilename(msg.diff) || getPrimaryRepoFile();
+          stageDiff(targetFilename, msg.diff);
+        }
+        break;
+
+      case 'patchApplied':
+        showToast(`Patch applied cleanly to ${msg.file}`, 'success');
+        clearStagedDiff();
+        loadRepoTree(currentRepoPath);
         break;
 
       case 'scanResult':
         applyScanResults(msg.status, msg.mermaid);
+        loadRepoTree();
         break;
 
       case 'renderMermaid':
-        if (mermaidCode) mermaidCode.textContent = msg.mermaid;
+        if (mermaidCode) {
+          if (msg.mermaid && msg.mermaid.trim() && msg.mermaid.trim() !== 'graph TD') {
+            mermaidCode.textContent = msg.mermaid;
+          } else {
+            mermaidCode.textContent = "No SQLite code graph available for this repository.\nClick 'Scan & Index Workspace' to analyze codebase structure.";
+          }
+        }
+        break;
+
+      case 'repoPathSelected':
+        if (msg.path) {
+          currentRepoPath = msg.path;
+          if (inputRepoPath) inputRepoPath.value = currentRepoPath;
+          localStorage.setItem('codebase_copilot_repo_path', currentRepoPath);
+          resetRepoGraphState();
+          showToast(`Repository path set to ${currentRepoPath}`, 'success');
+          if (msg.tree) {
+            renderRepoTree(msg.tree, msg.stats);
+          } else {
+            loadRepoTree(currentRepoPath);
+          }
+        }
+        break;
+
+      case 'repoTreeResult':
+        if (msg.tree) {
+          renderRepoTree(msg.tree, msg.stats);
+        } else if (msg.error) {
+          renderTreeError(msg.error);
+        }
         break;
     }
   });
@@ -1336,9 +1894,24 @@
     if (!text) return '';
     let out = escapeHtml(text);
 
-    // Code blocks
-    out = out.replace(/```([a-z]*)\n([\s\S]*?)```/g, function (_, lang, code) {
-      return `<pre style="background:var(--surface-subtle); padding:8px; border-radius:8px; font-family:var(--font-mono); font-size:11px; margin:6px 0; overflow-x:auto;"><code>${code}</code></pre>`;
+    // Code blocks with language label and dynamic copy button
+    const codeBlocks = [];
+    out = out.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, function (_, lang, code) {
+      const displayLang = lang ? lang.toLowerCase() : 'code';
+      const index = codeBlocks.length;
+      codeBlocks.push(
+        `<div class="code-block-wrapper">` +
+          `<div class="code-block-header">` +
+            `<span class="code-block-lang">${displayLang}</span>` +
+            `<button class="btn-copy-code" type="button" title="Copy code">` +
+              `<svg class="icon-code-copy" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>` +
+              `<span class="btn-copy-code-text">Copy</span>` +
+            `</button>` +
+          `</div>` +
+          `<pre class="code-block-pre"><code>${code}</code></pre>` +
+        `</div>`
+      );
+      return `__CODE_BLOCK_${index}__`;
     });
 
     // Inline code
@@ -1350,11 +1923,56 @@
     // Italics
     out = out.replace(/\*([^*]+)\*/g, '<em>$1</em>');
 
-    // Line breaks
+    // Line breaks outside code blocks
     out = out.replace(/\n/g, '<br/>');
+
+    // Restore code blocks
+    codeBlocks.forEach((blockHtml, i) => {
+      out = out.replace(`__CODE_BLOCK_${i}__`, blockHtml);
+    });
 
     return out;
   }
+
+  // Delegated dynamic copy button listener for code blocks
+  document.addEventListener('click', (e) => {
+    const copyBtn = e.target.closest('.btn-copy-code');
+    if (!copyBtn) return;
+    e.stopPropagation();
+
+    const wrapper = copyBtn.closest('.code-block-wrapper');
+    if (!wrapper) return;
+    const codeEl = wrapper.querySelector('code');
+    if (!codeEl) return;
+
+    const textToCopy = codeEl.innerText || codeEl.textContent || '';
+    const textSpan = copyBtn.querySelector('.btn-copy-code-text');
+    const svgEl = copyBtn.querySelector('svg');
+
+    copyBtn.classList.add('copied');
+    if (textSpan) textSpan.textContent = 'Copied!';
+    if (svgEl) {
+      svgEl.innerHTML = '<polyline points="20 6 9 17 4 12"></polyline>';
+    }
+
+    const resetBtn = () => {
+      setTimeout(() => {
+        copyBtn.classList.remove('copied');
+        if (textSpan) textSpan.textContent = 'Copy';
+        if (svgEl) {
+          svgEl.innerHTML = '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>';
+        }
+      }, 2000);
+    };
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(textToCopy).then(resetBtn).catch(() => {
+        fallbackCopyText(textToCopy, resetBtn);
+      });
+    } else {
+      fallbackCopyText(textToCopy, resetBtn);
+    }
+  });
 
   function escapeHtml(str) {
     if (!str) return '';
@@ -1405,5 +2023,10 @@
       applyTheme('dark');
     }
   } catch (e) {}
+
+  // Initial tree load
+  setTimeout(() => {
+    loadRepoTree();
+  }, 100);
 })();
 

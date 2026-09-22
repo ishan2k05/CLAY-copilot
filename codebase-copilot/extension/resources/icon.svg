@@ -1,6 +1,27 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
-  <rect width="24" height="24" rx="6" fill="#CC6B49"/>
-  <circle cx="8" cy="12" r="2.5" fill="#F5F2EB"/>
-  <circle cx="16" cy="12" r="2.5" fill="#F5F2EB"/>
-  <path d="M7 16 C 9 18, 15 18, 17 16" stroke="#F5F2EB" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%" shape-rendering="crispEdges">
+  <!-- Background with subtle corner radius for app icon -->
+  <rect width="512" height="512" rx="96" fill="#FAF6F0"/>
+
+  <!-- Pixelated Terminal '>_' Mark (Grid: 16x16 coordinate space scaled up to 384x384, centered) -->
+  <!-- Scaled 24x at translate(64, 148) -->
+  <g transform="translate(64, 148) scale(24)">
+    <!-- Terminal Chevron '>' in Claude Terracotta (#C15C3D) -->
+    <!-- Top step -->
+    <rect x="1" y="1" width="2" height="1" fill="#C15C3D"/>
+    <!-- Diagonal down-right steps -->
+    <rect x="2" y="2" width="2" height="1" fill="#C15C3D"/>
+    <rect x="3" y="3" width="2" height="1" fill="#C15C3D"/>
+    <rect x="4" y="4" width="2" height="1" fill="#C15C3D"/>
+    <!-- Vertex tip -->
+    <rect x="5" y="5" width="2" height="1" fill="#C15C3D"/>
+    <!-- Diagonal down-left steps -->
+    <rect x="4" y="6" width="2" height="1" fill="#C15C3D"/>
+    <rect x="3" y="7" width="2" height="1" fill="#C15C3D"/>
+    <rect x="2" y="8" width="2" height="1" fill="#C15C3D"/>
+    <!-- Bottom step -->
+    <rect x="1" y="9" width="2" height="1" fill="#C15C3D"/>
+
+    <!-- Terminal Underscore Cursor '_' in Claude Terracotta (#C15C3D) -->
+    <rect x="8" y="8" width="6" height="2" fill="#C15C3D"/>
+  </g>
 </svg>
