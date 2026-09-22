@@ -1,0 +1,117 @@
+# ==============================================================================
+# GitIgnore for Codebase Copilot (Python Backend + VS Code Extension)
+# ==============================================================================
+
+# --- Python & Virtual Environments ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.tox/
+.nox/
+
+# Type checking & Linters
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Local databases & runtime storage
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-journal
+*.db-journal
+chroma_db/
+.chroma/
+
+# --- Node.js & VS Code Extension ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# Extension build & compilation output
+out/
+dist/
+*.vsix
+.vscode-test/
+
+# --- Environment & Secret Management ---
+# Prevent committing credentials and secrets
+.env
+.env.*
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+# Track example configuration templates if present
+!.env.example
+!.env.template
+
+# --- IDEs & Editors ---
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# --- OS Artifacts & System Files ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# --- Temporary & Scratch Files ---
+scratch/
+tmp/
+temp/
+*.log
