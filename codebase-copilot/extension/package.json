@@ -1,0 +1,87 @@
+{
+  "name": "codebase-copilot",
+  "displayName": "Codebase Copilot",
+  "description": "Repository Intelligence & Autonomous Coding Agent powered by Cloud Gemma 4 (31B)",
+  "version": "0.1.0",
+  "publisher": "codebase-copilot",
+  "engines": {
+    "vscode": "^1.88.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Machine Learning",
+    "Testing"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onView:codebaseCopilot.sidebarView"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codebase-copilot",
+          "title": "Codebase Copilot",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "codebase-copilot": [
+        {
+          "type": "webview",
+          "id": "codebaseCopilot.sidebarView",
+          "name": "Copilot"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "codebaseCopilot.ask",
+        "title": "Codebase Copilot: Ask Question"
+      },
+      {
+        "command": "codebaseCopilot.analyzeRepo",
+        "title": "Codebase Copilot: Analyze Repository"
+      },
+      {
+        "command": "codebaseCopilot.explainSelection",
+        "title": "Codebase Copilot: Explain Selected Code"
+      },
+      {
+        "command": "codebaseCopilot.checkOllama",
+        "title": "Codebase Copilot: Check Ollama Connection"
+      },
+      {
+        "command": "codebaseCopilot.fixCurrentError",
+        "title": "Codebase Copilot: Fix Current Error"
+      }
+    ],
+    "configuration": {
+      "title": "Codebase Copilot",
+      "properties": {
+        "codebaseCopilot.backendUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8765",
+          "description": "URL of the local Codebase Copilot Python FastAPI backend"
+        },
+        "codebaseCopilot.privacyFilter": {
+          "type": "boolean",
+          "default": true,
+          "description": "Scrub secrets, keys, and .env contents before cloud transmission"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.x",
+    "@types/vscode": "^1.88.0",
+    "typescript": "^5.4.5"
+  }
+}
