@@ -104,6 +104,41 @@ export async function activate(context: vscode.ExtensionContext) {
             await vscode.commands.executeCommand('codebaseCopilot.sidebarView.focus');
         })
     );
+
+    // 7. Real-Time Document Synchronization & Hot Reload
+    let docChangeTimeout: NodeJS.Timeout | null = null;
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeTextDocument((e) => {
+            if (e.document.uri.scheme !== 'file') return;
+            const fileName = e.document.fileName;
+            if (fileName.includes('node_modules') || fileName.includes('.git')) return;
+
+            if (docChangeTimeout) clearTimeout(docChangeTimeout);
+            docChangeTimeout = setTimeout(() => {
+                backendClient.syncFile(fileName, e.document.getText(), 'changed');
+            }, 350);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.workspace.onDidSaveTextDocument((doc) => {
+            if (doc.uri.scheme !== 'file') return;
+            if (doc.fileName.includes('node_modules') || doc.fileName.includes('.git')) return;
+            backendClient.syncFile(doc.fileName, doc.getText(), 'saved');
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.workspace.onDidCreateFiles((e) => {
+            for (const fileUri of e.files) {
+                if (fileUri.scheme === 'file') {
+                    vscode.workspace.openTextDocument(fileUri).then((doc) => {
+                        backendClient.syncFile(doc.fileName, doc.getText(), 'created');
+                    });
+                }
+            }
+        })
+    );
 }
 
 export function deactivate() {

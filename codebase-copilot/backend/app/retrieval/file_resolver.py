@@ -38,7 +38,7 @@ class WorkspaceFileResolver:
             home / p_str,
             home / "Documents" / p_str,
             home / "Downloads" / p_str,
-            Path("/home/ishan/.gemini/antigravity-ide/scratch") / p_str,
+            Path.cwd().parent / p_str,
             Path.cwd() / p_str,
         ]:
             if cand.exists() and cand.is_dir():
@@ -112,20 +112,27 @@ class WorkspaceFileResolver:
         query: str,
         workspace_root: str,
         security_mode: str = "sandboxed",
-        max_chars_per_file: int = 1200
+        max_chars_per_file: int = 50000,
+        context_file: Optional[str] = None,
+        context_file_content: Optional[str] = None,
+        live_buffers: Optional[Dict[str, str]] = None
     ) -> List[CodeChunk]:
         """
         Identifies if user query references any workspace files or package directories (exact, substring, or typo/fuzzy).
-        Reads matched files or module entrypoints directly from disk and wraps them in CodeChunks.
+        Reads matched files or module entrypoints directly, prioritizing in-memory live buffers from active editor/agent.
         """
+        import re
         file_map = cls.list_accessible_files(workspace_root)
         dir_map = cls.list_accessible_dirs(workspace_root)
-        if not file_map and not dir_map:
+        if not file_map and not dir_map and not context_file:
             return []
 
         clean_query = query.lower()
+        # Normalize spaces around file extension dots (e.g. "test .py" or "test. py" -> "test.py")
+        normalized_query = re.sub(r'(\w+)\s*\.\s*([a-zA-Z0-9]+)', r'\1.\2', clean_query)
+
         # Extract potential word tokens
-        tokens = [w.strip(".,;:?!'\"()[]{}<>`") for w in clean_query.split()]
+        tokens = [w.strip(".,;:?!'\"()[]{}<>`") for w in normalized_query.split()]
         tokens = [t for t in tokens if len(t) >= 3]
 
         matched_paths: Dict[str, Path] = {}
@@ -140,14 +147,14 @@ class WorkspaceFileResolver:
             name_lower = p.name.lower()
             stem_lower = p.stem.lower()
 
-            if name_lower in clean_query or rel_lower in clean_query:
+            if name_lower in normalized_query or rel_lower in normalized_query:
                 matched_paths[str(p.resolve())] = p
             elif len(stem_lower) > 3 and stem_lower in tokens:
                 matched_paths[str(p.resolve())] = p
 
         # 2. Match directory/package names (e.g. query mentions 'app.py' or 'app' when directory 'app' exists)
         for d_name, d_path in dir_map.items():
-            if d_name in clean_query:
+            if d_name in normalized_query:
                 matched_dirs[str(d_path.resolve())] = d_path
             for t in tokens:
                 t_stem = t.split(".")[0]
@@ -173,7 +180,21 @@ class WorkspaceFileResolver:
                     p = stem_to_path[target_stem]
                     matched_paths[str(p.resolve())] = p
 
-        # 4. Read matched files within security mode constraints
+        # 4. If query refers to active/open editor file ("this file", "the file", "all contents", "recheck"), resolve context_file
+        if context_file:
+            cp = Path(context_file).resolve()
+            is_valid_context = cp.exists() or bool(context_file_content) or (live_buffers and str(cp) in live_buffers)
+            if is_valid_context:
+                ref_indicators = [
+                    "the file", "this file", "current file", "entire file",
+                    "whole file", "all content", "all contents", "all the code",
+                    "from the file", "open file", "active file", "what is in", "how many lines",
+                    "recheck", "refresh", "sync", "code", "lines"
+                ]
+                if any(ind in normalized_query for ind in ref_indicators) or not matched_paths:
+                    matched_paths[str(cp)] = cp
+
+        # 5. Read matched files directly (prioritizing live in-memory buffer over disk)
         chunks: List[CodeChunk] = []
         root_path = cls._resolve_root(workspace_root)
 
@@ -188,29 +209,73 @@ class WorkspaceFileResolver:
                 continue
 
             try:
-                content = p.read_text(encoding="utf-8", errors="ignore")
-                lines = content.splitlines()
-                if len(lines) > 35:
-                    body = "\n".join(lines[:35]) + "\n... [truncated]"
-                else:
-                    body = "\n".join(lines)
+                # Hot-reload priority: 1) direct context_file_content, 2) live_buffers, 3) disk read
+                content = None
+                p_resolved_str = str(p.resolve())
+                if context_file and str(Path(context_file).resolve()) == p_resolved_str and context_file_content is not None:
+                    content = context_file_content
+                elif live_buffers:
+                    for k, v in live_buffers.items():
+                        try:
+                            if Path(k).resolve() == p.resolve() or k == p.name:
+                                content = v
+                                break
+                        except Exception:
+                            if k == str(p) or k == p.name:
+                                content = v
+                                break
 
-                if len(body) > max_chars_per_file:
-                    body = body[:max_chars_per_file] + "... [truncated]"
+                if content is None:
+                    if p.exists() and p.is_file():
+                        content = p.read_text(encoding="utf-8", errors="ignore")
+                    else:
+                        content = ""
+
+                lines = content.splitlines()
+                total_lines = len(lines)
 
                 try:
                     rel_name = str(p.resolve().relative_to(root_path))
                 except Exception:
                     rel_name = p.name
 
+                # Explicit empty file handling to eliminate hallucination
+                if not content.strip() or total_lines == 0:
+                    empty_body = (
+                        f"[File: {rel_name} - 0 lines, 0 bytes (EMPTY FILE)]\n"
+                        f"[Status: This file exists on disk and is completely EMPTY. It contains 0 lines of code.]"
+                    )
+                    chunks.append(CodeChunk(
+                        chunk_id=f"{p}#direct_file",
+                        file_path=str(p),
+                        symbol_type="empty_file",
+                        symbol_name=rel_name,
+                        start_line=0,
+                        end_line=0,
+                        content=empty_body
+                    ))
+                    continue
+
+                # Include all lines of code without arbitrary truncation
+                if total_lines > 1500:
+                    body = "\n".join(lines[:1500]) + f"\n... [truncated at line 1500 of {total_lines}]"
+                    end_line = 1500
+                else:
+                    body = content
+                    end_line = total_lines
+
+                if len(body) > max_chars_per_file:
+                    body = body[:max_chars_per_file] + f"\n... [truncated at {max_chars_per_file} characters]"
+
+                file_header = f"[File: {rel_name} ({total_lines} lines total)]\n"
                 chunks.append(CodeChunk(
                     chunk_id=f"{p}#direct_file",
                     file_path=str(p),
                     symbol_type="file",
                     symbol_name=rel_name,
                     start_line=1,
-                    end_line=min(35, max(1, len(lines))),
-                    content=body
+                    end_line=end_line,
+                    content=file_header + body
                 ))
             except Exception:
                 continue

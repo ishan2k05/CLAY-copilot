@@ -84,18 +84,17 @@ class TestRAGAndSettings(unittest.TestCase):
         self.assertIn("num_ctx", data)
         self.assertIn("num_predict", data)
         self.assertIn("security_mode", data)
-        self.assertIn("auto_execution", data)
         self.assertIn("allow_network", data)
         self.assertIn("connection_type", data)
+        self.assertNotIn("auto_execution", data)
+        self.assertNotIn("queued_mode", data)
 
         payload = {
             "temperature": 0.35,
             "num_ctx": 65536,
             "num_predict": 4096,
             "security_mode": "strict",
-            "auto_execution": "safe",
             "allow_network": False,
-            "queued_mode": "immediate",
             "connection_type": "cloud",
             "api_key": "sk_ollama_secret_key_123"
         }
@@ -106,12 +105,12 @@ class TestRAGAndSettings(unittest.TestCase):
         self.assertEqual(updated["num_ctx"], 65536)
         self.assertEqual(updated["num_predict"], 4096)
         self.assertEqual(updated["security_mode"], "strict")
-        self.assertEqual(updated["auto_execution"], "safe")
         self.assertFalse(updated["allow_network"])
-        self.assertEqual(updated["queued_mode"], "immediate")
         self.assertEqual(updated["connection_type"], "cloud")
         self.assertEqual(updated["api_key"], "sk_ollama_secret_key_123")
         self.assertEqual(updated["host"], "https://ollama.com/api")
+        self.assertNotIn("auto_execution", updated)
+        self.assertNotIn("queued_mode", updated)
 
         # Reset back
         self.client.post("/api/settings", json={
@@ -119,12 +118,10 @@ class TestRAGAndSettings(unittest.TestCase):
             "num_ctx": 32768,
             "num_predict": 2048,
             "security_mode": "sandboxed",
-            "auto_execution": "always",
             "connection_type": "local",
             "api_key": "",
             "host": "http://localhost:11434",
-            "allow_network": True,
-            "queued_mode": "queue"
+            "allow_network": True
         })
 
     def test_workspace_file_resolver_fuzzy_match_typo(self):

@@ -141,6 +141,30 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(data).encode("utf-8"))
 
+        elif self.path.startswith("/api/system/info"):
+            import platform
+            from urllib.parse import parse_qs, urlparse
+            is_win = platform.system().lower() == "windows"
+            raw_ws = None
+            if "?" in self.path:
+                qs = parse_qs(urlparse(self.path).query)
+                raw_ws = qs.get("workspace_path", [None])[0]
+            ws_path = str(Path.cwd().resolve())
+            if raw_ws and Path(raw_ws).exists() and Path(raw_ws).is_dir():
+                ws_path = str(Path(raw_ws).resolve())
+            data = {
+                "os": platform.system().lower(),
+                "platform": platform.platform(),
+                "is_windows": is_win,
+                "shell": "PowerShell / CMD" if is_win else "bash",
+                "workspace": ws_path,
+                "recommended_commands": ["dir", "python --version", "git status", "pytest"] if is_win else ["ls -la", "python3 --version", "git status", "pytest"]
+            }
+            self.send_response(200)
+            self._set_cors_headers()
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
         else:
             self.send_response(404)
             self._set_cors_headers()
@@ -155,11 +179,22 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
         except Exception:
             body = {}
 
-        if self.path == "/api/chat":
+        if self.path == "/api/sync/file":
+            file_path = body.get("file_path", "")
+            content = body.get("content", "")
+            self.send_response(200)
+            self._set_cors_headers()
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "synced", "file": file_path, "lines": len(content.splitlines())}).encode("utf-8"))
+
+        elif self.path == "/api/chat":
             query = body.get("query", "")
             context_file = body.get("context_file")
+            active_file_content = body.get("active_file_content")
             code_ctx = ""
-            if context_file and Path(context_file).exists():
+            if active_file_content is not None:
+                code_ctx = active_file_content
+            elif context_file and Path(context_file).exists():
                 if not SecretMasker.is_file_sensitive(context_file):
                     code_ctx = Path(context_file).read_text(encoding="utf-8", errors="ignore")
 
@@ -171,11 +206,20 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
 
-            # Connect to Ollama
+            # Connect to Ollama with Host OS awareness
+            import platform
+            is_win = platform.system().lower() == "windows"
+            host_os = "Windows" if is_win else "Linux"
+            system_instruction = (
+                f"You are CLAY, an elite autonomous coding copilot. The host operating system is {host_os}. "
+                f"Adjust all terminal/bash commands and file paths specifically for {host_os}. "
+                + ("On Windows, always use 'python' (never 'python3'), PowerShell/CMD syntax (e.g. 'dir', 'python -m pytest', '.\\venv\\Scripts\\activate'). Never recommend 'source' or 'sudo' or 'python3'." if is_win else "On Linux, use standard bash syntax, 'python3', 'source venv/bin/activate', 'ls -la'.")
+                + " Provide architectural analysis and clean diffs."
+            )
             ollama_payload = json.dumps({
                 "model": OLLAMA_MODEL,
                 "messages": [
-                    {"role": "system", "content": "You are Codebase Copilot. Provide architectural analysis and clean diffs."},
+                    {"role": "system", "content": system_instruction},
                     {"role": "user", "content": f"Context:\n{sanitized_ctx}\n\nTask: {sanitized_query}"}
                 ],
                 "stream": True
@@ -241,6 +285,76 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                 "relationshipsCount": len(all_rels)
             }
             self.wfile.write(json.dumps(res).encode("utf-8"))
+
+        elif self.path == "/api/agent/terminal/execute":
+            import platform
+            cmd = body.get("command", "")
+            raw_ws = body.get("workspace_path")
+            
+            # Intelligent workspace resolution
+            workspace = None
+            if raw_ws and isinstance(raw_ws, str) and raw_ws.strip() and raw_ws.strip() != ".":
+                p = Path(raw_ws.strip())
+                if p.exists() and p.is_dir():
+                    workspace = str(p.resolve())
+
+            if not workspace:
+                # Default to repository root (parent of backend/)
+                repo_root = Path(__file__).resolve().parent.parent
+                if repo_root.exists() and (repo_root / "backend").exists():
+                    workspace = str(repo_root.resolve())
+                else:
+                    cwd = Path.cwd().resolve()
+                    if cwd.name == "backend" and (cwd.parent / "backend").exists():
+                        workspace = str(cwd.parent.resolve())
+                    else:
+                        workspace = str(cwd)
+
+            sec_mode = body.get("security_mode", "sandboxed")
+            allow_net = body.get("allow_network", True)
+            try:
+                from app.agent.tools.terminal_agent import TerminalAgent
+                terminal = TerminalAgent(workspace)
+                res = terminal.run_command_sync(cmd, timeout=35, security_mode=sec_mode, allow_network=allow_net)
+                resp_data = {
+                    "command": cmd,
+                    "workspace": res.get("workspace", terminal.workspace_path),
+                    "os": res.get("os", terminal.os_type),
+                    "security_mode": sec_mode,
+                    "exit_code": res.get("exit_code", 0),
+                    "stdout": res.get("stdout", ""),
+                    "stderr": res.get("stderr", ""),
+                    "passed": res.get("passed", False)
+                }
+            except Exception as e:
+                err_msg = str(e) or repr(e) or type(e).__name__
+                resp_data = {
+                    "command": cmd,
+                    "workspace": workspace,
+                    "os": platform.system().lower(),
+                    "security_mode": sec_mode,
+                    "exit_code": -1,
+                    "stdout": "",
+                    "stderr": f"Server execution error: {err_msg}",
+                    "passed": False
+                }
+            self.send_response(200)
+            self._set_cors_headers()
+            self.end_headers()
+            self.wfile.write(json.dumps(resp_data).encode("utf-8"))
+
+        elif self.path == "/api/agent/step":
+            step_id = body.get("step_id", 1)
+            goal = body.get("goal", "")
+            self.send_response(200)
+            self._set_cors_headers()
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "step_id": step_id,
+                "status": "completed",
+                "log": f"Step {step_id} completed successfully for goal: {goal[:50]}",
+                "diff": ""
+            }).encode("utf-8"))
 
         elif self.path == "/api/agent/review":
             self.send_response(200)

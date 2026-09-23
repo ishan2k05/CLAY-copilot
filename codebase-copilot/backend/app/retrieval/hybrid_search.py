@@ -117,13 +117,13 @@ class HybridSearchEngine:
     @staticmethod
     def build_context_prompt(
         chunks: List[CodeChunk],
-        max_chars: int = 1400,
+        max_chars: int = 35000,
         workspace_root: Optional[str] = None
     ) -> str:
         """
-        Token-Budgeted Surgical Context Formatter:
-        Caps repository context to ~350-450 tokens (~1400 chars) total,
-        extracting focused symbol signatures and statements without bloated file dumps.
+        Token-Budgeted Context Formatter:
+        Packages repository and file context, preserving full content for directly targeted files
+        and focused symbol signatures for search chunks.
         """
         if not chunks:
             return ""
@@ -144,16 +144,19 @@ class HybridSearchEngine:
                 rel_file = Path(chunk.file_path).name
 
             header = f"[{rel_file}:{chunk.start_line}-{chunk.end_line} ({chunk.symbol_name})]"
-            
-            # Keep chunk content concise (max 20 lines / 350 chars per chunk)
-            lines = chunk.content.strip().splitlines()
-            if len(lines) > 20:
-                body = "\n".join(lines[:20]) + "\n... [truncated]"
-            else:
-                body = "\n".join(lines)
 
-            if len(body) > 350:
-                body = body[:350] + "... [truncated]"
+            # If chunk is a direct file or empty file indicator, preserve complete content
+            if chunk.symbol_type in ("file", "empty_file"):
+                body = chunk.content
+            else:
+                lines = chunk.content.strip().splitlines()
+                if len(lines) > 80:
+                    body = "\n".join(lines[:80]) + "\n... [truncated]"
+                else:
+                    body = "\n".join(lines)
+
+                if len(body) > 3000:
+                    body = body[:3000] + "... [truncated]"
 
             block = f"{header}\n{body}\n"
 

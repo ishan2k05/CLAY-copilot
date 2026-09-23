@@ -1,447 +1,514 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CLAY: Autonomous Coding Agent</title>
   <link rel="stylesheet" href="src/webview/media/style.css">
 </head>
+
 <body>
   <div class="app-frame">
     <!-- Header Context Bar -->
     <div class="context-bar">
-    <div class="brand-crumb">
-      <div class="clay-brand-badge">
-        <svg viewBox="0 0 512 512" class="clay-cube-icon" shape-rendering="crispEdges">
-          <g transform="translate(64, 148) scale(24)">
-            <rect x="1" y="1" width="2" height="1" fill="#C15C3D"/>
-            <rect x="2" y="2" width="2" height="1" fill="#C15C3D"/>
-            <rect x="3" y="3" width="2" height="1" fill="#C15C3D"/>
-            <rect x="4" y="4" width="2" height="1" fill="#C15C3D"/>
-            <rect x="5" y="5" width="2" height="1" fill="#C15C3D"/>
-            <rect x="4" y="6" width="2" height="1" fill="#C15C3D"/>
-            <rect x="3" y="7" width="2" height="1" fill="#C15C3D"/>
-            <rect x="2" y="8" width="2" height="1" fill="#C15C3D"/>
-            <rect x="1" y="9" width="2" height="1" fill="#C15C3D"/>
-            <rect x="8" y="8" width="6" height="2" fill="#C15C3D"/>
-          </g>
-        </svg>
-        <span class="brand-title">CLAY</span>
-      </div>
-    </div>
-    <div class="context-pills">
-      <button class="pill-theme-switch" id="btn-theme-toggle" title="Toggle Light / Claude Dark Mode" aria-label="Toggle theme">
-        <span class="pill-theme-knob">
-          <svg class="theme-icon-moon" id="icon-theme-moon" viewBox="0 0 16 16" width="9" height="9" fill="currentColor">
-            <path d="M6 1a5 5 0 0 0 5 5 5 5 0 0 0 4.9 4A6 6 0 1 1 6 1z"/>
-          </svg>
-          <svg class="theme-icon-sun" id="icon-theme-sun" style="display: none;" viewBox="0 0 16 16" width="9" height="9" fill="currentColor">
-            <path d="M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm0 1a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM8 0a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 0zm0 13a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 13zm8-5a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2a.5.5 0 0 1 .5.5zM3 8a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2A.5.5 0 0 1 3 8zm10.657-5.657a.5.5 0 0 1 0 .707l-1.414 1.415a.5.5 0 1 1-.707-.708l1.414-1.414a.5.5 0 0 1 .707 0zm-9.193 9.193a.5.5 0 0 1 0 .707L3.05 13.657a.5.5 0 0 1-.707-.707l1.414-1.414a.5.5 0 0 1 .707 0zm9.193 0a.5.5 0 0 1-.707 0l-1.414-1.414a.5.5 0 0 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .707zM4.464 4.465a.5.5 0 0 1-.707 0L2.343 3.05a.5.5 0 1 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .708z"/>
-          </svg>
-        </span>
-        <span class="theme-switch-text" id="theme-switch-text">Dark</span>
-      </button>
-      <span class="pill pill-teal" id="crumb-status"><span class="pill-dot"></span>Live</span>
-    </div>
-  </div>
-
-  <!-- 1. Chat View (Active by default) -->
-  <div id="view-chat" class="view-container active-view">
-    <div class="message-list" id="message-list">
-      <div class="empty-state-card" id="chat-empty-state">
-        <div class="clay-hero-logo">
-          <svg viewBox="0 0 512 512" shape-rendering="crispEdges">
-            <rect width="512" height="512" fill="#FAF6F0" rx="24"/>
+      <div class="brand-crumb">
+        <div class="clay-brand-badge">
+          <svg viewBox="0 0 512 512" class="clay-cube-icon" shape-rendering="crispEdges">
             <g transform="translate(64, 148) scale(24)">
-              <rect x="1" y="1" width="2" height="1" fill="#C15C3D"/>
-              <rect x="2" y="2" width="2" height="1" fill="#C15C3D"/>
-              <rect x="3" y="3" width="2" height="1" fill="#C15C3D"/>
-              <rect x="4" y="4" width="2" height="1" fill="#C15C3D"/>
-              <rect x="5" y="5" width="2" height="1" fill="#C15C3D"/>
-              <rect x="4" y="6" width="2" height="1" fill="#C15C3D"/>
-              <rect x="3" y="7" width="2" height="1" fill="#C15C3D"/>
-              <rect x="2" y="8" width="2" height="1" fill="#C15C3D"/>
-              <rect x="1" y="9" width="2" height="1" fill="#C15C3D"/>
-              <rect x="8" y="8" width="6" height="2" fill="#C15C3D"/>
+              <rect x="1" y="1" width="2" height="1" fill="#C15C3D" />
+              <rect x="2" y="2" width="2" height="1" fill="#C15C3D" />
+              <rect x="3" y="3" width="2" height="1" fill="#C15C3D" />
+              <rect x="4" y="4" width="2" height="1" fill="#C15C3D" />
+              <rect x="5" y="5" width="2" height="1" fill="#C15C3D" />
+              <rect x="4" y="6" width="2" height="1" fill="#C15C3D" />
+              <rect x="3" y="7" width="2" height="1" fill="#C15C3D" />
+              <rect x="2" y="8" width="2" height="1" fill="#C15C3D" />
+              <rect x="1" y="9" width="2" height="1" fill="#C15C3D" />
+              <rect x="8" y="8" width="6" height="2" fill="#C15C3D" />
             </g>
           </svg>
-        </div>
-        <div class="empty-state-title">CLAY Intelligence Engine</div>
-        <div class="empty-state-desc">Autonomous repository agent & surgical engineering copilot. Running on <strong id="welcome-model-text">gemma4:31b-cloud</strong>.</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- 2. Agent Task View -->
-  <div id="view-agent" class="view-container">
-    <!-- Top: Agent Console -->
-    <div class="terminal-widget agent-console-widget">
-      <div class="terminal-header">
-        <span class="console-title">agent-console</span>
-        <div class="terminal-actions">
-          <span style="color: #4CAF50; font-weight: 600;" id="agent-terminal-status">READY</span>
-          <button class="terminal-action-btn" id="btn-clear-terminal" title="Clear Console">clear</button>
-          <button class="terminal-action-btn" id="btn-copy-terminal" title="Copy Log">copy</button>
+          <span class="brand-title">CLAY</span>
         </div>
       </div>
-      <div class="terminal-stream" id="terminal-stream"><span class="cmd-line">$ clay-agent ready</span>
-[clay] Waiting for task execution goal...</div>
-
-      <!-- Interactive CLI Command Bar -->
-      <div class="terminal-cli-bar">
-        <span class="terminal-prompt-symbol">$</span>
-        <input type="text" class="terminal-cli-input" id="input-terminal-cmd" placeholder="Run safe shell command in workspace (e.g. pytest, python3 test_c.py)..." spellcheck="false" autocomplete="off">
-        <button class="terminal-cli-exec-btn" id="btn-exec-terminal-cmd">Run</button>
+      <div class="context-pills">
+        <button class="pill-clear-chat" id="btn-clear-chat" title="Clear chat history and reset context"
+          aria-label="Clear chat">
+          <span class="pill-clear-text">Clear</span>
+        </button>
+        <button class="pill-theme-switch" id="btn-theme-toggle" title="Toggle Light / Claude Dark Mode"
+          aria-label="Toggle theme">
+          <span class="pill-theme-knob">
+            <svg class="theme-icon-moon" id="icon-theme-moon" viewBox="0 0 16 16" width="9" height="9"
+              fill="currentColor">
+              <path d="M6 1a5 5 0 0 0 5 5 5 5 0 0 0 4.9 4A6 6 0 1 1 6 1z" />
+            </svg>
+            <svg class="theme-icon-sun" id="icon-theme-sun" style="display: none;" viewBox="0 0 16 16" width="9"
+              height="9" fill="currentColor">
+              <path
+                d="M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm0 1a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM8 0a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 0zm0 13a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 13zm8-5a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2a.5.5 0 0 1 .5.5zM3 8a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2A.5.5 0 0 1 3 8zm10.657-5.657a.5.5 0 0 1 0 .707l-1.414 1.415a.5.5 0 1 1-.707-.708l1.414-1.414a.5.5 0 0 1 .707 0zm-9.193 9.193a.5.5 0 0 1 0 .707L3.05 13.657a.5.5 0 0 1-.707-.707l1.414-1.414a.5.5 0 0 1 .707 0zm9.193 0a.5.5 0 0 1-.707 0l-1.414-1.414a.5.5 0 0 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .707zM4.464 4.465a.5.5 0 0 1-.707 0L2.343 3.05a.5.5 0 1 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .708z" />
+            </svg>
+          </span>
+          <span class="theme-switch-text" id="theme-switch-text">Dark</span>
+        </button>
+        <span class="pill pill-teal" id="crumb-status"><span class="pill-dot"></span>Live</span>
       </div>
     </div>
 
-    <!-- Bottom: User Console (Task Planner + Embedded Execution Task List) -->
-    <div class="terminal-widget user-console-widget">
-      <div class="terminal-header">
-        <span class="console-title user-console-title">user-console</span>
-      </div>
-
-      <!-- CLI Style Task Planner Input -->
-      <div class="user-console-cli-bar">
-        <span class="user-console-prompt">&gt;</span>
-        <input type="text" class="user-task-input" id="agent-goal-input" placeholder="Enter task goal (e.g. Refactor error handling or add unit tests)..." spellcheck="false" autocomplete="off">
-        <button class="btn-run-task" id="btn-run-agent" title="Execute Task">Run</button>
-        <button class="btn-stop-task" id="btn-stop-agent" style="display: none;" title="Stop Task">Stop</button>
-      </div>
-
-      <!-- Execution Progress Track (Inside User Console) -->
-      <div class="terminal-progress-section" id="agent-progress-track" style="display: none;">
-        <div class="terminal-progress-bar-track">
-          <div class="terminal-progress-bar" id="agent-progress-bar"></div>
+    <!-- 1. Chat View (Active by default) -->
+    <div id="view-chat" class="view-container active-view">
+      <div class="message-list" id="message-list">
+        <div class="empty-state-card" id="chat-empty-state">
+          <div class="clay-hero-logo">
+            <svg viewBox="0 0 512 512" shape-rendering="crispEdges">
+              <rect width="512" height="512" fill="#FAF6F0" rx="24" />
+              <g transform="translate(64, 148) scale(24)">
+                <rect x="1" y="1" width="2" height="1" fill="#C15C3D" />
+                <rect x="2" y="2" width="2" height="1" fill="#C15C3D" />
+                <rect x="3" y="3" width="2" height="1" fill="#C15C3D" />
+                <rect x="4" y="4" width="2" height="1" fill="#C15C3D" />
+                <rect x="5" y="5" width="2" height="1" fill="#C15C3D" />
+                <rect x="4" y="6" width="2" height="1" fill="#C15C3D" />
+                <rect x="3" y="7" width="2" height="1" fill="#C15C3D" />
+                <rect x="2" y="8" width="2" height="1" fill="#C15C3D" />
+                <rect x="1" y="9" width="2" height="1" fill="#C15C3D" />
+                <rect x="8" y="8" width="6" height="2" fill="#C15C3D" />
+              </g>
+            </svg>
+          </div>
+          <div class="empty-state-title">CLAY Intelligence Engine</div>
+          <div class="empty-state-desc">Autonomous repository agent & surgical engineering copilot. Running on <strong
+              id="welcome-model-text">gemma4:31b-cloud</strong>.</div>
         </div>
-        <div class="terminal-progress-text" id="agent-progress-text"></div>
-      </div>
-
-      <!-- Execution Task List UI (Inside User Console Only) -->
-      <div class="terminal-plan-header">
-        <span>// EXECUTION PLAN</span>
-      </div>
-      <div class="terminal-step-list" id="agent-step-list">
-        <div class="terminal-step-empty">No active task. Enter a goal above and click Run to execute.</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- 3. Diff Reviewer View -->
-  <div id="view-diff" class="view-container">
-    <div class="diff-summary-bar">
-      <span id="diff-summary-label">Staged Changes // 0 files</span>
-      <div>
-        <span class="diff-badge-add" id="diff-badge-add">+0</span>
-        <span class="diff-badge-del" id="diff-badge-del">-0</span>
       </div>
     </div>
 
-    <div id="diff-staged-container">
-      <div style="text-align: center; padding: 36px 12px; color: var(--text-muted);">
-        <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.5" style="margin-bottom: 8px; opacity: 0.5;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-        <div style="font-weight: 600; font-size: 12px; color: var(--text-secondary);">No Staged Changes</div>
-        <div style="font-size: 11px; margin-top: 4px;">Changes proposed by Chat or Agent will appear here for review.</div>
-      </div>
-    </div>
-
-    <div class="sticky-review-bar" id="diff-action-bar" style="display: none;">
-      <button class="btn-reject" id="btn-reject-diff">Reject Changes</button>
-      <button class="btn-accept" id="btn-accept-diff">Accept & Apply Patch</button>
-    </div>
-  </div>
-
-  <!-- 4. Repo Intelligence View -->
-  <div id="view-repo" class="view-container">
-    <div class="task-card">
-      <div class="task-title">Repository Intelligence Graph</div>
-      <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 10px;" id="repo-stats-text">
-        Indexed: -- Files // -- Functions & Classes // -- Chunks
-      </div>
-
-      <div class="settings-group" style="margin-bottom: 10px;">
-        <label class="settings-label">Local Repository Workspace Path</label>
-        <div style="display: flex; gap: 6px;">
-          <input type="text" class="settings-input" id="input-repo-path" value="/home/ishan/.gemini/antigravity-ide/scratch/codebase-copilot/backend" placeholder="/absolute/path/to/repo" style="margin-bottom: 0;">
-          <button class="btn-secondary-action pixel-btn" id="btn-browse-repo-path" style="width: auto; padding: 0 10px;" title="Browse local repository folder">Browse</button>
-          <button class="btn-secondary-action pixel-btn" id="btn-reset-repo-path" style="width: auto; padding: 0 10px;" title="Reset to default workspace path">Reset</button>
-          <input type="file" id="repo-folder-picker" webkitdirectory directory style="display: none;">
+    <!-- 2. Agent Task View -->
+    <div id="view-agent" class="view-container">
+      <!-- Top: Agent Console -->
+      <div class="terminal-widget agent-console-widget">
+        <div class="terminal-header">
+          <span class="console-title">agent-console</span>
+          <div class="terminal-actions">
+            <span style="color: #4CAF50; font-weight: 600;" id="agent-terminal-status">READY</span>
+            <button class="terminal-action-btn" id="btn-clear-terminal" title="Clear Console">clear</button>
+            <button class="terminal-action-btn" id="btn-copy-terminal" title="Copy Log">copy</button>
+          </div>
         </div>
-        <div class="settings-subtext">Local directory to scan, parse AST symbols, and map into SQLite.</div>
+        <div class="terminal-stream" id="terminal-stream"><span class="cmd-line">$ clay-agent ready</span>
+          [clay] Waiting for task execution goal...</div>
+
+        <!-- Interactive CLI Command Bar with Security Mode Indicator -->
+        <div class="terminal-cli-bar">
+          <span class="terminal-prompt-symbol">$</span>
+          <input type="text" class="terminal-cli-input" id="input-terminal-cmd"
+            placeholder="Run shell command in workspace (e.g. pytest, git status)..." spellcheck="false"
+            autocomplete="off">
+          <span class="terminal-mode-indicator" id="terminal-preview-security">[SANDBOXED]</span>
+          <button class="terminal-cli-exec-btn" id="btn-exec-terminal-cmd">Run</button>
+        </div>
+
+        <!-- Quick Action Command Chips -->
+        <div class="terminal-quick-chips" id="terminal-quick-chips">
+          <span class="terminal-quick-chips-label">Quick:</span>
+          <button type="button" class="cli-chip" data-cmd="python -m pytest">pytest</button>
+          <button type="button" class="cli-chip" data-cmd="git status">git status</button>
+          <button type="button" class="cli-chip" data-cmd="python -m unittest">python test</button>
+          <button type="button" class="cli-chip" data-cmd="dir">dir</button>
+        </div>
       </div>
 
-      <button class="btn-primary-action" id="btn-scan-repo">
-        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-        Scan & Index Workspace
-      </button>
-      <div style="margin-top: 10px; padding: 8px; background: var(--surface-subtle); border-radius: 10px; font-size: 11px;">
-        Status: <strong id="repo-status-label">Ready to scan</strong><br/>
-        Security: <strong>Zero Leaked Secrets Detected</strong>
+      <!-- Bottom: User Console (Task Planner + Embedded Execution Task List) -->
+      <div class="terminal-widget user-console-widget">
+        <div class="terminal-header">
+          <span class="console-title user-console-title">user-console</span>
+        </div>
+
+        <!-- CLI Style Task Planner Input -->
+        <div class="user-console-cli-bar">
+          <span class="user-console-prompt">&gt;</span>
+          <input type="text" class="user-task-input" id="agent-goal-input"
+            placeholder="Enter task goal (e.g. Refactor error handling or add unit tests)..." spellcheck="false"
+            autocomplete="off">
+          <button class="btn-run-task" id="btn-run-agent" title="Execute Task">Run</button>
+          <button class="btn-stop-task" id="btn-stop-agent" style="display: none;" title="Stop Task">Stop</button>
+        </div>
+
+        <!-- Execution Progress Track (Inside User Console) -->
+        <div class="terminal-progress-section" id="agent-progress-track" style="display: none;">
+          <div class="terminal-progress-bar-track">
+            <div class="terminal-progress-bar" id="agent-progress-bar"></div>
+          </div>
+          <div class="terminal-progress-text" id="agent-progress-text"></div>
+        </div>
+
+        <!-- Execution Task List UI (Inside User Console Only) -->
+        <div class="terminal-plan-header">
+          <span>// EXECUTION PLAN</span>
+        </div>
+        <div class="terminal-step-list" id="agent-step-list">
+          <div class="terminal-step-empty">No active task. Enter a goal above and click Run to execute.</div>
+        </div>
       </div>
     </div>
-    <div class="task-card" style="margin-top: 10px;">
-      <div class="task-title">Call Hierarchy & Relationships</div>
-      <pre style="font-family: var(--font-mono); font-size: 10.5px; line-height: 1.4; color: var(--text-secondary); background: var(--surface-subtle); padding: 8px; border-radius: 10px; overflow-x: auto; white-space: pre;" id="mermaid-code">No SQLite code graph available for this repository.
+
+    <!-- 3. Diff Reviewer View -->
+    <div id="view-diff" class="view-container">
+      <div class="diff-summary-bar">
+        <span id="diff-summary-label">Staged Changes // 0 files</span>
+        <div>
+          <span class="diff-badge-add" id="diff-badge-add">+0</span>
+          <span class="diff-badge-del" id="diff-badge-del">-0</span>
+        </div>
+      </div>
+
+      <div id="diff-staged-container">
+        <div class="diff-empty-state" id="diff-empty-state">
+          <div class="diff-pixel-art-card">
+            <svg viewBox="0 0 48 48" width="52" height="52" shape-rendering="crispEdges">
+              <!-- Pixel Card Outer Border & Shadow -->
+              <rect x="6" y="6" width="36" height="36" fill="#CC6B49" opacity="0.08" />
+              <!-- Pixel Document Border (terracotta) -->
+              <rect x="10" y="6" width="22" height="2" fill="#D97757" />
+              <rect x="8" y="8" width="2" height="32" fill="#D97757" />
+              <rect x="38" y="14" width="2" height="26" fill="#D97757" />
+              <rect x="10" y="40" width="28" height="2" fill="#D97757" />
+              <!-- Pixel Folded Corner (terracotta & amber) -->
+              <rect x="32" y="6" width="2" height="2" fill="#D97757" />
+              <rect x="34" y="8" width="2" height="2" fill="#D97757" />
+              <rect x="36" y="10" width="2" height="2" fill="#D97757" />
+              <rect x="38" y="12" width="2" height="2" fill="#D97757" />
+              <rect x="32" y="8" width="6" height="6" fill="#E5A84B" opacity="0.35" />
+              <!-- Pixel + Addition Line (Green) -->
+              <rect x="15" y="14" width="2" height="6" fill="#22C55E" />
+              <rect x="13" y="16" width="6" height="2" fill="#22C55E" />
+              <rect x="22" y="16" width="13" height="2" fill="#22C55E" />
+              <!-- Pixel - Deletion Line (Crimson) -->
+              <rect x="13" y="24" width="6" height="2" fill="#EF4444" />
+              <rect x="22" y="24" width="11" height="2" fill="#EF4444" />
+              <!-- Pixel Context Code Lines (terracotta muted) -->
+              <rect x="14" y="32" width="18" height="2" fill="#8C847A" />
+              <rect x="14" y="36" width="10" height="2" fill="#8C847A" opacity="0.7" />
+              <!-- Pixel Prompt Cursor (terracotta) -->
+              <rect x="26" y="36" width="4" height="2" fill="#D97757" />
+            </svg>
+          </div>
+          <div class="diff-empty-title">NO STAGED CHANGES</div>
+          <div class="diff-pixel-tip">
+            <span class="diff-pixel-tag">HOT-RELOAD</span> Live sync with active editor &amp; agent tasks
+          </div>
+        </div>
+      </div>
+
+      <div class="sticky-review-bar" id="diff-action-bar" style="display: none;">
+        <button class="btn-reject" id="btn-reject-diff">Reject Changes</button>
+        <button class="btn-accept" id="btn-accept-diff">Accept & Apply Patch</button>
+      </div>
+    </div>
+
+    <!-- 4. Repo Intelligence View -->
+    <div id="view-repo" class="view-container">
+      <div class="task-card">
+        <div class="task-title">Repository Intelligence Graph</div>
+        <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 10px;" id="repo-stats-text">
+          Indexed: -- Files // -- Functions & Classes // -- Chunks
+        </div>
+
+        <div class="settings-group" style="margin-bottom: 10px;">
+          <label class="settings-label">Local Repository Workspace Path</label>
+          <div style="display: flex; gap: 6px;">
+            <input type="text" class="settings-input" id="input-repo-path"
+              value=""
+              placeholder="Repository workspace folder (e.g. C:\path\to\repo)" style="margin-bottom: 0;">
+            <button class="btn-secondary-action pixel-btn" id="btn-browse-repo-path"
+              style="width: auto; padding: 0 10px;" title="Browse local repository folder">Browse</button>
+            <button class="btn-secondary-action pixel-btn" id="btn-reset-repo-path"
+              style="width: auto; padding: 0 10px;" title="Reset to default workspace path">Reset</button>
+            <input type="file" id="repo-folder-picker" webkitdirectory directory style="display: none;">
+          </div>
+          <div class="settings-subtext">Local directory to scan, parse AST symbols, and map into SQLite.</div>
+        </div>
+
+        <button class="btn-primary-action" id="btn-scan-repo">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="23 4 23 10 17 10" />
+            <polyline points="1 20 1 14 7 14" />
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+          </svg>
+          Scan & Index Workspace
+        </button>
+        <div
+          style="margin-top: 10px; padding: 8px; background: var(--surface-subtle); border-radius: 10px; font-size: 11px;">
+          Status: <strong id="repo-status-label">Ready to scan</strong><br />
+          Security: <strong>Zero Leaked Secrets Detected</strong>
+        </div>
+      </div>
+      <div class="task-card" style="margin-top: 10px;">
+        <div class="task-title">Call Hierarchy & Relationships</div>
+        <pre
+          style="font-family: var(--font-mono); font-size: 10.5px; line-height: 1.4; color: var(--text-secondary); background: var(--surface-subtle); padding: 8px; border-radius: 10px; overflow-x: auto; white-space: pre;"
+          id="mermaid-code">No SQLite code graph available for this repository.
 Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
-    </div>
+      </div>
 
-    <!-- Repository Files Tree Card -->
-    <div class="task-card repo-tree-card" style="margin-top: 10px;">
-      <div class="task-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-        <div class="task-title" style="margin-bottom: 0;">Repository Files</div>
-        <div class="pixel-badge" id="repo-tree-count">0 Files</div>
-      </div>
-      <div class="repo-tree-actions" style="display: flex; gap: 6px; margin-bottom: 8px;">
-        <button class="pixel-mini-btn" id="btn-refresh-tree" title="Refresh file tree">↻ Refresh</button>
-        <button class="pixel-mini-btn" id="btn-expand-tree" title="Toggle expand/collapse all">± Toggle All</button>
-      </div>
-      <div class="repo-file-tree" id="repo-file-tree">
-        <div class="tree-empty-state">
-          <span class="pixel-glyph">»</span> Loading repository files...
+      <!-- Repository Files Tree Card -->
+      <div class="task-card repo-tree-card" style="margin-top: 10px;">
+        <div class="task-header-row"
+          style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <div class="task-title" style="margin-bottom: 0;">Repository Files</div>
+          <div class="pixel-badge" id="repo-tree-count">0 Files</div>
+        </div>
+        <div class="repo-tree-actions" style="display: flex; gap: 6px; margin-bottom: 8px;">
+          <button class="pixel-mini-btn" id="btn-refresh-tree" title="Refresh file tree">↻ Refresh</button>
+          <button class="pixel-mini-btn" id="btn-expand-tree" title="Toggle expand/collapse all">± Toggle All</button>
+        </div>
+        <div class="repo-file-tree" id="repo-file-tree">
+          <div class="tree-empty-state">
+            <span class="pixel-glyph">»</span> Loading repository files...
+          </div>
         </div>
       </div>
     </div>
-  </div>
 
-  <!-- 5. Settings View (Reference Styled: Execution, Security Mode, Terminal) -->
-  <div id="view-settings" class="view-container">
-    <!-- Section 1: Execution -->
-    <div class="settings-section">
-      <div class="settings-section-title">Execution</div>
-      <div class="settings-card">
-        <div class="settings-row">
-          <div class="settings-row-info">
-            <div class="settings-row-title">Queued Messages</div>
-            <div class="settings-row-desc">Configure when follow-up messages are sent.</div>
-            <div class="settings-row-meta" id="btn-kb-shortcuts" title="Keyboard Shortcuts">
-              Keyboard shortcuts
-              <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.5">
-                <circle cx="8" cy="8" r="6"/>
-                <path d="M8 7v4M8 5h.01"/>
-              </svg>
+    <!-- 5. Settings View (Agent Security Mode, Sandbox Network, Ollama Daemon & Cloud Models) -->
+    <div id="view-settings" class="view-container">
+      <!-- Section 1: Agent Security Mode -->
+      <div class="settings-section">
+        <div class="settings-section-title">Agent security mode</div>
+        <div class="settings-section-desc">Select one of the three options. Agent settings and permissions can be
+          further customized below.</div>
+        <div class="security-mode-grid" id="security-mode-selector">
+          <div class="security-mode-card" data-mode="full">
+            <div class="security-mode-title">Full access</div>
+            <div class="security-mode-desc">Executes shell commands across your system and modifies workspace files directly without containment or command safety filters.</div>
+          </div>
+          <div class="security-mode-card active" data-mode="sandboxed">
+            <div class="security-mode-title">Sandboxed</div>
+            <div class="security-mode-desc">Confines execution to active workspace, blocks destructive OS commands via safety guardrails, and gates network access.</div>
+          </div>
+          <div class="security-mode-card" data-mode="strict">
+            <div class="security-mode-title">Strict</div>
+            <div class="security-mode-desc">Zero-trust read-only containment: permits only non-mutating test &amp; diagnostic commands with strict file and secret isolation.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-divider"></div>
+
+      <!-- Section 2: Terminal -->
+      <div class="settings-section">
+        <div class="settings-section-title">Terminal</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="settings-row-info">
+              <div class="settings-row-title">Sandbox Allow Network</div>
+              <div class="settings-row-desc">When enabled, sandboxed commands are allowed to make network requests.
+              </div>
             </div>
-          </div>
-          <div class="segmented-toggle" id="toggle-queued-messages">
-            <button class="segmented-toggle-btn active" data-value="queue">Queue</button>
-            <button class="segmented-toggle-btn" data-value="immediate">Send Immediately</button>
+            <label class="toggle-switch">
+              <input type="checkbox" id="chk-sandbox-network" checked>
+              <span class="toggle-slider"></span>
+            </label>
           </div>
         </div>
       </div>
-    </div>
 
-    <!-- Section 2: Agent Security Mode -->
-    <div class="settings-section">
-      <div class="settings-section-title">Agent security mode</div>
-      <div class="settings-section-desc">Select one of the three options. Agent settings and permissions can be further customized below.</div>
-      <div class="security-mode-grid" id="security-mode-selector">
-        <div class="security-mode-card" data-mode="full">
-          <div class="security-mode-title">Full access</div>
-          <div class="security-mode-desc">Agents have full access to your machine and external resources.</div>
-        </div>
-        <div class="security-mode-card active" data-mode="sandboxed">
-          <div class="security-mode-title">Sandboxed</div>
-          <div class="security-mode-desc">Agents run in a secure sandbox that restricts access to external resources outside of your trusted folders.</div>
-        </div>
-        <div class="security-mode-card" data-mode="strict">
-          <div class="security-mode-title">Strict</div>
-          <div class="security-mode-desc">Terminal commands always require review and the agent cannot access files outside of its given workspaces.</div>
-        </div>
-      </div>
-    </div>
+      <div class="settings-divider"></div>
 
-    <div class="settings-divider"></div>
-
-    <!-- Section 3: Terminal Controls -->
-    <div class="settings-section">
-      <div class="settings-section-title">Terminal</div>
-      <div class="settings-card">
-        <div class="settings-row">
-          <div class="settings-row-info">
-            <div class="settings-row-title">Terminal Command Auto Execution</div>
-            <div class="settings-row-desc">Controls whether terminal commands require your approval before running.</div>
-            <div class="settings-sub-note">Note: A change to this setting will only apply to new messages sent to Agent. In-progress responses will use the previous setting value.</div>
+      <!-- Section 3: Ollama Daemon & Cloud Models -->
+      <div class="settings-section">
+        <div class="settings-section-title">Ollama Daemon & Cloud Models</div>
+        <div class="settings-card">
+          <div class="status-badge-container">
+            <span class="status-indicator" id="settings-status-indicator">
+              <span class="pill-dot"></span>
+              <span id="settings-status-text">Checking daemon...</span>
+            </span>
+            <span style="font-size: 10px; font-family: var(--font-mono); color: var(--text-muted);"
+              id="settings-latency-text">-- ms</span>
           </div>
-          <div style="flex-shrink: 0;">
-            <select class="settings-select-pill" id="select-auto-execution">
-              <option value="always" selected>Always Proceed ⌵</option>
-              <option value="safe">Safe Commands Only ⌵</option>
-              <option value="prompt">Ask Every Time ⌵</option>
+
+          <div class="settings-group">
+            <label class="settings-label">Ollama Provider / Connection Type</label>
+            <select class="settings-select" id="select-connection-type">
+              <option value="local" selected>Ollama Local (Background Daemon)</option>
+              <option value="cloud">Ollama Cloud (API Key)</option>
+            </select>
+            <div class="settings-subtext" id="connection-type-desc">Runs against local background Ollama
+              (http://127.0.0.1:11434). Zero API keys required.</div>
+          </div>
+
+          <div class="settings-group" id="group-api-key" style="display: none;">
+            <label class="settings-label">Ollama Cloud API Key</label>
+            <div class="password-input-wrapper">
+              <input type="password" class="settings-input password-input" id="input-api-key"
+                placeholder="Enter ollama.com API key (e.g. sk_...)" autocomplete="off" spellcheck="false">
+              <button type="button" class="btn-toggle-eye" id="btn-toggle-api-key" title="Toggle API key preview">
+                <svg id="eye-icon-show" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                  stroke-width="2">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+                <svg id="eye-icon-hide" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                  stroke-width="2" style="display: none;">
+                  <path
+                    d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                  <line x1="1" y1="1" x2="23" y2="23" />
+                </svg>
+              </button>
+            </div>
+            <div class="settings-subtext">Direct cloud model access without running Ollama in the background.
+              Authenticated with Bearer token.</div>
+          </div>
+
+          <div class="settings-group">
+            <label class="settings-label">Ollama Host URL</label>
+            <input type="text" class="settings-input" id="input-ollama-host" value="http://127.0.0.1:11434">
+          </div>
+
+          <div class="settings-group">
+            <label class="settings-label">Active Model</label>
+            <select class="settings-select" id="select-ollama-model">
+              <option value="gemma4:31b-cloud">gemma4:31b-cloud</option>
+              <option value="gemma4:cloud">gemma4:cloud</option>
+            </select>
+            <div class="settings-subtext">Zero API keys required. Authenticated via local Ollama.</div>
+          </div>
+
+          <button class="btn-secondary-action" id="btn-test-ollama" style="margin-bottom: 12px;">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
+            </svg>
+            Test Ollama Connection
+          </button>
+
+          <div class="settings-group" style="margin-top: 6px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+              <label class="settings-label" style="margin-bottom: 0;">Inference Temperature</label>
+              <span
+                style="font-family: var(--font-mono); font-size: 11px; font-weight: 700; color: var(--primary-terracotta);"
+                id="val-temperature">0.20</span>
+            </div>
+            <input type="range" class="settings-slider" id="input-temperature" min="0" max="1" step="0.05" value="0.20">
+            <div class="settings-subtext">Lower values (0.1 - 0.3) provide precise, deterministic code generation.</div>
+          </div>
+
+          <div class="settings-group" style="margin-top: 10px;">
+            <label class="settings-label">Context Window Length</label>
+            <select class="settings-select" id="select-context-window">
+              <option value="8192">8,192 tokens (8k)</option>
+              <option value="16384">16,384 tokens (16k)</option>
+              <option value="32768" selected>32,768 tokens (32k - Recommended)</option>
+              <option value="65536">65,536 tokens (64k)</option>
+              <option value="131072">131,072 tokens (128k)</option>
             </select>
           </div>
-        </div>
 
-        <div class="settings-card-divider"></div>
-
-        <div class="settings-row">
-          <div class="settings-row-info">
-            <div class="settings-row-title">Sandbox Allow Network</div>
-            <div class="settings-row-desc">When enabled, sandboxed commands are allowed to make network requests.</div>
+          <div class="settings-group" style="margin-top: 10px;">
+            <label class="settings-label">Max Output Tokens</label>
+            <select class="settings-select" id="select-max-tokens">
+              <option value="1024">1,024 tokens</option>
+              <option value="2048" selected>2,048 tokens</option>
+              <option value="4096">4,096 tokens</option>
+              <option value="8192">8,192 tokens</option>
+            </select>
           </div>
-          <label class="toggle-switch">
-            <input type="checkbox" id="chk-sandbox-network" checked>
-            <span class="toggle-slider"></span>
-          </label>
+
+          <div class="settings-group" style="margin-top: 10px;">
+            <label class="settings-label">Privacy Redaction Patterns</label>
+            <input type="text" class="settings-input" id="input-privacy-patterns"
+              value=".env, *.pem, credentials.json, id_rsa, *.key">
+            <div class="settings-subtext">Files and patterns automatically scrubbed before sending prompts.</div>
+          </div>
+
+          <div class="settings-row" style="margin-top: 6px; margin-bottom: 12px;">
+            <div class="settings-row-info">
+              <div class="settings-row-title">Zero-Leak Privacy Guard</div>
+              <div class="settings-row-desc">Redacts secrets and tokens prior to transmission</div>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="chk-privacy-guard" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+
+          <button class="btn-primary-action" id="btn-save-all-settings" style="margin-top: 8px;">
+            Save All Settings
+          </button>
         </div>
       </div>
     </div>
 
-    <div class="settings-divider"></div>
-
-    <!-- Section 4: Ollama Daemon & Cloud Models (Full Functionality Restored) -->
-    <div class="settings-section">
-      <div class="settings-section-title">Ollama Daemon & Cloud Models</div>
-      <div class="settings-card">
-        <div class="status-badge-container">
-          <span class="status-indicator" id="settings-status-indicator">
-            <span class="pill-dot"></span>
-            <span id="settings-status-text">Checking daemon...</span>
-          </span>
-          <span style="font-size: 10px; font-family: var(--font-mono); color: var(--text-muted);" id="settings-latency-text">-- ms</span>
-        </div>
-
-        <div class="settings-group">
-          <label class="settings-label">Ollama Provider / Connection Type</label>
-          <select class="settings-select" id="select-connection-type">
-            <option value="local" selected>Ollama Local (Background Daemon)</option>
-            <option value="cloud">Ollama Cloud (API Key)</option>
-          </select>
-          <div class="settings-subtext" id="connection-type-desc">Runs against local background Ollama (http://127.0.0.1:11434). Zero API keys required.</div>
-        </div>
-
-        <div class="settings-group" id="group-api-key" style="display: none;">
-          <label class="settings-label">Ollama Cloud API Key</label>
-          <div class="password-input-wrapper">
-            <input type="password" class="settings-input password-input" id="input-api-key" placeholder="Enter ollama.com API key (e.g. sk_...)" autocomplete="off" spellcheck="false">
-            <button type="button" class="btn-toggle-eye" id="btn-toggle-api-key" title="Toggle API key preview">
-              <svg id="eye-icon-show" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-                <circle cx="12" cy="12" r="3"/>
-              </svg>
-              <svg id="eye-icon-hide" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" style="display: none;">
-                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>
-                <line x1="1" y1="1" x2="23" y2="23"/>
-              </svg>
-            </button>
+    <!-- Chat Input Dock (Displayed on Chat Tab: Rounder, Cleared) -->
+    <div class="input-dock">
+      <!-- Pixel Style Transparent Jump Down Button (Centered) -->
+      <button class="chat-jump-down-btn" id="btn-chat-jump-down" title="Jump to bottom"
+        aria-label="Jump to latest message">
+        <svg viewBox="0 0 10 10" width="10" height="10" fill="currentColor" shape-rendering="crispEdges">
+          <path
+            d="M1,2 h2 v2 h-2 z M7,2 h2 v2 h-2 z M2,4 h2 v2 h-2 z M6,4 h2 v2 h-2 z M3,6 h2 v2 h-2 z M5,6 h2 v2 h-2 z M4,8 h2 v2 h-2 z" />
+        </svg>
+      </button>
+      <div class="input-container">
+        <textarea class="chat-textarea" id="chat-input"
+          placeholder="Ask CLAY (Enter to send, Shift+Enter for newline)..."></textarea>
+        <div class="input-toolbar">
+          <div class="input-meta-hint">
+            <span class="pill-dot"></span> <span id="input-model-hint">CLAY // gemma4:31b-cloud</span>
           </div>
-          <div class="settings-subtext">Direct cloud model access without running Ollama in the background. Authenticated with Bearer token.</div>
+          <button class="send-btn" id="btn-send" title="Send (Enter)">
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" shape-rendering="crispEdges">
+              <path d="M2,7 h6 v2 h-6 z M8,5 h2 v6 h-2 z M10,6 h2 v4 h-2 z M12,7 h2 v2 h-2 z" />
+            </svg>
+          </button>
         </div>
-
-        <div class="settings-group">
-          <label class="settings-label">Ollama Host URL</label>
-          <input type="text" class="settings-input" id="input-ollama-host" value="http://127.0.0.1:11434">
-        </div>
-
-        <div class="settings-group">
-          <label class="settings-label">Active Model</label>
-          <select class="settings-select" id="select-ollama-model">
-            <option value="gemma4:31b-cloud">gemma4:31b-cloud</option>
-            <option value="gemma4:cloud">gemma4:cloud</option>
-          </select>
-          <div class="settings-subtext">Zero API keys required. Authenticated via local Ollama.</div>
-        </div>
-
-        <button class="btn-secondary-action" id="btn-test-ollama" style="margin-bottom: 12px;">
-          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
-          Test Ollama Connection
-        </button>
-
-        <div class="settings-group" style="margin-top: 6px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-            <label class="settings-label" style="margin-bottom: 0;">Inference Temperature</label>
-            <span style="font-family: var(--font-mono); font-size: 11px; font-weight: 700; color: var(--primary-terracotta);" id="val-temperature">0.20</span>
-          </div>
-          <input type="range" class="settings-slider" id="input-temperature" min="0" max="1" step="0.05" value="0.20">
-          <div class="settings-subtext">Lower values (0.1 - 0.3) provide precise, deterministic code generation.</div>
-        </div>
-
-        <div class="settings-group" style="margin-top: 10px;">
-          <label class="settings-label">Context Window Length</label>
-          <select class="settings-select" id="select-context-window">
-            <option value="8192">8,192 tokens (8k)</option>
-            <option value="16384">16,384 tokens (16k)</option>
-            <option value="32768" selected>32,768 tokens (32k - Recommended)</option>
-            <option value="65536">65,536 tokens (64k)</option>
-            <option value="131072">131,072 tokens (128k)</option>
-          </select>
-        </div>
-
-        <div class="settings-group" style="margin-top: 10px;">
-          <label class="settings-label">Max Output Tokens</label>
-          <select class="settings-select" id="select-max-tokens">
-            <option value="1024">1,024 tokens</option>
-            <option value="2048" selected>2,048 tokens</option>
-            <option value="4096">4,096 tokens</option>
-            <option value="8192">8,192 tokens</option>
-          </select>
-        </div>
-
-        <div class="settings-group" style="margin-top: 10px;">
-          <label class="settings-label">Privacy Redaction Patterns</label>
-          <input type="text" class="settings-input" id="input-privacy-patterns" value=".env, *.pem, credentials.json, id_rsa, *.key">
-          <div class="settings-subtext">Files and patterns automatically scrubbed before sending prompts.</div>
-        </div>
-
-        <div class="settings-row" style="margin-top: 6px; margin-bottom: 12px;">
-          <div class="settings-row-info">
-            <div class="settings-row-title">Zero-Leak Privacy Guard</div>
-            <div class="settings-row-desc">Redacts secrets and tokens prior to transmission</div>
-          </div>
-          <label class="toggle-switch">
-            <input type="checkbox" id="chk-privacy-guard" checked>
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-
-        <button class="btn-primary-action" id="btn-save-all-settings" style="margin-top: 8px;">
-          Save All Settings
-        </button>
       </div>
     </div>
-  </div>
 
-  <!-- Chat Input Dock (Displayed on Chat Tab: Rounder, Cleared) -->
-  <div class="input-dock">
-    <div class="input-container">
-      <textarea class="chat-textarea" id="chat-input" placeholder="Ask CLAY (Enter to send, Shift+Enter for newline)..."></textarea>
-      <div class="input-toolbar">
-        <div class="input-meta-hint">
-          <span class="pill-dot"></span> <span id="input-model-hint">CLAY // gemma4:31b-cloud</span>
-        </div>
-        <button class="send-btn" id="btn-send" title="Send (Enter)">
-          <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" shape-rendering="crispEdges">
-            <path d="M2,7 h6 v2 h-6 z M8,5 h2 v6 h-2 z M10,6 h2 v4 h-2 z M12,7 h2 v2 h-2 z"/>
-          </svg>
-        </button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Bottom 5-Tab Navigation Bar -->
-  <nav class="nav-tab-bar">
-    <button class="nav-tab active-tab" data-target="chat">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-      Chat
-    </button>
-    <button class="nav-tab" data-target="agent">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/></svg>
-      Agent
-    </button>
-    <button class="nav-tab" data-target="diff">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
-      Diff
-    </button>
-    <button class="nav-tab" data-target="repo">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-      Repo
-    </button>
-    <button class="nav-tab" data-target="settings">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-      Settings
-    </button>
-  </nav>
+    <!-- Bottom 5-Tab Navigation Bar -->
+    <nav class="nav-tab-bar">
+      <button class="nav-tab active-tab" data-target="chat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+        Chat
+      </button>
+      <button class="nav-tab" data-target="agent">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="11" width="18" height="10" rx="2" />
+          <circle cx="12" cy="5" r="2" />
+          <path d="M12 7v4" />
+        </svg>
+        Agent
+      </button>
+      <button class="nav-tab" data-target="diff">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <polyline points="14 2 14 8 20 8" />
+          <line x1="9" y1="15" x2="15" y2="15" />
+        </svg>
+        Diff
+      </button>
+      <button class="nav-tab" data-target="repo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6" />
+          <polyline points="8 6 2 12 8 18" />
+        </svg>
+        Repo
+      </button>
+      <button class="nav-tab" data-target="settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3" />
+          <path
+            d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+        </svg>
+        Settings
+      </button>
+    </nav>
   </div> <!-- /.app-frame -->
 
   <!-- Load Dynamic Unified Controller -->
   <script src="src/webview/media/main.js"></script>
 </body>
+
 </html>

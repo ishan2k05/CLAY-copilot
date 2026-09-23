@@ -27,8 +27,9 @@ export class ServerProcessManager {
         this.outputChannel.appendLine(`[Sidecar] Launching Python backend from ${backendDir}...`);
 
         try {
+            const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
             this.process = cp.spawn(
-                'python3',
+                pythonCmd,
                 ['-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', '8765'],
                 { cwd: backendDir }
             );

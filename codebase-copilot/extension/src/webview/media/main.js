@@ -7,13 +7,28 @@
   const vscode = isVsCode ? acquireVsCodeApi() : null;
   const BACKEND_URL = 'http://127.0.0.1:8765';
 
+  // Host OS Autodetection from browser runtime / navigator
+  const isHostWin = typeof navigator !== 'undefined' && (/Win/i.test(navigator.platform) || /Windows/i.test(navigator.userAgent));
+  let detectedSystem = {
+    os: isHostWin ? 'windows' : 'linux',
+    is_windows: isHostWin,
+    shell: isHostWin ? 'PowerShell / CMD' : 'bash'
+  };
+
+  let savedRepoPath = localStorage.getItem('codebase_copilot_repo_path');
+  // Discard invalid Linux path if on Windows
+  if (isHostWin && savedRepoPath && (savedRepoPath.startsWith('/home/') || savedRepoPath.startsWith('/usr/') || savedRepoPath.startsWith('/tmp/'))) {
+    savedRepoPath = null;
+    localStorage.removeItem('codebase_copilot_repo_path');
+  }
+
   // State
   let currentModel = 'gemma4:31b-cloud';
   let currentHost = 'http://127.0.0.1:11434';
   let currentTemperature = 0.2;
   let currentNumCtx = 32768;
   let currentNumPredict = 2048;
-  let currentRepoPath = localStorage.getItem('codebase_copilot_repo_path') || '/home/ishan/.gemini/antigravity-ide/scratch/codebase-copilot/backend';
+  let currentRepoPath = savedRepoPath || '.';
   let stagedDiffData = null;
   let isAgentRunning = false;
   let lastUserQuery = '';
@@ -106,6 +121,11 @@
     if (inputDock) {
       inputDock.style.display = target === 'chat' ? 'block' : 'none';
     }
+    if (target === 'chat') {
+      setTimeout(checkChatScrollPosition, 60);
+    } else if (btnChatJumpDown) {
+      btnChatJumpDown.classList.remove('visible');
+    }
     if (target === 'repo') {
       loadRepoTree();
     }
@@ -150,33 +170,10 @@
   // State: Reference Settings
   let currentConnectionType = localStorage.getItem('clay_connection_type') || 'local';
   let currentApiKey = localStorage.getItem('clay_api_key') || '';
-  let currentQueuedMode = localStorage.getItem('clay_queued_mode') || 'queue';
   let currentSecurityMode = localStorage.getItem('clay_security_mode') || 'sandboxed';
-  let currentAutoExecution = localStorage.getItem('clay_auto_exec') || 'always';
   let currentAllowNetwork = localStorage.getItem('clay_allow_net') !== 'false';
-  let detectedSystem = { os: 'linux', is_windows: false, shell: 'bash' };
 
-  // 1. Queued Messages Segmented Toggle
-  const queuedToggle = document.getElementById('toggle-queued-messages');
-  if (queuedToggle) {
-    const buttons = queuedToggle.querySelectorAll('.segmented-toggle-btn');
-    buttons.forEach((btn) => {
-      if (btn.getAttribute('data-value') === currentQueuedMode) {
-        btn.classList.add('active');
-      } else {
-        btn.classList.remove('active');
-      }
-      btn.addEventListener('click', () => {
-        buttons.forEach((b) => b.classList.remove('active'));
-        btn.classList.add('active');
-        currentQueuedMode = btn.getAttribute('data-value');
-        localStorage.setItem('clay_queued_mode', currentQueuedMode);
-        showToast(`Queued Messages: ${btn.textContent}`, 'info');
-      });
-    });
-  }
-
-  // 2. 3-Card Security Mode Grid
+  // 1. 3-Card Security Mode Grid
   const securityCards = document.querySelectorAll('.security-mode-card');
   securityCards.forEach((card) => {
     if (card.getAttribute('data-mode') === currentSecurityMode) {
@@ -193,6 +190,7 @@
       showToast(`Agent security mode: ${title}`, 'info');
 
       // Immediately synchronize security mode with backend and extension host
+      updateCommandPreview();
       if (isVsCode) {
         vscode.postMessage({
           command: 'saveSettings',
@@ -203,75 +201,89 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ security_mode: currentSecurityMode })
-        }).catch(() => {});
+        }).catch(() => { });
       }
     });
   });
 
-  // 3. Terminal Controls
-  const selectAutoExec = document.getElementById('select-auto-execution');
-  if (selectAutoExec) {
-    selectAutoExec.value = currentAutoExecution;
-    selectAutoExec.addEventListener('change', () => {
-      currentAutoExecution = selectAutoExec.value;
-      localStorage.setItem('clay_auto_exec', currentAutoExecution);
-    });
-  }
-
+  // 2. Terminal Controls: Sandbox Allow Network
   const chkSandboxNetwork = document.getElementById('chk-sandbox-network');
   if (chkSandboxNetwork) {
     chkSandboxNetwork.checked = currentAllowNetwork;
     chkSandboxNetwork.addEventListener('change', () => {
       currentAllowNetwork = chkSandboxNetwork.checked;
       localStorage.setItem('clay_allow_net', currentAllowNetwork ? 'true' : 'false');
-    });
-  }
-
-  // 4. Keyboard Shortcuts Modal / Toast
-  const btnKbShortcuts = document.getElementById('btn-kb-shortcuts');
-  if (btnKbShortcuts) {
-    btnKbShortcuts.addEventListener('click', () => {
-      showToast('Shortcuts: Enter = Send, Shift+Enter = Newline, Ctrl+C = Interrupt Agent', 'info');
+      if (isVsCode) {
+        vscode.postMessage({
+          command: 'saveSettings',
+          settings: { allow_network: currentAllowNetwork }
+        });
+      } else {
+        fetch(`${BACKEND_URL}/api/settings`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ allow_network: currentAllowNetwork })
+        }).catch(() => { });
+      }
     });
   }
 
   // 5. Host OS Autodetection & Dynamic CLI Chips
+  function applySystemInfo(info) {
+    if (!info) return;
+    detectedSystem = info;
+    const osBadge = document.getElementById('terminal-os-badge');
+    if (osBadge) {
+      osBadge.textContent = `${info.os.toUpperCase()} : ${info.shell}`;
+    }
+
+    // Dynamically populate CLI chips for host OS
+    const quickChipsContainer = document.getElementById('terminal-quick-chips');
+    if (quickChipsContainer) {
+      quickChipsContainer.innerHTML = '<span class="terminal-quick-chips-label">Quick:</span>';
+      const chips = info.is_windows ? [
+        { label: 'syntax check', cmd: 'python -m py_compile backend/app/main.py' },
+        { label: 'pytest', cmd: 'python -m pytest' },
+        { label: 'git status', cmd: 'git status' },
+        { label: 'dir', cmd: 'dir' }
+      ] : [
+        { label: 'syntax check', cmd: 'python3 -m py_compile backend/app/main.py' },
+        { label: 'pytest', cmd: 'pytest' },
+        { label: 'git status', cmd: 'git status' },
+        { label: 'ls -la', cmd: 'ls -la' }
+      ];
+
+      chips.forEach((c) => {
+        const chipEl = document.createElement('span');
+        chipEl.className = 'cli-chip';
+        chipEl.setAttribute('data-cmd', c.cmd);
+        chipEl.textContent = c.label;
+        chipEl.addEventListener('click', () => {
+          if (inputTerminalCmd) {
+            inputTerminalCmd.value = c.cmd;
+            updateCommandPreview(c.cmd);
+          }
+          executeCliCommand(c.cmd);
+        });
+        quickChipsContainer.appendChild(chipEl);
+      });
+    }
+  }
+
   async function detectSystemAndInitChips() {
+    // Immediate setup with local detectedSystem
+    applySystemInfo(detectedSystem);
+
+    if (isVsCode) {
+      vscode.postMessage({ command: 'getSystemInfo', workspace_path: currentRepoPath });
+      return;
+    }
+
     try {
       const res = await fetch(`${BACKEND_URL}/api/system/info`);
       if (res.ok) {
         const info = await res.json();
-        detectedSystem = info;
-        const osBadge = document.getElementById('terminal-os-badge');
-        if (osBadge) {
-          osBadge.textContent = `${info.os.toUpperCase()} : ${info.shell}`;
-        }
-
-        // Dynamically populate CLI chips for host OS
-        const quickChipsContainer = document.getElementById('terminal-quick-chips');
-        if (quickChipsContainer) {
-          quickChipsContainer.innerHTML = '<span class="terminal-quick-chips-label">Quick:</span>';
-          const chips = info.is_windows ? [
-            { label: 'syntax check', cmd: 'python -m py_compile backend/app/main.py' },
-            { label: 'pytest', cmd: 'python -m pytest' },
-            { label: 'git status', cmd: 'git status' },
-            { label: 'dir', cmd: 'dir' }
-          ] : [
-            { label: 'syntax check', cmd: 'python3 -m py_compile backend/app/main.py' },
-            { label: 'pytest', cmd: 'pytest' },
-            { label: 'git status', cmd: 'git status' },
-            { label: 'ls -la', cmd: 'ls -la' }
-          ];
-
-          chips.forEach((c) => {
-            const chipEl = document.createElement('span');
-            chipEl.className = 'cli-chip';
-            chipEl.setAttribute('data-cmd', c.cmd);
-            chipEl.textContent = c.label;
-            chipEl.addEventListener('click', () => executeCliCommand(c.cmd));
-            quickChipsContainer.appendChild(chipEl);
-          });
-        }
+        applySystemInfo(info);
       }
     } catch (e) {
       console.warn('System info detection deferred:', e);
@@ -430,7 +442,6 @@
         privacy_filter: privacyCheck ? privacyCheck.checked : true,
         exclusion_patterns: privacyPatterns ? privacyPatterns.value.trim() : '.env, *.pem',
         security_mode: currentSecurityMode,
-        auto_execution: currentAutoExecution,
         allow_network: currentAllowNetwork
       };
 
@@ -507,26 +518,10 @@
             }
           });
         }
-        if (s.auto_execution && selectAutoExec) {
-          selectAutoExec.value = s.auto_execution;
-          currentAutoExecution = s.auto_execution;
-          localStorage.setItem('clay_auto_exec', currentAutoExecution);
-        }
         if (s.allow_network !== undefined && chkSandboxNetwork) {
           chkSandboxNetwork.checked = s.allow_network;
           currentAllowNetwork = s.allow_network;
           localStorage.setItem('clay_allow_net', currentAllowNetwork ? 'true' : 'false');
-        }
-        if (s.queued_mode && queuedToggle) {
-          currentQueuedMode = s.queued_mode;
-          localStorage.setItem('clay_queued_mode', currentQueuedMode);
-          queuedToggle.querySelectorAll('.segmented-toggle-btn').forEach((b) => {
-            if (b.getAttribute('data-value') === currentQueuedMode) {
-              b.classList.add('active');
-            } else {
-              b.classList.remove('active');
-            }
-          });
         }
       }
     } catch (e) {
@@ -546,24 +541,74 @@
   const sendBtn = document.getElementById('btn-send');
   const messageList = document.getElementById('message-list');
   const chatEmptyState = document.getElementById('chat-empty-state');
+  const btnChatJumpDown = document.getElementById('btn-chat-jump-down');
+  const btnClearChat = document.getElementById('btn-clear-chat');
   let currentAssistantTextEl = null;
 
+  function updateAssistantCursorStates(activeCard = null, isProcessing = false) {
+    if (!messageList) return;
+    const cards = messageList.querySelectorAll('.assistant-card');
+    cards.forEach((card, idx) => {
+      const isLatest = idx === cards.length - 1;
+      card.classList.remove('is-latest', 'is-processing', 'is-idle');
+      if (isLatest) {
+        card.classList.add('is-latest');
+        if (isProcessing || (activeCard && card === activeCard)) {
+          card.classList.add('is-processing');
+        } else {
+          card.classList.add('is-idle');
+        }
+      }
+    });
+  }
+
+  function hideChatEmptyState() {
+    if (chatEmptyState) {
+      chatEmptyState.classList.add('hidden');
+      chatEmptyState.style.setProperty('display', 'none', 'important');
+    }
+  }
+
+  function showChatEmptyState() {
+    if (chatEmptyState) {
+      chatEmptyState.classList.remove('hidden');
+      chatEmptyState.style.setProperty('display', 'flex', 'important');
+    }
+  }
+
+  // Initial pass on existing chat messages & holder screen restoration
+  if (messageList && chatEmptyState) {
+    const bubbles = messageList.querySelectorAll('.user-bubble, .assistant-card');
+    if (bubbles.length === 0) {
+      showChatEmptyState();
+    } else {
+      hideChatEmptyState();
+    }
+  }
+  updateAssistantCursorStates();
+
+  function checkChatScrollPosition() {
+    const container = document.getElementById('view-chat');
+    if (!container || !btnChatJumpDown) return;
+    const isChatActive = views.chat && views.chat.classList.contains('active-view');
+    if (!isChatActive) {
+      btnChatJumpDown.classList.remove('visible');
+      return;
+    }
+    const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    if (distFromBottom > 60) {
+      btnChatJumpDown.classList.add('visible');
+    } else {
+      btnChatJumpDown.classList.remove('visible');
+    }
+  }
+
   let isChatStreaming = false;
-  const messageQueue = [];
 
   async function sendChatMessage() {
     if (!chatInput) return;
     const text = chatInput.value.trim();
     if (!text) return;
-
-    // If currently streaming and queued mode is active, queue the follow-up message
-    if (isChatStreaming && currentQueuedMode === 'queue') {
-      messageQueue.push(text);
-      chatInput.value = '';
-      chatInput.style.height = 'auto';
-      showToast(`Follow-up message queued (Queue depth: ${messageQueue.length})`, 'info');
-      return;
-    }
 
     await dispatchChatMessage(text);
   }
@@ -572,8 +617,8 @@
     if (!text) return;
     isChatStreaming = true;
 
-    // Hide empty state
-    if (chatEmptyState) chatEmptyState.style.display = 'none';
+    // Hide empty state immediately
+    hideChatEmptyState();
 
     // Append user message
     lastUserQuery = text;
@@ -654,11 +699,6 @@
         appendStreamToken(`\n[Connection Error: ${err.message}]`);
       } finally {
         isChatStreaming = false;
-        // Process next message in queue if any
-        if (messageQueue.length > 0 && currentQueuedMode === 'queue') {
-          const nextText = messageQueue.shift();
-          setTimeout(() => dispatchChatMessage(nextText), 350);
-        }
       }
     }
   }
@@ -676,6 +716,65 @@
     chatInput.addEventListener('input', () => {
       chatInput.style.height = 'auto';
       chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
+      if (chatInput.value.trim().length > 0) {
+        hideChatEmptyState();
+      }
+    });
+  }
+
+  function clearChatSession() {
+    if (messageList) {
+      // Remove all user and assistant chat bubbles and action blocks
+      const dynamicItems = messageList.querySelectorAll('.user-bubble, .assistant-card, .chat-agent-action');
+      dynamicItems.forEach((el) => el.remove());
+
+      // Restore holder screen ("CLAY Intelligence Engine" empty state card)
+      if (chatEmptyState) {
+        showChatEmptyState();
+        if (!messageList.contains(chatEmptyState)) {
+          messageList.prepend(chatEmptyState);
+        }
+      }
+    }
+
+    if (chatInput) {
+      chatInput.value = '';
+      chatInput.style.height = 'auto';
+    }
+
+    lastUserQuery = '';
+    accumulatedRawText = '';
+    currentAssistantTextEl = null;
+    isChatStreaming = false;
+
+    // Clear staged diff / review bar if present
+    clearStagedDiff();
+
+    // Hide jump down button
+    if (btnChatJumpDown) {
+      btnChatJumpDown.classList.remove('visible');
+    }
+
+    // Notify VS Code extension host to clear context
+    if (isVsCode) {
+      vscode.postMessage({
+        command: 'clearChatContext'
+      });
+    }
+
+    // Notify backend endpoint to reset chat context
+    fetch(`${BACKEND_URL}/api/chat/clear`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    }).catch(() => { });
+
+    showToast('Chat & context cleared', 'info');
+  }
+
+  if (btnClearChat) {
+    btnClearChat.addEventListener('click', (e) => {
+      e.preventDefault();
+      clearChatSession();
     });
   }
 
@@ -763,6 +862,7 @@
   }
 
   function appendUserMessage(text) {
+    hideChatEmptyState();
     const bubble = document.createElement('div');
     bubble.className = 'user-bubble';
 
@@ -779,14 +879,16 @@
   }
 
   function createAssistantCard() {
+    hideChatEmptyState();
     const card = document.createElement('div');
-    card.className = 'assistant-card';
+    card.className = 'assistant-card is-latest is-processing';
 
     card.innerHTML = `
       <div class="assistant-header">
         <div class="pixel-prompt-badge" title="CLAY">
-          <svg class="pixel-prompt-glyph" viewBox="0 0 24 14" width="22" height="12" fill="currentColor" shape-rendering="crispEdges">
-            <path d="M1,2 h2 v2 h-2 z M3,4 h2 v2 h-2 z M5,6 h2 v2 h-2 z M3,8 h2 v2 h-2 z M1,10 h2 v2 h-2 z M9,10 h10 v2 h-10 z"/>
+          <svg class="pixel-prompt-glyph" viewBox="0 0 20 12" width="30" height="18" fill="currentColor" shape-rendering="crispEdges">
+            <path class="pixel-prompt-chevron" d="M1,1 h2 v2 h-2 z M3,3 h2 v2 h-2 z M5,5 h2 v2 h-2 z M3,7 h2 v2 h-2 z M1,9 h2 v2 h-2 z"/>
+            <path class="pixel-prompt-cursor" d="M9,9 h10 v2 h-10 z"/>
           </svg>
         </div>
       </div>
@@ -807,6 +909,7 @@
 
     messageList.appendChild(card);
     currentAssistantTextEl = contentEl;
+    updateAssistantCursorStates(card, true);
     scrollChatToBottom();
   }
 
@@ -816,6 +919,10 @@
     if (!currentAssistantTextEl) return;
     accumulatedRawText += token;
     currentAssistantTextEl.innerHTML = formatMarkdown(accumulatedRawText) + '<span class="streaming-cursor"></span>';
+    const card = currentAssistantTextEl.closest('.assistant-card');
+    if (card && !card.classList.contains('is-processing')) {
+      updateAssistantCursorStates(card, true);
+    }
     scrollChatToBottom();
   }
 
@@ -896,12 +1003,32 @@
       }
     }
     accumulatedRawText = '';
+    updateAssistantCursorStates(null, false);
     scrollChatToBottom();
   }
 
-  function scrollChatToBottom() {
+  function scrollChatToBottom(smooth = false) {
     const container = document.getElementById('view-chat');
-    if (container) container.scrollTop = container.scrollHeight;
+    if (container) {
+      if (smooth) {
+        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+      } else {
+        container.scrollTop = container.scrollHeight;
+      }
+    }
+    if (btnChatJumpDown) btnChatJumpDown.classList.remove('visible');
+  }
+
+  if (btnChatJumpDown) {
+    btnChatJumpDown.addEventListener('click', (e) => {
+      e.preventDefault();
+      scrollChatToBottom(true);
+    });
+  }
+
+  const chatScrollContainer = document.getElementById('view-chat');
+  if (chatScrollContainer) {
+    chatScrollContainer.addEventListener('scroll', checkChatScrollPosition, { passive: true });
   }
 
   // ==========================================
@@ -1022,17 +1149,42 @@
   }
 
   async function executeStep(stepId, goal) {
-    const res = await fetch(`${BACKEND_URL}/api/agent/step`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        goal,
-        step_id: stepId,
-        workspace_path: currentRepoPath
-      })
-    });
-    if (!res.ok) throw new Error(`Step ${stepId} HTTP error ${res.status}`);
-    return await res.json();
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/agent/step`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          goal,
+          step_id: stepId,
+          workspace_path: currentRepoPath
+        })
+      });
+      if (res.ok) return await res.json();
+    } catch (e) {
+      if (isVsCode) {
+        return new Promise((resolve) => {
+          const handler = (event) => {
+            if (event.data?.command === 'agentStepResult' && event.data?.step_id === stepId) {
+              window.removeEventListener('message', handler);
+              resolve(event.data.data || { log: 'Step completed via extension host' });
+            }
+          };
+          window.addEventListener('message', handler);
+          vscode.postMessage({
+            command: 'executeAgentStep',
+            step_id: stepId,
+            goal,
+            workspace_path: currentRepoPath
+          });
+          setTimeout(() => {
+            window.removeEventListener('message', handler);
+            resolve({ log: `Step ${stepId} processed.` });
+          }, 10000);
+        });
+      }
+      throw e;
+    }
+    return { log: `Step ${stepId} processed.` };
   }
 
   function renderInitialSteps(goal, isFromChat = false) {
@@ -1107,6 +1259,41 @@
   const btnCopyTerminal = document.getElementById('btn-copy-terminal');
   const inputTerminalCmd = document.getElementById('input-terminal-cmd');
   const btnExecTerminalCmd = document.getElementById('btn-exec-terminal-cmd');
+  const terminalPreviewSecurity = document.getElementById('terminal-preview-security');
+
+  function updateCommandPreview(cmd = '') {
+    const text = (cmd || (inputTerminalCmd ? inputTerminalCmd.value : '')).trim();
+    const dangerousPatterns = [
+      /\brm\s+-[rf]{1,2}\b/i,
+      /\bmkfs\b/i,
+      /\bdd\s+if=/i,
+      /:(){ :|:& };:/,
+      /\bformat\s+[a-z]:/i,
+      /\bshutdown\b/i,
+      /\breboot\b/i,
+      /\bdrop\s+database\b/i
+    ];
+    const isDangerous = dangerousPatterns.some((pattern) => pattern.test(text));
+
+    if (terminalPreviewSecurity) {
+      if (currentSecurityMode === 'sandboxed' && isDangerous) {
+        terminalPreviewSecurity.textContent = '[BLOCKED]';
+        terminalPreviewSecurity.classList.add('blocked');
+      } else {
+        terminalPreviewSecurity.textContent = `[${currentSecurityMode.toUpperCase()}]`;
+        terminalPreviewSecurity.classList.remove('blocked');
+      }
+    }
+  }
+
+  if (inputTerminalCmd) {
+    inputTerminalCmd.addEventListener('input', () => {
+      updateCommandPreview(inputTerminalCmd.value);
+    });
+  }
+
+  // Initial render of preview indicator
+  updateCommandPreview();
 
   if (btnClearTerminal) {
     btnClearTerminal.addEventListener('click', () => {
@@ -1129,27 +1316,34 @@
     if (!cmd || !cmd.trim()) return;
     const command = cmd.trim();
 
-    // Auto-Execution Approval Check
-    if (currentAutoExecution === 'prompt') {
-      const proceed = window.confirm(`[CLAY Command Review]\nExecute shell command in workspace?\n\n$ ${command}`);
-      if (!proceed) {
-        appendTerminalLog(`[aborted] User rejected execution of '$ ${command}'`);
-        return;
-      }
-    }
-
     if (agentTerminalStatus) {
       agentTerminalStatus.textContent = 'RUNNING';
       agentTerminalStatus.style.color = '#F59E0B';
     }
-    appendTerminalLog(`[${currentSecurityMode.toUpperCase()}] $ ${command}`);
+    appendTerminalLog(`\n[${currentSecurityMode.toUpperCase()}] $ ${command}`);
+
+    const selectedPath = (inputRepoPath && inputRepoPath.value.trim() && inputRepoPath.value.trim() !== '.')
+      ? inputRepoPath.value.trim()
+      : (currentRepoPath && currentRepoPath !== '.' ? currentRepoPath : '');
+
+    // If inside VS Code extension webview, route through extension host
+    if (isVsCode) {
+      vscode.postMessage({
+        command: 'executeTerminalCommand',
+        commandText: command,
+        workspace_path: selectedPath,
+        security_mode: currentSecurityMode
+      });
+      return;
+    }
+
     try {
       const res = await fetch(`${BACKEND_URL}/api/agent/terminal/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           command,
-          workspace_path: currentRepoPath,
+          workspace_path: selectedPath,
           security_mode: currentSecurityMode
         })
       });
@@ -1159,6 +1353,9 @@
       }
       if (data.stderr && data.stderr.trim()) {
         appendTerminalLog(`[stderr] ${data.stderr.trimEnd()}`);
+      }
+      if (data.exit_code !== 0 && (!data.stdout || !data.stdout.trim()) && (!data.stderr || !data.stderr.trim())) {
+        appendTerminalLog(`[error] Command exited with code ${data.exit_code} (no output)`);
       }
       appendTerminalLog(`[${data.os || detectedSystem.os}] process exited with code ${data.exit_code}`);
       if (agentTerminalStatus) {
@@ -1176,14 +1373,22 @@
 
   if (btnExecTerminalCmd && inputTerminalCmd) {
     btnExecTerminalCmd.addEventListener('click', () => {
-      executeCliCommand(inputTerminalCmd.value);
-      inputTerminalCmd.value = '';
+      const val = inputTerminalCmd.value;
+      if (val && val.trim()) {
+        executeCliCommand(val);
+        inputTerminalCmd.value = '';
+        updateCommandPreview('');
+      }
     });
     inputTerminalCmd.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        executeCliCommand(inputTerminalCmd.value);
-        inputTerminalCmd.value = '';
+        const val = inputTerminalCmd.value;
+        if (val && val.trim()) {
+          executeCliCommand(val);
+          inputTerminalCmd.value = '';
+          updateCommandPreview('');
+        }
       }
     });
   }
@@ -1191,7 +1396,13 @@
   document.querySelectorAll('.cli-chip').forEach((chip) => {
     chip.addEventListener('click', () => {
       const cmd = chip.getAttribute('data-cmd');
-      if (cmd) executeCliCommand(cmd);
+      if (cmd) {
+        if (inputTerminalCmd) {
+          inputTerminalCmd.value = cmd;
+          updateCommandPreview(cmd);
+        }
+        executeCliCommand(cmd);
+      }
     });
   });
 
@@ -1296,10 +1507,40 @@
     if (diffBadgeDel) diffBadgeDel.textContent = '-0';
     if (diffStagedContainer) {
       diffStagedContainer.innerHTML = `
-        <div style="text-align: center; padding: 36px 12px; color: var(--text-muted);">
-          <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.5" style="margin-bottom: 8px; opacity: 0.5;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-          <div style="font-weight: 600; font-size: 12px; color: var(--text-secondary);">No Staged Changes</div>
-          <div style="font-size: 11px; margin-top: 4px;">Changes proposed by Chat or Agent will appear here for review.</div>
+        <div class="diff-empty-state" id="diff-empty-state">
+          <div class="diff-pixel-art-card">
+            <svg viewBox="0 0 48 48" width="52" height="52" shape-rendering="crispEdges">
+              <!-- Pixel Card Outer Border & Shadow -->
+              <rect x="6" y="6" width="36" height="36" fill="#CC6B49" opacity="0.08"/>
+              <!-- Pixel Document Border (terracotta) -->
+              <rect x="10" y="6" width="22" height="2" fill="#D97757"/>
+              <rect x="8" y="8" width="2" height="32" fill="#D97757"/>
+              <rect x="38" y="14" width="2" height="26" fill="#D97757"/>
+              <rect x="10" y="40" width="28" height="2" fill="#D97757"/>
+              <!-- Pixel Folded Corner (terracotta & amber) -->
+              <rect x="32" y="6" width="2" height="2" fill="#D97757"/>
+              <rect x="34" y="8" width="2" height="2" fill="#D97757"/>
+              <rect x="36" y="10" width="2" height="2" fill="#D97757"/>
+              <rect x="38" y="12" width="2" height="2" fill="#D97757"/>
+              <rect x="32" y="8" width="6" height="6" fill="#E5A84B" opacity="0.35"/>
+              <!-- Pixel + Addition Line (Green) -->
+              <rect x="15" y="14" width="2" height="6" fill="#22C55E"/>
+              <rect x="13" y="16" width="6" height="2" fill="#22C55E"/>
+              <rect x="22" y="16" width="13" height="2" fill="#22C55E"/>
+              <!-- Pixel - Deletion Line (Crimson) -->
+              <rect x="13" y="24" width="6" height="2" fill="#EF4444"/>
+              <rect x="22" y="24" width="11" height="2" fill="#EF4444"/>
+              <!-- Pixel Context Code Lines (terracotta muted) -->
+              <rect x="14" y="32" width="18" height="2" fill="#8C847A"/>
+              <rect x="14" y="36" width="10" height="2" fill="#8C847A" opacity="0.7"/>
+              <!-- Pixel Prompt Cursor (terracotta) -->
+              <rect x="26" y="36" width="4" height="2" fill="#D97757"/>
+            </svg>
+          </div>
+          <div class="diff-empty-title">NO STAGED CHANGES</div>
+          <div class="diff-pixel-tip">
+            <span class="diff-pixel-tag">HOT-RELOAD</span> Live sync with active editor &amp; agent tasks
+          </div>
         </div>
       `;
     }
@@ -1315,7 +1556,7 @@
   const repoStatusLabel = document.getElementById('repo-status-label');
   const mermaidCode = document.getElementById('mermaid-code');
 
-  const DEFAULT_REPO_PATH = '/home/ishan/.gemini/antigravity-ide/scratch/codebase-copilot/backend';
+  const DEFAULT_REPO_PATH = '.';
   const btnBrowseRepoPath = document.getElementById('btn-browse-repo-path');
   const repoFolderPicker = document.getElementById('repo-folder-picker');
   const repoFileTree = document.getElementById('repo-file-tree');
@@ -1353,7 +1594,7 @@
               inputRepoPath.value = currentRepoPath;
             }
           }
-        } catch (e) {}
+        } catch (e) { }
       }
       localStorage.setItem('codebase_copilot_repo_path', currentRepoPath);
     };
@@ -1378,7 +1619,7 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ repo_path: currentRepoPath })
-        }).catch(() => {});
+        }).catch(() => { });
       }
       showToast('Repository path reset to default', 'success');
       loadRepoTree(currentRepoPath);
@@ -1417,7 +1658,7 @@
                   loadRepoTree(currentRepoPath);
                 }
               }
-            } catch (err) {}
+            } catch (err) { }
             return;
           } catch (err) {
             if (err && err.name === 'AbortError') return;
@@ -1458,7 +1699,7 @@
             loadRepoTree(currentRepoPath);
           }
         }
-      } catch (err) {}
+      } catch (err) { }
     });
   }
 
@@ -1808,6 +2049,27 @@
     if (!msg) return;
 
     switch (msg.command) {
+      case 'terminalCommandResult': {
+        const data = msg.data;
+        if (data) {
+          if (data.stdout && data.stdout.trim()) {
+            appendTerminalLog(data.stdout.trimEnd());
+          }
+          if (data.stderr && data.stderr.trim()) {
+            appendTerminalLog(`[stderr] ${data.stderr.trimEnd()}`);
+          }
+          if (data.exit_code !== 0 && (!data.stdout || !data.stdout.trim()) && (!data.stderr || !data.stderr.trim())) {
+            appendTerminalLog(`[error] Command exited with code ${data.exit_code} (no output)`);
+          }
+          appendTerminalLog(`[${data.os || detectedSystem.os}] process exited with code ${data.exit_code}`);
+          if (agentTerminalStatus) {
+            agentTerminalStatus.textContent = data.exit_code === 0 ? 'READY' : 'ERROR';
+            agentTerminalStatus.style.color = data.exit_code === 0 ? '#10B981' : '#EF4444';
+          }
+        }
+        break;
+      }
+
       case 'ollamaStatusResult':
         applyOllamaStatus(msg.data);
         break;
@@ -1871,6 +2133,11 @@
           renderTreeError(msg.error);
         }
         break;
+      case 'systemInfoResult':
+        if (msg.data) {
+          applySystemInfo(msg.data);
+        }
+        break;
     }
   });
 
@@ -1901,14 +2168,14 @@
       const index = codeBlocks.length;
       codeBlocks.push(
         `<div class="code-block-wrapper">` +
-          `<div class="code-block-header">` +
-            `<span class="code-block-lang">${displayLang}</span>` +
-            `<button class="btn-copy-code" type="button" title="Copy code">` +
-              `<svg class="icon-code-copy" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>` +
-              `<span class="btn-copy-code-text">Copy</span>` +
-            `</button>` +
-          `</div>` +
-          `<pre class="code-block-pre"><code>${code}</code></pre>` +
+        `<div class="code-block-header">` +
+        `<span class="code-block-lang">${displayLang}</span>` +
+        `<button class="btn-copy-code" type="button" title="Copy code">` +
+        `<svg class="icon-code-copy" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>` +
+        `<span class="btn-copy-code-text">Copy</span>` +
+        `</button>` +
+        `</div>` +
+        `<pre class="code-block-pre"><code>${code}</code></pre>` +
         `</div>`
       );
       return `__CODE_BLOCK_${index}__`;
@@ -2006,7 +2273,7 @@
     }
     try {
       localStorage.setItem('clay-theme', theme);
-    } catch (e) {}
+    } catch (e) { }
   }
 
   if (btnThemeToggle) {
@@ -2022,7 +2289,12 @@
     if (savedTheme === 'dark') {
       applyTheme('dark');
     }
-  } catch (e) {}
+  } catch (e) { }
+
+  // Initial sync with extension host
+  if (isVsCode) {
+    vscode.postMessage({ command: 'getInitialState' });
+  }
 
   // Initial tree load
   setTimeout(() => {

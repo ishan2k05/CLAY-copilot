@@ -63,7 +63,7 @@ active_task: Dict[str, Any] = {
 
 DEFAULT_WORKSPACE = os.getenv(
     "WORKSPACE_ROOT",
-    "/home/ishan/.gemini/antigravity-ide/scratch/codebase-copilot"
+    str(Path(__file__).resolve().parent.parent.parent) if (Path(__file__).resolve().parent.parent.parent).exists() else str(Path.cwd().resolve())
 )
 
 current_indexed_workspace: Optional[str] = None
@@ -99,7 +99,6 @@ def resolve_workspace_path(path_str: Optional[str]) -> Path:
         home / p_str,
         home / "Documents" / p_str,
         home / "Downloads" / p_str,
-        Path("/home/ishan/.gemini/antigravity-ide/scratch") / p_str,
         Path(DEFAULT_WORKSPACE) / p_str,
         Path(__file__).resolve().parent.parent / p_str,
         Path.cwd() / p_str,
@@ -108,7 +107,7 @@ def resolve_workspace_path(path_str: Optional[str]) -> Path:
         if cand.exists() and cand.is_dir():
             return cand.resolve()
 
-    for base in [home / "Desktop", home, Path("/home/ishan/.gemini/antigravity-ide/scratch")]:
+    for base in [home / "Desktop", home, Path.cwd().parent]:
         if base.exists() and base.is_dir():
             try:
                 for child in base.iterdir():
@@ -123,7 +122,7 @@ def resolve_workspace_path(path_str: Optional[str]) -> Path:
     current = runtime_settings.get("repo_path")
     if current and Path(current).exists() and Path(current).is_dir():
         return Path(current).resolve()
-    return Path(DEFAULT_WORKSPACE).resolve()
+    return Path(DEFAULT_WORKSPACE).resolve() if Path(DEFAULT_WORKSPACE).exists() else Path.cwd().resolve()
 
 async def auto_index_workspace(workspace_dir: str) -> Dict[str, int]:
     """
@@ -228,6 +227,87 @@ async def auto_index_workspace(workspace_dir: str) -> Dict[str, int]:
         "chunksCount": len(all_chunks)
     }
 
+live_file_buffers: Dict[str, str] = {}
+
+async def reindex_file(file_path: str, content: Optional[str] = None) -> bool:
+    """
+    Incrementally updates SQLite symbol graph and vector store for a single modified/saved/patched file.
+    Preserves all other workspace chunks so search remains fast and live.
+    """
+    try:
+        p = Path(file_path).resolve()
+        if content is None:
+            if str(p) in live_file_buffers:
+                content = live_file_buffers[str(p)]
+            elif p.exists() and p.is_file():
+                content = p.read_text(encoding="utf-8", errors="ignore")
+            else:
+                return False
+
+        # Update in-memory live buffer
+        live_file_buffers[str(p)] = content
+        live_file_buffers[p.name] = content
+
+        # Remove existing chunks for this file from vector_store
+        vector_store.chunks = [c for c in vector_store.chunks if Path(c.file_path).resolve() != p]
+
+        # Parse new chunks
+        new_symbols = []
+        new_relationships = []
+        new_chunks = []
+
+        if p.suffix == ".py":
+            try:
+                new_symbols, new_relationships, new_chunks = ast_chunker.parse_file(str(p), content)
+            except Exception:
+                pass
+        else:
+            lines = content.splitlines()
+            step = 30
+            for i in range(0, min(len(lines), 120), step):
+                chunk_lines = lines[i:i + step]
+                chunk_body = "\n".join(chunk_lines)
+                if chunk_body.strip():
+                    new_chunks.append(CodeChunk(
+                        chunk_id=f"{p}#{i+1}-{i+len(chunk_lines)}",
+                        file_path=str(p),
+                        symbol_type="file_section",
+                        symbol_name=f"{p.name}:{i+1}",
+                        start_line=i + 1,
+                        end_line=i + len(chunk_lines),
+                        content=chunk_body
+                    ))
+
+        if new_symbols:
+            await graph_store.insert_batch(new_symbols, new_relationships)
+        if new_chunks:
+            await vector_store.add_chunks(new_chunks)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to incrementally reindex {file_path}: {e}")
+        return False
+
+class SyncFileRequest(BaseModel):
+    file_path: str
+    content: str
+    workspace_path: Optional[str] = None
+    event: Optional[str] = "changed"
+
+@app.post("/api/sync/file")
+async def sync_file_endpoint(req: SyncFileRequest):
+    """Real-time hot reload sync endpoint for editor documents and agent changes."""
+    p = Path(req.file_path).resolve()
+    live_file_buffers[str(p)] = req.content
+    live_file_buffers[p.name] = req.content
+    await reindex_file(str(p), req.content)
+    return {
+        "status": "synced",
+        "file": str(p),
+        "filename": p.name,
+        "lines": len(req.content.splitlines()),
+        "bytes": len(req.content.encode("utf-8"))
+    }
+
 @app.on_event("startup")
 async def on_startup():
     await graph_store.init_db()
@@ -263,9 +343,7 @@ async def get_ollama_status():
 
 runtime_settings = {
     "security_mode": "sandboxed",
-    "auto_execution": "always",
     "allow_network": True,
-    "queued_mode": "queue",
     "privacy_filter": True,
     "exclusion_patterns": ".env, *.pem, credentials.json, id_rsa, *.key",
     "connection_type": "local",
@@ -284,9 +362,7 @@ class SettingsUpdateRequest(BaseModel):
     privacy_filter: Optional[bool] = None
     exclusion_patterns: Optional[str] = None
     security_mode: Optional[str] = None
-    auto_execution: Optional[str] = None
     allow_network: Optional[bool] = None
-    queued_mode: Optional[str] = None
     repo_path: Optional[str] = None
 
 @app.get("/api/settings")
@@ -332,12 +408,8 @@ async def update_settings(req: SettingsUpdateRequest):
         runtime_settings["exclusion_patterns"] = req.exclusion_patterns
     if req.security_mode:
         runtime_settings["security_mode"] = req.security_mode
-    if req.auto_execution:
-        runtime_settings["auto_execution"] = req.auto_execution
     if req.allow_network is not None:
         runtime_settings["allow_network"] = req.allow_network
-    if req.queued_mode:
-        runtime_settings["queued_mode"] = req.queued_mode
     if req.repo_path:
         new_path = req.repo_path.strip()
         resolved = resolve_workspace_path(new_path)
@@ -364,6 +436,8 @@ async def update_settings(req: SettingsUpdateRequest):
 class ChatRequest(BaseModel):
     query: str
     context_file: Optional[str] = None
+    active_file_content: Optional[str] = None
+    open_files: Optional[List[Dict[str, Any]]] = None
     workspace_path: Optional[str] = None
     security_mode: Optional[str] = None
     stream: bool = True
@@ -377,17 +451,41 @@ async def chat_endpoint(req: ChatRequest):
     if req.security_mode:
         runtime_settings["security_mode"] = req.security_mode
 
+    # Sync live active file buffer and open files from VS Code in real-time
+    if req.context_file and req.active_file_content is not None:
+        p_res = Path(req.context_file).resolve()
+        live_file_buffers[str(p_res)] = req.active_file_content
+        live_file_buffers[p_res.name] = req.active_file_content
+        await reindex_file(str(p_res), req.active_file_content)
+
+    if req.open_files:
+        for of in req.open_files:
+            op = of.get("path")
+            oc = of.get("content")
+            if op and oc is not None:
+                opr = Path(op).resolve()
+                live_file_buffers[str(opr)] = oc
+                live_file_buffers[opr.name] = oc
+
     # If index is empty or workspace changed, re-index workspace
     if current_indexed_workspace != workspace_dir or len(vector_store.chunks) == 0:
         await auto_index_workspace(workspace_dir)
 
-    # 1. Direct file resolution via WorkspaceFileResolver (handles typos, exact matches, top-level scripts)
-    direct_file_chunks = WorkspaceFileResolver.resolve_query_files(req.query, workspace_dir, sec_mode)
+    # 1. Direct file resolution via WorkspaceFileResolver (handles typos, exact matches, top-level scripts, active editor file, live in-memory buffers)
+    direct_file_chunks = WorkspaceFileResolver.resolve_query_files(
+        query=req.query,
+        workspace_root=workspace_dir,
+        security_mode=sec_mode,
+        max_chars_per_file=50000,
+        context_file=req.context_file,
+        context_file_content=req.active_file_content,
+        live_buffers=live_file_buffers
+    )
 
-    # 2. Retrieve top relevant code chunks via token-budgeted Hybrid Search
+    # 2. Retrieve top relevant code chunks via Hybrid Search
     retrieved_chunks = await hybrid_engine.search(
         req.query,
-        top_k=3,
+        top_k=4,
         security_mode=sec_mode,
         workspace_root=workspace_dir
     )
@@ -403,12 +501,12 @@ async def chat_endpoint(req: ChatRequest):
         if chunk.file_path not in seen_paths:
             combined_chunks.append(chunk)
             seen_paths.add(chunk.file_path)
-            if len(combined_chunks) >= 4:
+            if len(combined_chunks) >= 6:
                 break
 
     hybrid_context = HybridSearchEngine.build_context_prompt(
         combined_chunks,
-        max_chars=1200,
+        max_chars=35000,
         workspace_root=workspace_dir
     )
 
@@ -417,29 +515,56 @@ async def chat_endpoint(req: ChatRequest):
     if WorkspaceFileResolver.is_access_or_catalog_query(req.query):
         catalog_context = WorkspaceFileResolver.get_workspace_catalog_summary(workspace_dir, sec_mode)
 
-    # 4. Add active editor file context if provided and compliant with security mode
+    # 4. Add active editor file context if provided, not already in combined_chunks, and compliant with security mode
     file_context = ""
-    if req.context_file and Path(req.context_file).exists():
-        fpath = Path(req.context_file).resolve()
+    target_fpath = None
+    if req.context_file:
+        target_fpath = Path(req.context_file).resolve()
+    elif req.active_file_content and direct_file_chunks:
+        target_fpath = Path(direct_file_chunks[0].file_path).resolve()
+
+    if target_fpath and (target_fpath.exists() or req.active_file_content):
+        fpath = target_fpath
         is_allowed = True
-        if sec_mode in ("strict", "sandboxed"):
+        if sec_mode in ("strict", "sandboxed") and target_fpath.exists():
             try:
                 fpath.relative_to(Path(workspace_dir).resolve())
             except ValueError:
                 is_allowed = False
 
         if is_allowed and not SecretMasker.is_file_sensitive(str(fpath)):
-            content = fpath.read_text(encoding="utf-8", errors="ignore")
-            # Surgical excerpt: first 20 lines / max 500 chars to avoid bloating context
-            lines = content.splitlines()[:20]
-            excerpt = "\n".join(lines)[:500]
-            try:
-                rel_name = str(fpath.relative_to(Path(workspace_dir).resolve()))
-            except Exception:
-                rel_name = fpath.name
-            file_context = f"[Active File: {rel_name}]\n{excerpt}\n"
+            already_included = any(Path(c.file_path).resolve() == fpath for c in combined_chunks)
+            if not already_included:
+                # Hot-reload: prioritize active in-memory content from VS Code, then live buffer, then disk
+                content = None
+                if req.context_file and str(Path(req.context_file).resolve()) == str(fpath) and req.active_file_content is not None:
+                    content = req.active_file_content
+                elif str(fpath) in live_file_buffers:
+                    content = live_file_buffers[str(fpath)]
+                elif fpath.name in live_file_buffers:
+                    content = live_file_buffers[fpath.name]
+                elif fpath.exists() and fpath.is_file():
+                    content = fpath.read_text(encoding="utf-8", errors="ignore")
+                else:
+                    content = ""
 
-    # Combine contexts with strict ceiling (< 1600 chars / ~400 tokens)
+                lines = content.splitlines()
+                total_lines = len(lines)
+                try:
+                    rel_name = str(fpath.relative_to(Path(workspace_dir).resolve()))
+                except Exception:
+                    rel_name = fpath.name
+
+                if not content.strip() or total_lines == 0:
+                    file_context = (
+                        f"[Active File: {rel_name} (0 lines, 0 bytes, EMPTY FILE)]\n"
+                        f"[Status: This file exists on disk and is completely EMPTY. It contains 0 lines of code.]\n"
+                    )
+                else:
+                    file_body = "\n".join(lines[:1000])[:30000]
+                    file_context = f"[Active File: {rel_name} ({total_lines} lines total)]\n{file_body}\n"
+
+    # Combine contexts with generous token ceiling (< 35,000 chars / ~8,000 tokens for 32k context window)
     parts = []
     if catalog_context:
         parts.append(catalog_context)
@@ -449,8 +574,8 @@ async def chat_endpoint(req: ChatRequest):
         parts.append(hybrid_context)
 
     full_code_context = "\n\n".join(parts).strip()
-    if len(full_code_context) > 1600:
-        full_code_context = full_code_context[:1600] + "... [truncated]"
+    if len(full_code_context) > 35000:
+        full_code_context = full_code_context[:35000] + "\n... [context truncated at 35,000 characters]"
 
     # Clean short relative citations to avoid UI clutter
     citations = []
@@ -472,6 +597,23 @@ async def chat_endpoint(req: ChatRequest):
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+@app.post("/api/chat/clear")
+async def clear_chat_context():
+    """Clears any active conversation context, query state, and temporary agent tasks."""
+    global active_task
+    active_task = {
+        "id": "TASK #0001",
+        "title": "Awaiting Goal",
+        "priority": "NORMAL",
+        "mode": "autonomous",
+        "model": ollama_provider.model_name,
+        "totalSteps": 0,
+        "completedSteps": 0,
+        "steps": [],
+        "stagedChanges": []
+    }
+    return {"status": "cleared", "message": "Chat context and active task reset successfully."}
 
 # ---------------------------------------------------------
 # 2. Repository Scanning & Dual Indexing (AST + SQLite + Vectors)
@@ -821,11 +963,25 @@ async def apply_patch(req: ApplyPatchRequest):
     )
     if result.get("status") == "error":
         raise HTTPException(status_code=400, detail=result.get("message"))
+
+    # Immediately reindex patched file and update live buffer so chat hot-reload is instant
+    patched_file = result.get("file")
+    if patched_file:
+        try:
+            p_obj = Path(patched_file)
+            if p_obj.exists():
+                new_text = p_obj.read_text(encoding="utf-8", errors="ignore")
+                live_file_buffers[str(p_obj.resolve())] = new_text
+                live_file_buffers[p_obj.name] = new_text
+                await reindex_file(str(p_obj.resolve()), new_text)
+        except Exception as e:
+            logger.error(f"Failed to auto-reindex patched file {patched_file}: {e}")
+
     return result
 
 @app.get("/api/system/info")
 async def get_system_info(workspace_path: Optional[str] = None):
-    cwd = workspace_path or str(Path.cwd().parent)
+    cwd = str(resolve_workspace_path(workspace_path or runtime_settings.get("repo_path")))
     terminal = TerminalAgent(cwd)
     return terminal.get_system_info()
 
@@ -836,14 +992,14 @@ class TerminalCommandRequest(BaseModel):
 
 @app.post("/api/agent/terminal/execute")
 async def execute_terminal_command(req: TerminalCommandRequest):
-    cwd = req.workspace_path or str(Path.cwd().parent)
+    cwd = str(resolve_workspace_path(req.workspace_path or runtime_settings.get("repo_path")))
     terminal = TerminalAgent(cwd)
     sec_mode = req.security_mode or runtime_settings.get("security_mode", "sandboxed")
     allow_net = runtime_settings.get("allow_network", True)
     res = await terminal.run_command(req.command, security_mode=sec_mode, allow_network=allow_net)
     return {
         "command": req.command,
-        "workspace": cwd,
+        "workspace": terminal.workspace_path,
         "os": res.get("os", terminal.os_type),
         "security_mode": sec_mode,
         "exit_code": res.get("exit_code", 0),

@@ -1,14 +1,17 @@
 import * as vscode from 'vscode';
+import * as cp from 'child_process';
+import * as fs from 'fs';
 import { BackendClient } from '../api/backendClient';
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'codebaseCopilot.sidebarView';
     private _view?: vscode.WebviewView;
+    private _lastActiveDocument?: vscode.TextDocument;
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
         private readonly _backendClient: BackendClient
-    ) {}
+    ) { }
 
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
@@ -16,6 +19,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         _token: vscode.CancellationToken
     ) {
         this._view = webviewView;
+
+        if (vscode.window.activeTextEditor?.document?.uri.scheme === 'file') {
+            this._lastActiveDocument = vscode.window.activeTextEditor.document;
+        }
+
+        vscode.window.onDidChangeActiveTextEditor((editor) => {
+            if (editor?.document && editor.document.uri.scheme === 'file') {
+                this._lastActiveDocument = editor.document;
+            }
+        });
 
         webviewView.webview.options = {
             enableScripts: true,
@@ -28,11 +41,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
+        // Notify Webview of initial workspace folder on startup
+        const activeFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (activeFolder) {
+            setTimeout(() => {
+                this._view?.webview.postMessage({
+                    command: 'repoPathSelected',
+                    path: activeFolder
+                });
+            }, 300);
+        }
+
         // Handle messages from Webview
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.command) {
                 case 'userQuery': {
                     await this._handleUserQuery(data.text, data.workspace_path, data.security_mode);
+                    break;
+                }
+                case 'clearChatContext': {
+                    vscode.window.setStatusBarMessage('CLAY: Chat context cleared', 2500);
                     break;
                 }
                 case 'createAgentPlan': {
@@ -46,7 +74,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 case 'scanWorkspace': {
-                    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '/home/ishan/.gemini/antigravity-ide/scratch/codebase-copilot';
+                    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
                     try {
                         const status = await this._backendClient.triggerIndexing(workspaceFolder);
                         const mermaid = await this._backendClient.getMermaidGraph(workspaceFolder);
@@ -122,8 +150,30 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     }
                     break;
                 }
+                case 'getInitialState': {
+                    const activeFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+                    const isWin = process.platform === 'win32';
+                    this._view?.webview.postMessage({
+                        command: 'repoPathSelected',
+                        path: activeFolder
+                    });
+                    this._view?.webview.postMessage({
+                        command: 'systemInfoResult',
+                        data: {
+                            os: isWin ? 'windows' : 'linux',
+                            platform: process.platform,
+                            is_windows: isWin,
+                            shell: isWin ? 'PowerShell / CMD' : (process.env.SHELL || 'bash'),
+                            workspace: activeFolder,
+                            recommended_commands: isWin
+                                ? ['dir', 'python --version', 'git status', 'pytest']
+                                : ['ls -la', 'python3 --version', 'git status', 'pytest']
+                        }
+                    });
+                    break;
+                }
                 case 'resetRepoPath': {
-                    const defaultPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '/home/ishan/.gemini/antigravity-ide/scratch/codebase-copilot/backend';
+                    const defaultPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
                     const treeData = await this._backendClient.getRepoTree(defaultPath);
                     this._view?.webview.postMessage({
                         command: 'repoPathSelected',
@@ -135,7 +185,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 case 'getRepoTree': {
-                    const targetPath = data.path || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                    let targetPath = data.path;
+                    const activeFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                    if (!targetPath || !fs.existsSync(targetPath)) {
+                        targetPath = activeFolder || process.cwd();
+                    }
                     try {
                         const treeData = await this._backendClient.getRepoTree(targetPath);
                         this._view?.webview.postMessage({
@@ -152,13 +206,197 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     }
                     break;
                 }
+                case 'executeTerminalCommand': {
+                    let workspace = data.workspace_path;
+                    const activeFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                    if (!workspace || (typeof workspace === 'string' && workspace.trim() === '.') || !fs.existsSync(workspace)) {
+                        workspace = activeFolder || process.cwd();
+                    }
+                    const shellCmd = (data.commandText || data.cmd || data.command || '').trim();
+                    const secMode = data.security_mode || 'sandboxed';
+                    const allowNet = data.allow_network !== false;
+
+                    const res = await this._executeTerminalSafely(shellCmd, workspace, secMode, allowNet);
+                    this._view?.webview.postMessage({
+                        command: 'terminalCommandResult',
+                        data: res
+                    });
+                    break;
+                }
+                case 'getSystemInfo': {
+                    let workspace = data.workspace_path;
+                    const activeFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                    if (!workspace || (typeof workspace === 'string' && workspace.trim() === '.') || !fs.existsSync(workspace)) {
+                        workspace = activeFolder || process.cwd();
+                    }
+                    const isWin = process.platform === 'win32';
+                    const info = {
+                        os: isWin ? 'windows' : 'linux',
+                        platform: process.platform,
+                        is_windows: isWin,
+                        shell: isWin ? 'PowerShell / CMD' : (process.env.SHELL || 'bash'),
+                        workspace: workspace,
+                        recommended_commands: isWin
+                            ? ['dir', 'python --version', 'git status', 'pytest']
+                            : ['ls -la', 'python3 --version', 'git status', 'pytest']
+                    };
+                    this._view?.webview.postMessage({
+                        command: 'systemInfoResult',
+                        data: info
+                    });
+                    break;
+                }
+                case 'executeAgentStep': {
+                    const workspace = data.workspace_path || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                    const res = await this._backendClient.executeAgentStep(data.step_id, data.goal, workspace);
+                    this._view?.webview.postMessage({
+                        command: 'agentStepResult',
+                        step_id: data.step_id,
+                        data: res
+                    });
+                    break;
+                }
             }
         });
     }
 
+    private async _executeTerminalSafely(
+        command: string,
+        cwd: string,
+        securityMode: string = 'sandboxed',
+        allowNetwork: boolean = true
+    ): Promise<any> {
+        const isWindows = process.platform === 'win32';
+        const osType = isWindows ? 'windows' : 'linux';
+
+        if (!command || !command.trim()) {
+            return { exit_code: 0, stdout: '', stderr: '', passed: true, os: osType, workspace: cwd };
+        }
+
+        const cmdClean = command.trim();
+
+        // 1. Strict mode: only permit safe inspection / testing operations
+        if (securityMode === 'strict') {
+            const strictSafePrefixes = [
+                'ls', 'dir', 'git status', 'git diff', 'git log', 'git show',
+                'pytest', 'python -m pytest', 'python -m unittest', 'python3 -m unittest',
+                'python -m py_compile', 'python3 -m py_compile', 'npm test', 'npm.cmd test',
+                'python --version', 'python3 --version', 'node -v', 'npm -v',
+                'cat', 'type', 'echo', 'pwd', 'whoami', 'get-childitem', 'get-content'
+            ];
+            const isSafe = strictSafePrefixes.some(prefix => cmdClean.toLowerCase().startsWith(prefix));
+            if (!isSafe) {
+                return {
+                    exit_code: -1,
+                    stdout: '',
+                    stderr: `Execution blocked: Strict mode requires explicit review for modifying command '${command}'.`,
+                    passed: false,
+                    os: osType,
+                    workspace: cwd
+                };
+            }
+        }
+
+        // 2. Sandboxed mode: block destructive operations and network if disallowed
+        if (securityMode === 'sandboxed' || securityMode === 'strict') {
+            const globalDangerous = [
+                /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/i,
+                /\b(drop\s+database|truncate\s+table)\b/i,
+                /\bbash\s+-i\s+>&/i,
+                /\b(nc|ncat|netcat)\b.*-e\s+/i
+            ];
+            for (const pat of globalDangerous) {
+                if (pat.test(cmdClean)) {
+                    return { exit_code: -1, stdout: '', stderr: 'Execution blocked: High-risk operation detected.', passed: false, os: osType, workspace: cwd };
+                }
+            }
+
+            if (isWindows) {
+                const winDangerous = [
+                    /\bformat\s+[a-z]:/i,
+                    /\bdel\s+(\/[a-z]\s+)*[a-z]:\\/i,
+                    /\b(rd|rmdir)\s+(\/s\s+\/q|\/q\s+\/s)\s+[a-z]:\\/i,
+                    /\bRemove-Item\b.*-Recurse\b.*(-Force\b.*)?([a-z]:\\|\$env:)/i,
+                    /\breg\s+(delete|add)\s+hklm/i,
+                    /\b(shutdown\s+\/s|Stop-Computer)\b/i
+                ];
+                for (const pat of winDangerous) {
+                    if (pat.test(cmdClean)) {
+                        return { exit_code: -1, stdout: '', stderr: 'Execution blocked: Dangerous Windows system operation detected.', passed: false, os: osType, workspace: cwd };
+                    }
+                }
+            } else {
+                const linuxDangerous = [
+                    /\brm\s+-[a-z]*r[a-z]*f\s+(\/|~|\.\.|\*)/i,
+                    /\bmkfs(\.[a-z0-9]+)?\s+/i,
+                    /\bdd\s+if=\S+\s+of=\/dev\/[a-z0-9]+/i,
+                    /\b(shutdown|reboot|poweroff)\b/i
+                ];
+                for (const pat of linuxDangerous) {
+                    if (pat.test(cmdClean)) {
+                        return { exit_code: -1, stdout: '', stderr: 'Execution blocked: Dangerous Linux system operation detected.', passed: false, os: osType, workspace: cwd };
+                    }
+                }
+            }
+
+            if (!allowNetwork) {
+                const netCommands = ['curl', 'wget', 'git clone', 'git pull', 'git push', 'npm install', 'npm i', 'pip install', 'pip3 install'];
+                if (netCommands.some(nc => cmdClean.toLowerCase().includes(nc))) {
+                    return { exit_code: -1, stdout: '', stderr: 'Execution blocked: Sandboxed network requests are disabled in settings.', passed: false, os: osType, workspace: cwd };
+                }
+            }
+        }
+
+        // 3. ChildProcess Execution directly in selected workspace directory
+        return new Promise((resolve) => {
+            const finalCmd = isWindows
+                ? `powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command "${cmdClean.replace(/"/g, '`"')}"`
+                : cmdClean;
+
+            cp.exec(finalCmd, {
+                cwd: cwd,
+                timeout: 35000,
+                windowsHide: true,
+                maxBuffer: 10 * 1024 * 1024
+            }, (err, stdout, stderr) => {
+                const exitCode = err ? (typeof err.code === 'number' ? err.code : 1) : 0;
+                const errDetail = stderr || (err ? (err.message || String(err)) : '');
+                resolve({
+                    exit_code: exitCode,
+                    stdout: stdout || '',
+                    stderr: errDetail,
+                    passed: exitCode === 0,
+                    os: osType,
+                    workspace: cwd
+                });
+            });
+        });
+    }
+
     private async _handleUserQuery(query: string, workspacePath?: string, securityMode?: string) {
-        const editor = vscode.window.activeTextEditor;
-        const activeFileContext = editor ? editor.document.fileName : undefined;
+        let activeDoc = vscode.window.activeTextEditor?.document;
+        if ((!activeDoc || activeDoc.uri.scheme !== 'file') && this._lastActiveDocument && !this._lastActiveDocument.isClosed) {
+            activeDoc = this._lastActiveDocument;
+        }
+        if ((!activeDoc || activeDoc.uri.scheme !== 'file') && vscode.window.visibleTextEditors.length > 0) {
+            const visible = vscode.window.visibleTextEditors.find(e => e.document.uri.scheme === 'file');
+            if (visible) activeDoc = visible.document;
+        }
+
+        const activeFileContext = activeDoc ? activeDoc.fileName : undefined;
+        const activeFileContent = activeDoc ? activeDoc.getText() : undefined;
+
+        // Collect all open text documents to sync in-memory state with backend
+        const openFiles: Array<{ path: string; content: string; is_dirty?: boolean }> = [];
+        for (const doc of vscode.workspace.textDocuments) {
+            if (doc.uri.scheme === 'file' && !doc.fileName.includes('node_modules') && !doc.fileName.includes('.git')) {
+                openFiles.push({
+                    path: doc.fileName,
+                    content: doc.getText(),
+                    is_dirty: doc.isDirty
+                });
+            }
+        }
 
         await this._backendClient.streamChat(
             query,
@@ -176,7 +414,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 });
             },
             workspacePath,
-            securityMode
+            securityMode,
+            activeFileContent,
+            openFiles
         );
     }
 
@@ -191,7 +431,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src http://127.0.0.1:8765 http://localhost:8765 https://ollama.com; style-src ${webview.cspSource} 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'nonce-${nonce}';">
     <link href="${styleUri}" rel="stylesheet">
     <title>Codebase Copilot</title>
 </head>
@@ -219,6 +459,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             </div>
         </div>
         <div class="context-pills">
+            <button class="pill-clear-chat" id="btn-clear-chat" title="Clear chat history and reset context" aria-label="Clear chat">
+                <span class="pill-clear-text">Clear</span>
+            </button>
             <button class="pill-theme-switch" id="btn-theme-toggle" title="Toggle Light / Claude Dark Mode" aria-label="Toggle theme">
                 <span class="pill-theme-knob">
                     <svg class="theme-icon-moon" id="icon-theme-moon" viewBox="0 0 16 16" width="9" height="9" fill="currentColor">
@@ -276,11 +519,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             <div class="terminal-stream" id="terminal-stream"><span class="cmd-line">$ clay-agent ready</span>
 [clay] Waiting for task execution goal...</div>
 
-            <!-- Interactive CLI Command Bar -->
+            <!-- Interactive CLI Command Bar with Security Mode Indicator -->
             <div class="terminal-cli-bar">
                 <span class="terminal-prompt-symbol">$</span>
-                <input type="text" class="terminal-cli-input" id="input-terminal-cmd" placeholder="Run safe shell command in workspace (e.g. pytest, python3 test_c.py)..." spellcheck="false" autocomplete="off">
+                <input type="text" class="terminal-cli-input" id="input-terminal-cmd" placeholder="Run shell command in workspace (e.g. pytest, git status)..." spellcheck="false" autocomplete="off">
+                <span class="terminal-mode-indicator" id="terminal-preview-security">[SANDBOXED]</span>
                 <button class="terminal-cli-exec-btn" id="btn-exec-terminal-cmd">Run</button>
+            </div>
+
+            <!-- Quick Action Command Chips -->
+            <div class="terminal-quick-chips" id="terminal-quick-chips">
+                <span class="terminal-quick-chips-label">Quick:</span>
+                <button type="button" class="cli-chip" data-cmd="python -m pytest">pytest</button>
+                <button type="button" class="cli-chip" data-cmd="git status">git status</button>
+                <button type="button" class="cli-chip" data-cmd="python -m unittest">python test</button>
+                <button type="button" class="cli-chip" data-cmd="dir">dir</button>
             </div>
         </div>
 
@@ -327,10 +580,40 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         </div>
 
         <div id="diff-staged-container">
-            <div style="text-align: center; padding: 36px 12px; color: var(--text-muted);">
-                <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.5" style="margin-bottom: 8px; opacity: 0.5;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                <div style="font-weight: 600; font-size: 12px; color: var(--text-secondary);">No Staged Changes</div>
-                <div style="font-size: 11px; margin-top: 4px;">Changes proposed by Chat or Agent will appear here for review.</div>
+            <div class="diff-empty-state" id="diff-empty-state">
+                <div class="diff-pixel-art-card">
+                    <svg viewBox="0 0 48 48" width="52" height="52" shape-rendering="crispEdges">
+                        <!-- Pixel Card Outer Border & Shadow -->
+                        <rect x="6" y="6" width="36" height="36" fill="#CC6B49" opacity="0.08"/>
+                        <!-- Pixel Document Border (terracotta) -->
+                        <rect x="10" y="6" width="22" height="2" fill="#D97757"/>
+                        <rect x="8" y="8" width="2" height="32" fill="#D97757"/>
+                        <rect x="38" y="14" width="2" height="26" fill="#D97757"/>
+                        <rect x="10" y="40" width="28" height="2" fill="#D97757"/>
+                        <!-- Pixel Folded Corner (terracotta & amber) -->
+                        <rect x="32" y="6" width="2" height="2" fill="#D97757"/>
+                        <rect x="34" y="8" width="2" height="2" fill="#D97757"/>
+                        <rect x="36" y="10" width="2" height="2" fill="#D97757"/>
+                        <rect x="38" y="12" width="2" height="2" fill="#D97757"/>
+                        <rect x="32" y="8" width="6" height="6" fill="#E5A84B" opacity="0.35"/>
+                        <!-- Pixel + Addition Line (Green) -->
+                        <rect x="15" y="14" width="2" height="6" fill="#22C55E"/>
+                        <rect x="13" y="16" width="6" height="2" fill="#22C55E"/>
+                        <rect x="22" y="16" width="13" height="2" fill="#22C55E"/>
+                        <!-- Pixel - Deletion Line (Crimson) -->
+                        <rect x="13" y="24" width="6" height="2" fill="#EF4444"/>
+                        <rect x="22" y="24" width="11" height="2" fill="#EF4444"/>
+                        <!-- Pixel Context Code Lines (terracotta muted) -->
+                        <rect x="14" y="32" width="18" height="2" fill="#8C847A"/>
+                        <rect x="14" y="36" width="10" height="2" fill="#8C847A" opacity="0.7"/>
+                        <!-- Pixel Prompt Cursor (terracotta) -->
+                        <rect x="26" y="36" width="4" height="2" fill="#D97757"/>
+                    </svg>
+                </div>
+                <div class="diff-empty-title">NO STAGED CHANGES</div>
+                <div class="diff-pixel-tip">
+                    <span class="diff-pixel-tag">HOT-RELOAD</span> Live sync with active editor &amp; agent tasks
+                </div>
             </div>
         </div>
 
@@ -351,7 +634,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             <div class="settings-group" style="margin-bottom: 10px;">
                 <label class="settings-label">Local Repository Workspace Path</label>
                 <div style="display: flex; gap: 6px;">
-                    <input type="text" class="settings-input" id="input-repo-path" value="/home/ishan/.gemini/antigravity-ide/scratch/codebase-copilot/backend" placeholder="/absolute/path/to/repo" style="margin-bottom: 0;">
+                    <input type="text" class="settings-input" id="input-repo-path" value="" placeholder="Repository workspace folder" style="margin-bottom: 0;">
                     <button class="btn-secondary-action pixel-btn" id="btn-browse-repo-path" style="width: auto; padding: 0 10px;" title="Browse local repository folder">Browse</button>
                     <button class="btn-secondary-action pixel-btn" id="btn-reset-repo-path" style="width: auto; padding: 0 10px;" title="Reset to default workspace path">Reset</button>
                     <input type="file" id="repo-folder-picker" webkitdirectory directory style="display: none;">
@@ -394,73 +677,32 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
 
     <!-- 5. Settings View (Reference Styled: Execution, Security Mode, Terminal) -->
     <div id="view-settings" class="view-container">
-        <!-- Section 1: Execution -->
-        <div class="settings-section">
-            <div class="settings-section-title">Execution</div>
-            <div class="settings-card">
-                <div class="settings-row">
-                    <div class="settings-row-info">
-                        <div class="settings-row-title">Queued Messages</div>
-                        <div class="settings-row-desc">Configure when follow-up messages are sent.</div>
-                        <div class="settings-row-meta" id="btn-kb-shortcuts" title="Keyboard Shortcuts">
-                            Keyboard shortcuts
-                            <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.5">
-                                <circle cx="8" cy="8" r="6"/>
-                                <path d="M8 7v4M8 5h.01"/>
-                            </svg>
-                        </div>
-                    </div>
-                    <div class="segmented-toggle" id="toggle-queued-messages">
-                        <button class="segmented-toggle-btn active" data-value="queue">Queue</button>
-                        <button class="segmented-toggle-btn" data-value="immediate">Send Immediately</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Section 2: Agent Security Mode -->
+        <!-- Section 1: Agent Security Mode -->
         <div class="settings-section">
             <div class="settings-section-title">Agent security mode</div>
             <div class="settings-section-desc">Select one of the three options. Agent settings and permissions can be further customized below.</div>
             <div class="security-mode-grid" id="security-mode-selector">
                 <div class="security-mode-card" data-mode="full">
                     <div class="security-mode-title">Full access</div>
-                    <div class="security-mode-desc">Agents have full access to your machine and external resources.</div>
+                    <div class="security-mode-desc">Executes shell commands across your system and modifies workspace files directly without containment or command safety filters.</div>
                 </div>
                 <div class="security-mode-card active" data-mode="sandboxed">
                     <div class="security-mode-title">Sandboxed</div>
-                    <div class="security-mode-desc">Agents run in a secure sandbox that restricts access to external resources outside of your trusted folders.</div>
+                    <div class="security-mode-desc">Confines execution to active workspace, blocks destructive OS commands via safety guardrails, and gates network access.</div>
                 </div>
                 <div class="security-mode-card" data-mode="strict">
                     <div class="security-mode-title">Strict</div>
-                    <div class="security-mode-desc">Terminal commands always require review and the agent cannot access files outside of its given workspaces.</div>
+                    <div class="security-mode-desc">Zero-trust read-only containment: permits only non-mutating test &amp; diagnostic commands with strict file and secret isolation.</div>
                 </div>
             </div>
         </div>
 
         <div class="settings-divider"></div>
 
-        <!-- Section 3: Terminal Controls -->
+        <!-- Section 2: Terminal -->
         <div class="settings-section">
             <div class="settings-section-title">Terminal</div>
             <div class="settings-card">
-                <div class="settings-row">
-                    <div class="settings-row-info">
-                        <div class="settings-row-title">Terminal Command Auto Execution</div>
-                        <div class="settings-row-desc">Controls whether terminal commands require your approval before running.</div>
-                        <div class="settings-sub-note">Note: A change to this setting will only apply to new messages sent to Agent. In-progress responses will use the previous setting value.</div>
-                    </div>
-                    <div style="flex-shrink: 0;">
-                        <select class="settings-select-pill" id="select-auto-execution">
-                            <option value="always" selected>Always Proceed ⌵</option>
-                            <option value="safe">Safe Commands Only ⌵</option>
-                            <option value="prompt">Ask Every Time ⌵</option>
-                        </select>
-                    </div>
-                </div>
-
-                <div class="settings-card-divider"></div>
-
                 <div class="settings-row">
                     <div class="settings-row-info">
                         <div class="settings-row-title">Sandbox Allow Network</div>
@@ -476,7 +718,7 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
 
         <div class="settings-divider"></div>
 
-        <!-- Section 4: Ollama Daemon & Cloud Models (Full Functionality Restored) -->
+        <!-- Section 3: Ollama Daemon & Cloud Models -->
         <div class="settings-section">
             <div class="settings-section-title">Ollama Daemon & Cloud Models</div>
             <div class="settings-card">
@@ -590,6 +832,12 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
 
     <!-- Chat Input Dock (Rounder, Cleared) -->
     <div class="input-dock">
+        <!-- Pixel Style Transparent Jump Down Button (Centered) -->
+        <button class="chat-jump-down-btn" id="btn-chat-jump-down" title="Jump to bottom" aria-label="Jump to latest message">
+            <svg viewBox="0 0 10 10" width="10" height="10" fill="currentColor" shape-rendering="crispEdges">
+                <path d="M1,2 h2 v2 h-2 z M7,2 h2 v2 h-2 z M2,4 h2 v2 h-2 z M6,4 h2 v2 h-2 z M3,6 h2 v2 h-2 z M5,6 h2 v2 h-2 z M4,8 h2 v2 h-2 z"/>
+            </svg>
+        </button>
         <div class="input-container">
             <textarea class="chat-textarea" id="chat-input" placeholder="Ask CLAY (Enter to send, Shift+Enter for newline)..."></textarea>
             <div class="input-toolbar">

@@ -88,6 +88,20 @@ export class BackendClient {
         return { status: 'error' };
     }
 
+    async syncFile(filePath: string, content: string, event: string = 'changed'): Promise<any> {
+        try {
+            const res = await fetch(`${this.backendUrl}/api/sync/file`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ file_path: filePath, content, event })
+            });
+            if (res.ok) {
+                return await res.json();
+            }
+        } catch {}
+        return null;
+    }
+
     async streamChat(
         query: string,
         activeFileContext: string | undefined,
@@ -95,13 +109,17 @@ export class BackendClient {
         onComplete: (metadata: { citations?: string[]; diff?: string }) => void,
         onError: (err: string) => void,
         workspacePathOverride?: string,
-        securityMode?: string
+        securityMode?: string,
+        activeFileContent?: string,
+        openFiles?: Array<{ path: string; content: string; is_dirty?: boolean }>
     ): Promise<void> {
         try {
             const workspaceFolder = workspacePathOverride || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
             const payload: any = {
                 query,
                 context_file: activeFileContext,
+                active_file_content: activeFileContent,
+                open_files: openFiles,
                 workspace_path: workspaceFolder,
                 stream: true
             };
@@ -248,5 +266,55 @@ export class BackendClient {
             }
         } catch {}
         return { tree: [], stats: { total_files: 0, total_dirs: 0, total_lines: 0 } };
+    }
+
+    async executeTerminalCommand(command: string, workspacePath?: string, securityMode?: string): Promise<any> {
+        try {
+            const res = await fetch(`${this.backendUrl}/api/agent/terminal/execute`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    command,
+                    workspace_path: workspacePath,
+                    security_mode: securityMode
+                })
+            });
+            if (res.ok) {
+                return await res.json();
+            }
+            const errText = await res.text();
+            return { exit_code: -1, stdout: '', stderr: errText, passed: false };
+        } catch (err: any) {
+            return { exit_code: -1, stdout: '', stderr: err.message, passed: false };
+        }
+    }
+
+    async getSystemInfo(workspacePath?: string): Promise<any> {
+        try {
+            const url = workspacePath
+                ? `${this.backendUrl}/api/system/info?workspace_path=${encodeURIComponent(workspacePath)}`
+                : `${this.backendUrl}/api/system/info`;
+            const res = await fetch(url);
+            if (res.ok) return await res.json();
+        } catch {}
+        return { os: process.platform === 'win32' ? 'windows' : 'linux', is_windows: process.platform === 'win32', shell: 'bash' };
+    }
+
+    async executeAgentStep(stepId: number, goal: string, workspacePath?: string): Promise<any> {
+        try {
+            const res = await fetch(`${this.backendUrl}/api/agent/step`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    step_id: stepId,
+                    goal,
+                    workspace_path: workspacePath
+                })
+            });
+            if (res.ok) return await res.json();
+            return { status: 'error', message: await res.text() };
+        } catch (err: any) {
+            return { status: 'error', message: err.message };
+        }
     }
 }
