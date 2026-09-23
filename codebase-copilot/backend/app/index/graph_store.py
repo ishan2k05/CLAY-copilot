@@ -1,5 +1,6 @@
 import sqlite3
 import asyncio
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 from ..parser.symbols import SymbolNode, RelationshipEdge
 
@@ -50,6 +51,17 @@ class SQLiteGraphStore:
 
     async def clear_all(self):
         await asyncio.to_thread(self._sync_clear_all)
+
+    def _sync_delete_file_symbols(self, file_path: str):
+        with sqlite3.connect(self.db_path) as db:
+            norm = str(Path(file_path).resolve())
+            fname = Path(file_path).name
+            db.execute("DELETE FROM relationships WHERE file_path = ? OR file_path = ? OR file_path LIKE ?", (norm, file_path, f"%{fname}"))
+            db.execute("DELETE FROM symbols WHERE file_path = ? OR file_path = ? OR file_path LIKE ?", (norm, file_path, f"%{fname}"))
+            db.commit()
+
+    async def delete_file_symbols(self, file_path: str):
+        await asyncio.to_thread(self._sync_delete_file_symbols, file_path)
 
     async def init_db(self):
         await asyncio.to_thread(self._sync_init_db)

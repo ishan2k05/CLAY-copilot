@@ -163,9 +163,12 @@ class HybridSearchEngine:
             if current_len + len(block) > max_chars:
                 # If we already have at least one block, break to respect token budget
                 if context_parts:
+                    if not context_parts[-1].rstrip().endswith("... [truncated]"):
+                        context_parts.append("... [truncated]")
                     break
                 # Otherwise truncate the single block to fit budget
-                block = block[:max_chars]
+                avail = max(0, max_chars - 17)
+                block = block[:avail] + "\n... [truncated]"
 
             context_parts.append(block)
             current_len += len(block)

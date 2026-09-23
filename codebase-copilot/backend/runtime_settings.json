@@ -1,0 +1,14 @@
+{
+  "security_mode": "sandboxed",
+  "allow_network": true,
+  "privacy_filter": true,
+  "exclusion_patterns": ".env, *.pem, credentials.json, id_rsa, *.key",
+  "connection_type": "local",
+  "api_key": "",
+  "repo_path": "/home/ishan/Desktop/Clay test",
+  "temperature": 0.2,
+  "num_ctx": 32768,
+  "num_predict": 4096,
+  "model": "gpt-oss:120b-cloud",
+  "host": "http://localhost:11434"
+}

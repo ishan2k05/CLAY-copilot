@@ -224,6 +224,45 @@ class TestRAGAndSettings(unittest.TestCase):
         self.assertNotIn("AuthRoute", data.get("mermaid", ""))
         self.assertIn("No SQLite code graph available", data.get("message", ""))
 
+    def test_silent_sync_and_symbol_purging(self):
+        from app.main import reindex_file, graph_store, vector_store, silent_sync_workspace
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_file = Path(temp_dir) / "test_module.py"
+            # 1. Initial code with function 'original_worker'
+            temp_file.write_text("def original_worker():\n    return 42\n")
+            asyncio.run(reindex_file(str(temp_file)))
+
+            syms = asyncio.run(graph_store.find_symbols("original_worker"))
+            self.assertEqual(len(syms), 1)
+
+            # 2. User edits manually: removes 'original_worker' and adds 'new_worker'
+            temp_file.write_text("def new_worker():\n    return 99\n")
+            asyncio.run(reindex_file(str(temp_file)))
+
+            # Ghost symbol 'original_worker' must be PURGED
+            old_syms = asyncio.run(graph_store.find_symbols("original_worker"))
+            self.assertEqual(len(old_syms), 0)
+
+            # New symbol 'new_worker' must be present
+            new_syms = asyncio.run(graph_store.find_symbols("new_worker"))
+            self.assertEqual(len(new_syms), 1)
+
+            # 3. Test silent sync detects modification
+            temp_file.write_text("def silent_sync_func():\n    pass\n")
+            changed, deleted = asyncio.run(silent_sync_workspace(temp_dir))
+            self.assertGreaterEqual(changed, 1)
+            silent_syms = asyncio.run(graph_store.find_symbols("silent_sync_func"))
+            self.assertEqual(len(silent_syms), 1)
+
+            # 4. Test file deletion purges symbols
+            temp_file.unlink()
+            changed, deleted = asyncio.run(silent_sync_workspace(temp_dir))
+            self.assertGreaterEqual(deleted, 1)
+            del_syms = asyncio.run(graph_store.find_symbols("silent_sync_func"))
+            self.assertEqual(len(del_syms), 0)
+
 if __name__ == "__main__":
     unittest.main()
 

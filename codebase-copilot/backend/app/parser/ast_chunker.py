@@ -69,6 +69,48 @@ class PythonASTChunker:
                 relationships.extend(fn_rels)
                 chunks.append(fn_chunk)
 
+            elif isinstance(node, ast.If):
+                start_l = node.lineno
+                end_l = getattr(node, "end_lineno", len(lines))
+                block_lines = lines[start_l - 1:end_l]
+                block_content = "\n".join(block_lines)
+
+                is_main_entry = "__main__" in block_content
+                sym_name = "__main__" if is_main_entry else f"if_block_L{start_l}"
+
+                entry_sym = SymbolNode(
+                    id=f"{file_path}#{sym_name}",
+                    name=sym_name,
+                    symbol_type="entrypoint" if is_main_entry else "top_level_block",
+                    file_path=file_path,
+                    start_line=start_l,
+                    end_line=end_l,
+                    docstring="Main execution entrypoint" if is_main_entry else None
+                )
+                symbols.append(entry_sym)
+
+                # Extract calls inside top-level if block (e.g. main())
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Call):
+                        if isinstance(sub.func, ast.Name):
+                            relationships.append(RelationshipEdge(
+                                source_symbol=f"{file_path}#{sym_name}",
+                                target_symbol=sub.func.id,
+                                relation_type="calls",
+                                file_path=file_path,
+                                line_number=getattr(sub, "lineno", start_l)
+                            ))
+
+                chunks.append(CodeChunk(
+                    chunk_id=f"{file_path}#{sym_name}",
+                    file_path=file_path,
+                    symbol_type="entrypoint" if is_main_entry else "top_level_block",
+                    symbol_name=f"{Path(file_path).name}:{sym_name}",
+                    start_line=start_l,
+                    end_line=end_l,
+                    content=block_content
+                ))
+
         # If file has no classes or functions (e.g. script like solution.py), index the module itself
         if not any(s.symbol_type in ("class", "function", "method") for s in symbols):
             module_name = Path(file_path).stem
@@ -92,6 +134,21 @@ class PythonASTChunker:
                 imports=file_imports,
                 content=source_code
             ))
+
+        # For scripts and files <= 150 lines, always provide a complete file chunk
+        # so the model sees all declarations, calls, and execution entrypoints in full context
+        if len(lines) <= 150 and source_code.strip():
+            if not any(c.chunk_id == f"{file_path}#full" or c.symbol_type == "module_script" for c in chunks):
+                chunks.append(CodeChunk(
+                    chunk_id=f"{file_path}#full",
+                    file_path=file_path,
+                    symbol_type="file",
+                    symbol_name=Path(file_path).name,
+                    start_line=1,
+                    end_line=len(lines),
+                    imports=file_imports,
+                    content=source_code
+                ))
 
         return symbols, relationships, chunks
 

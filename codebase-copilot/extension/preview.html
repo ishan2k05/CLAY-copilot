@@ -127,9 +127,9 @@
         <!-- CLI Style Task Planner Input -->
         <div class="user-console-cli-bar">
           <span class="user-console-prompt">&gt;</span>
-          <input type="text" class="user-task-input" id="agent-goal-input"
+          <textarea class="user-task-input" id="agent-goal-input" rows="1"
             placeholder="Enter task goal (e.g. Refactor error handling or add unit tests)..." spellcheck="false"
-            autocomplete="off">
+            autocomplete="off"></textarea>
           <button class="btn-run-task" id="btn-run-agent" title="Execute Task">Run</button>
           <button class="btn-stop-task" id="btn-stop-agent" style="display: none;" title="Stop Task">Stop</button>
         </div>
@@ -239,8 +239,15 @@
         </button>
         <div
           style="margin-top: 10px; padding: 8px; background: var(--surface-subtle); border-radius: 10px; font-size: 11px;">
-          Status: <strong id="repo-status-label">Ready to scan</strong><br />
-          Security: <strong>Zero Leaked Secrets Detected</strong>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <div>Status: <strong id="repo-status-label">Ready to scan</strong></div>
+          </div>
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>Security: <strong id="repo-security-label" style="color: #4ade80;">Zero Leaked Secrets Detected</strong></div>
+            <button class="pixel-mini-btn" id="btn-security-scan" style="padding: 2px 7px; font-size: 10px;" title="Scan repository for leaked credentials and sensitive files">Audit</button>
+          </div>
+          <div id="repo-security-details" style="display: none; margin-top: 6px; padding: 6px 8px; background: rgba(0,0,0,0.2); border-radius: 6px; font-size: 10px; font-family: var(--font-mono); max-height: 120px; overflow-y: auto;">
+          </div>
         </div>
       </div>
       <div class="task-card" style="margin-top: 10px;">

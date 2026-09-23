@@ -13,7 +13,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const backendClient = new BackendClient();
 
     // 2. Register Webview View Provider (Primary Sidebar)
-    const sidebarProvider = new SidebarProvider(context.extensionUri, backendClient);
+    const sidebarProvider = new SidebarProvider(context.extensionUri, backendClient, context);
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(SidebarProvider.viewType, sidebarProvider)
     );
@@ -123,11 +123,12 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.workspace.onDidSaveTextDocument((doc) => {
             if (doc.uri.scheme !== 'file') return;
-            if (doc.fileName.includes('node_modules') || doc.fileName.includes('.git')) return;
+            if (doc.fileName.includes('node_modules') || doc.fileName.includes('.git') || doc.fileName.includes('__pycache__')) return;
             backendClient.syncFile(doc.fileName, doc.getText(), 'saved');
         })
     );
 
+    // 8. Handle file creations and deletions
     context.subscriptions.push(
         vscode.workspace.onDidCreateFiles((e) => {
             for (const fileUri of e.files) {
@@ -135,6 +136,61 @@ export async function activate(context: vscode.ExtensionContext) {
                     vscode.workspace.openTextDocument(fileUri).then((doc) => {
                         backendClient.syncFile(doc.fileName, doc.getText(), 'created');
                     });
+                }
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.workspace.onDidDeleteFiles((e) => {
+            for (const fileUri of e.files) {
+                if (fileUri.scheme === 'file') {
+                    backendClient.syncFile(fileUri.fsPath, '', 'deleted');
+                }
+            }
+        })
+    );
+
+    // 9. OS-level File System Watcher for external editors (VS Code, external editors, git checkout)
+    const fileWatcher = vscode.workspace.createFileSystemWatcher('**/*.{py,js,ts,tsx,jsx,json,md,html,css}');
+    fileWatcher.onDidChange(async (uri) => {
+        if (uri.fsPath.includes('node_modules') || uri.fsPath.includes('.git') || uri.fsPath.includes('__pycache__')) return;
+        try {
+            const data = await vscode.workspace.fs.readFile(uri);
+            const content = new TextDecoder().decode(data);
+            backendClient.syncFile(uri.fsPath, content, 'changed');
+        } catch {}
+    });
+    fileWatcher.onDidCreate(async (uri) => {
+        if (uri.fsPath.includes('node_modules') || uri.fsPath.includes('.git') || uri.fsPath.includes('__pycache__')) return;
+        try {
+            const data = await vscode.workspace.fs.readFile(uri);
+            const content = new TextDecoder().decode(data);
+            backendClient.syncFile(uri.fsPath, content, 'created');
+        } catch {}
+    });
+    fileWatcher.onDidDelete((uri) => {
+        if (uri.fsPath.includes('node_modules') || uri.fsPath.includes('.git') || uri.fsPath.includes('__pycache__')) return;
+        backendClient.syncFile(uri.fsPath, '', 'deleted');
+    });
+    context.subscriptions.push(fileWatcher);
+
+    // 10. Background Silent Sync Heartbeat (Lightweight microsecond stat check, 0 LLM tokens)
+    const silentSyncInterval = setInterval(async () => {
+        const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (rootPath) {
+            await backendClient.silentSyncCheck(rootPath);
+        }
+    }, 4000);
+    context.subscriptions.push({ dispose: () => clearInterval(silentSyncInterval) });
+
+    // Also trigger silent sync when user focuses back into VS Code
+    context.subscriptions.push(
+        vscode.window.onDidChangeWindowState((state) => {
+            if (state.focused) {
+                const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                if (rootPath) {
+                    backendClient.silentSyncCheck(rootPath);
                 }
             }
         })

@@ -180,8 +180,9 @@ class WorkspaceFileResolver:
                     p = stem_to_path[target_stem]
                     matched_paths[str(p.resolve())] = p
 
-        # 4. If query refers to active/open editor file ("this file", "the file", "all contents", "recheck"), resolve context_file
-        if context_file:
+        # 4. If query refers to active/open editor file ("this file", "the file", "all contents", "recheck", etc.), resolve context_file
+        is_casual = bool(re.match(r'^(hi|hello|hey|greetings|hola|good\s+(morning|afternoon|evening)|who are you|what can you do)[\s!.?]*$', clean_query))
+        if context_file and not is_casual:
             cp = Path(context_file).resolve()
             is_valid_context = cp.exists() or bool(context_file_content) or (live_buffers and str(cp) in live_buffers)
             if is_valid_context:
@@ -189,12 +190,13 @@ class WorkspaceFileResolver:
                     "the file", "this file", "current file", "entire file",
                     "whole file", "all content", "all contents", "all the code",
                     "from the file", "open file", "active file", "what is in", "how many lines",
-                    "recheck", "refresh", "sync", "code", "lines"
+                    "recheck", "rechcek", "rechek", "refresh", "sync", "code", "lines", "write",
+                    "implement", "add", "refactor", "inspect", "review", "examine", "check", "explain", "run"
                 ]
                 if any(ind in normalized_query for ind in ref_indicators) or not matched_paths:
                     matched_paths[str(cp)] = cp
 
-        # 5. Read matched files directly (prioritizing live in-memory buffer over disk)
+        # 5. Read matched files directly (always prioritizing fresh disk state and active editor buffers)
         chunks: List[CodeChunk] = []
         root_path = cls._resolve_root(workspace_root)
 
@@ -209,11 +211,20 @@ class WorkspaceFileResolver:
                 continue
 
             try:
-                # Hot-reload priority: 1) direct context_file_content, 2) live_buffers, 3) disk read
+                # Freshness priority:
+                # 1) Direct active editor content if currently open and provided
+                # 2) Fresh disk read if file exists on disk (handles manual edits, deletions, emptyings)
+                # 3) Live in-memory buffer fallback for unsaved memory-only buffers
                 content = None
                 p_resolved_str = str(p.resolve())
+
                 if context_file and str(Path(context_file).resolve()) == p_resolved_str and context_file_content is not None:
                     content = context_file_content
+                elif p.exists() and p.is_file():
+                    content = p.read_text(encoding="utf-8", errors="ignore")
+                    if live_buffers is not None:
+                        live_buffers[p_resolved_str] = content
+                        live_buffers[p.name] = content
                 elif live_buffers:
                     for k, v in live_buffers.items():
                         try:
@@ -226,10 +237,7 @@ class WorkspaceFileResolver:
                                 break
 
                 if content is None:
-                    if p.exists() and p.is_file():
-                        content = p.read_text(encoding="utf-8", errors="ignore")
-                    else:
-                        content = ""
+                    content = ""
 
                 lines = content.splitlines()
                 total_lines = len(lines)
@@ -239,11 +247,11 @@ class WorkspaceFileResolver:
                 except Exception:
                     rel_name = p.name
 
-                # Explicit empty file handling to eliminate hallucination
+                # Explicit empty file handling
                 if not content.strip() or total_lines == 0:
                     empty_body = (
-                        f"[File: {rel_name} - 0 lines, 0 bytes (EMPTY FILE)]\n"
-                        f"[Status: This file exists on disk and is completely EMPTY. It contains 0 lines of code.]"
+                        f"[File: {rel_name} (0 lines, empty file)]\n"
+                        f"[Status: This file is currently empty on disk. When asked to write, implement, or generate code for this file or repository, provide the complete new code implementation.]"
                     )
                     chunks.append(CodeChunk(
                         chunk_id=f"{p}#direct_file",

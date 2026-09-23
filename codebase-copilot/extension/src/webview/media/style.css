@@ -56,32 +56,32 @@
 
 body {
   font-family: var(--font-ui);
-  background-color: #191715;
-  /* Framing canvas for wide desktop viewports */
+  background-color: var(--bg-canvas);
   color: var(--text-primary);
   font-size: 13px;
   line-height: 1.45;
   height: 100vh;
+  height: 100dvh;
   width: 100%;
   margin: 0;
   padding: 0;
   display: flex;
   justify-content: center;
-  align-items: center;
+  align-items: stretch;
   overflow: hidden;
   user-select: none;
 }
 
 body.claude-dark {
-  background-color: #100F0E;
+  background-color: #1A1816;
 }
 
-/* Aspect-Ratio Constrained Assistant Frame */
+/* Full-Height Edge-Snapping Sidebar Frame with 600px Max-Width Constraint */
 .app-frame {
   width: 100%;
-  max-width: 460px;
+  max-width: 600px;
   height: 100vh;
-  max-height: 880px;
+  height: 100%;
   min-width: 280px;
   background-color: var(--bg-canvas);
   color: var(--text-primary);
@@ -89,24 +89,18 @@ body.claude-dark {
   flex-direction: column;
   position: relative;
   overflow: hidden;
-  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.4), 0 0 0 1px var(--border-subtle);
-  border-radius: 14px;
+  box-shadow: none;
+  border-radius: 0;
+  border: none;
+  margin: 0 auto;
 }
 
-/* Fluid Sidebar Docking when inside VS Code sidebar (width <= 500px) */
-@media (max-width: 500px),
-(max-height: 880px) {
-  body {
-    background-color: var(--bg-canvas);
-    align-items: stretch;
-  }
-
+/* Subtle delimiter boundary if sidebar is dragged wider than the 600px restraint */
+@media (min-width: 601px) {
   .app-frame {
-    max-width: 100%;
-    max-height: 100vh;
-    border-radius: 0;
-    box-shadow: none;
-    border: none;
+    border-left: 1px solid var(--border-subtle);
+    border-right: 1px solid var(--border-subtle);
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.06);
   }
 }
 
@@ -643,6 +637,203 @@ body.claude-dark .code-block-pre::-webkit-scrollbar-thumb:hover {
   background: transparent !important;
   padding: 0 !important;
   border: none !important;
+}
+
+/* ==================================================
+ * Markdown Inbuilt Renderer: Tables, Headings, Lists
+ * ================================================== */
+.clay-table-wrapper {
+  width: 100%;
+  margin: 10px 0;
+  overflow-x: auto;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-subtle);
+  scrollbar-width: thin;
+}
+
+body.claude-dark .clay-table-wrapper {
+  background: #181513;
+  border-color: #2F2A27;
+}
+
+.clay-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  line-height: 1.45;
+  text-align: left;
+}
+
+.clay-table th {
+  background: rgba(204, 107, 73, 0.12);
+  color: var(--primary-terracotta);
+  font-weight: 600;
+  font-family: var(--font-ui);
+  text-transform: uppercase;
+  font-size: 9.5px;
+  letter-spacing: 0.5px;
+  padding: 7px 10px;
+  border-bottom: 2px solid var(--border-subtle);
+  white-space: nowrap;
+}
+
+body.claude-dark .clay-table th {
+  background: rgba(217, 119, 87, 0.15);
+  color: #E07A5F;
+  border-bottom-color: #38312C;
+}
+
+.clay-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  vertical-align: top;
+}
+
+body.claude-dark .clay-table td {
+  border-bottom-color: #26211E;
+  color: #D6CEC3;
+}
+
+.clay-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.clay-table tbody tr:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+body.claude-dark .clay-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+/* Headings inside chat (strips raw hashtags and gives clean hierarchy) */
+.clay-chat-h {
+  color: var(--text-primary);
+  font-weight: 600;
+  margin: 12px 0 6px 0;
+  line-height: 1.35;
+}
+
+body.claude-dark .clay-chat-h {
+  color: #EDE6D8;
+}
+
+.clay-chat-h1 {
+  font-size: 14.5px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 4px;
+}
+
+.clay-chat-h2 {
+  font-size: 13px;
+  color: var(--primary-terracotta);
+}
+
+body.claude-dark .clay-chat-h2 {
+  color: #E07A5F;
+}
+
+.clay-chat-h3 {
+  font-size: 12px;
+}
+
+.clay-chat-h4 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-secondary);
+}
+
+/* Paragraphs and Spacers */
+.clay-chat-p {
+  margin: 3px 0;
+  line-height: 1.45;
+}
+
+.clay-chat-spacer {
+  height: 6px;
+}
+
+/* Lists */
+.clay-chat-ul,
+.clay-chat-ol {
+  margin: 4px 0 8px 18px;
+  padding: 0;
+}
+
+.clay-chat-li {
+  margin: 2px 0;
+  line-height: 1.45;
+  color: var(--text-primary);
+}
+
+body.claude-dark .clay-chat-li {
+  color: #D6CEC3;
+}
+
+/* Blockquotes */
+.clay-chat-quote {
+  margin: 8px 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--primary-terracotta);
+  background: rgba(204, 107, 73, 0.06);
+  border-radius: 0 6px 6px 0;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+/* Horizontal Rule */
+.clay-chat-hr {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  margin: 10px 0;
+}
+
+/* Security Audit Findings Drawer */
+.sec-finding-item {
+  padding: 4px 6px;
+  margin-bottom: 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  border-left: 3px solid #f87171;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sec-finding-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+}
+
+.sec-badge-critical {
+  color: #ef4444;
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.sec-badge-high {
+  color: #f59e0b;
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.sec-finding-file {
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+body.claude-dark .sec-finding-file {
+  color: #f3f4f6;
+}
+
+.sec-finding-detail {
+  color: var(--text-muted);
+  font-size: 9.5px;
 }
 
 /* Dynamic Copy Button & Timestamp Footer */
@@ -1230,6 +1421,26 @@ body.claude-dark .chat-jump-down-btn:hover {
   box-shadow: 0 1px 0 #7C311C;
 }
 
+.send-btn.is-stop,
+.send-btn.is-generating {
+  background: #C15C3D !important;
+  border-color: #E26D48 !important;
+  color: #FFFFFF !important;
+  box-shadow: 0 2px 0 #7A331E !important;
+  cursor: pointer !important;
+}
+
+.send-btn.is-stop:hover,
+.send-btn.is-generating:hover {
+  background: #E26D48 !important;
+  box-shadow: 0 2px 8px rgba(226, 109, 72, 0.45) !important;
+}
+
+.send-btn.is-stop svg,
+.send-btn.is-generating svg {
+  shape-rendering: crispEdges;
+}
+
 /* Agent Task View */
 .task-card {
   background: var(--surface-card);
@@ -1363,11 +1574,11 @@ body.claude-dark .chat-jump-down-btn:hover {
 
 .user-console-cli-bar {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   background: #181514;
   border: 1px solid #2F2A27;
   border-radius: 8px;
-  padding: 4px 6px 4px 8px;
+  padding: 6px 6px 6px 8px;
   gap: 8px;
   margin: 6px 0;
   transition: border-color 0.15s ease;
@@ -1384,6 +1595,8 @@ body.claude-dark .chat-jump-down-btn:hover {
   color: var(--primary-terracotta);
   font-family: var(--font-mono);
   user-select: none;
+  margin-top: 2px;
+  line-height: 1.4;
 }
 
 .user-task-input {
@@ -1394,6 +1607,22 @@ body.claude-dark .chat-jump-down-btn:hover {
   color: #EDE8DF;
   font-family: var(--font-mono);
   font-size: 11px;
+  line-height: 1.45;
+  resize: none;
+  min-height: 20px;
+  max-height: 140px;
+  overflow-y: hidden;
+  padding: 2px 0 0 0;
+  box-sizing: border-box;
+}
+
+.user-task-input::-webkit-scrollbar {
+  width: 4px;
+}
+
+.user-task-input::-webkit-scrollbar-thumb {
+  background: #3D3531;
+  border-radius: 2px;
 }
 
 .user-task-input::placeholder {
@@ -2503,52 +2732,126 @@ body.claude-dark .chat-jump-down-btn:hover {
   border-color: var(--primary-terracotta);
 }
 
-/* Modern Minimal Toast Notification */
+/* ==================================================
+ * Retro Pixel Bottom Popup & Toast Notifications
+ * (Single-instance, crisp pixel borders, HUD glow, blink animation)
+ * ================================================== */
 .toast-container {
   position: fixed;
-  bottom: 54px;
+  bottom: 52px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 9999;
+  z-index: 99999;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  pointer-events: none;
-}
-
-.toast {
-  background: #222;
-  color: #f5f5f5;
-  padding: 7px 14px;
-  border-radius: 8px;
-  font-size: 11px;
-  font-weight: 500;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  display: flex;
   align-items: center;
-  gap: 6px;
-  animation: toastPop 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  pointer-events: none;
+  width: auto;
+  max-width: 90vw;
+}
+
+.toast,
+.pixel-toast {
+  font-family: var(--font-pixel, "Press Start 2P", "Silkscreen", monospace);
+  font-size: 8px;
+  line-height: 1.4;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  background: #181714;
+  color: #EDE8DE;
+  padding: 8px 14px;
+  border-radius: 0px;
+  border: 2px solid #3d3931;
+  box-shadow: 3px 3px 0px rgba(0, 0, 0, 0.75), inset 1px 1px 0px rgba(255, 255, 255, 0.08);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  animation: pixelToastPop 0.16s steps(3, end) forwards;
   pointer-events: auto;
+  user-select: none;
+  white-space: nowrap;
+  image-rendering: pixelated;
+  transition: opacity 0.18s steps(3, end), transform 0.18s steps(3, end);
 }
 
-.toast-success {
-  border-left: 3px solid #10B981;
+.toast-success,
+.pixel-toast.toast-success {
+  border-color: #10B981;
+  box-shadow: 3px 3px 0px rgba(0, 0, 0, 0.75), inset 0 0 8px rgba(16, 185, 129, 0.15);
 }
 
-.toast-error {
-  border-left: 3px solid #EF4444;
+.toast-error,
+.pixel-toast.toast-error {
+  border-color: #EF4444;
+  box-shadow: 3px 3px 0px rgba(0, 0, 0, 0.75), inset 0 0 8px rgba(239, 68, 68, 0.15);
 }
 
-@keyframes toastPop {
-  from {
+.toast-info,
+.pixel-toast.toast-info {
+  border-color: #D97757;
+  box-shadow: 3px 3px 0px rgba(0, 0, 0, 0.75), inset 0 0 8px rgba(217, 119, 87, 0.15);
+}
+
+.pixel-toast-glyph {
+  font-family: var(--font-pixel, monospace);
+  font-size: 8px;
+  font-weight: bold;
+  display: inline-block;
+}
+
+.toast-success .pixel-toast-glyph {
+  color: #34D399;
+}
+
+.toast-error .pixel-toast-glyph {
+  color: #F87171;
+}
+
+.toast-info .pixel-toast-glyph {
+  color: #E2886A;
+}
+
+.pixel-toast-text {
+  display: inline-block;
+}
+
+/* Re-click Pixel Blink Pulse Animation */
+.toast-blink,
+.pixel-toast.toast-blink {
+  animation: pixelToastBlink 0.35s steps(2, start) !important;
+}
+
+@keyframes pixelToastPop {
+  0% {
     opacity: 0;
-    transform: translateY(8px) scale(0.96);
+    transform: translateY(10px) scale(0.96);
   }
-
-  to {
+  100% {
     opacity: 1;
     transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes pixelToastBlink {
+  0% {
+    filter: brightness(2.6) drop-shadow(0 0 6px currentColor);
+    transform: scale(1.05);
+    opacity: 1;
+  }
+  30% {
+    filter: brightness(0.3);
+    transform: scale(0.97);
+    opacity: 0.3;
+  }
+  65% {
+    filter: brightness(2.2) drop-shadow(0 0 4px currentColor);
+    transform: scale(1.03);
+    opacity: 1;
+  }
+  100% {
+    filter: brightness(1);
+    transform: scale(1);
+    opacity: 1;
   }
 }
 

@@ -10,7 +10,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
-        private readonly _backendClient: BackendClient
+        private readonly _backendClient: BackendClient,
+        private readonly _context?: vscode.ExtensionContext
     ) { }
 
     public resolveWebviewView(
@@ -27,6 +28,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         vscode.window.onDidChangeActiveTextEditor((editor) => {
             if (editor?.document && editor.document.uri.scheme === 'file') {
                 this._lastActiveDocument = editor.document;
+                this._view?.webview.postMessage({
+                    command: 'activeFileChanged',
+                    file: editor.document.uri.fsPath
+                });
             }
         });
 
@@ -41,22 +46,50 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
-        // Notify Webview of initial workspace folder on startup
+        // Notify Webview of system info and saved repo path on startup
+        const savedRepo = this._context?.globalState.get<string>('lastRepoPath');
         const activeFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (activeFolder) {
-            setTimeout(() => {
+        // Only provide initial repo path if a saved repo exists or if first run with activeFolder
+        const initialRepo = savedRepo !== undefined ? savedRepo : (activeFolder || '');
+
+        setTimeout(() => {
+            if (initialRepo) {
                 this._view?.webview.postMessage({
                     command: 'repoPathSelected',
-                    path: activeFolder
+                    path: initialRepo
                 });
-            }, 300);
-        }
+            } else if (savedRepo === '') {
+                this._view?.webview.postMessage({
+                    command: 'repoPathCleared'
+                });
+            }
+            if (this._lastActiveDocument?.uri.fsPath) {
+                this._view?.webview.postMessage({
+                    command: 'activeFileChanged',
+                    file: this._lastActiveDocument.uri.fsPath
+                });
+            }
+        }, 300);
 
         // Handle messages from Webview
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.command) {
                 case 'userQuery': {
-                    await this._handleUserQuery(data.text, data.workspace_path, data.security_mode);
+                    await this._handleUserQuery(
+                        data.text,
+                        data.workspace_path,
+                        data.security_mode,
+                        data.temperature !== undefined ? {
+                            temperature: data.temperature,
+                            num_ctx: data.num_ctx,
+                            num_predict: data.num_predict
+                        } : undefined
+                    );
+                    break;
+                }
+                case 'stopChat': {
+                    this._backendClient.stopStreamChat();
+                    this._view?.webview.postMessage({ command: 'streamStopped' });
                     break;
                 }
                 case 'clearChatContext': {
@@ -74,14 +107,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 case 'scanWorkspace': {
-                    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+                    const workspaceFolder = data.path || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
                     try {
                         const status = await this._backendClient.triggerIndexing(workspaceFolder);
                         const mermaid = await this._backendClient.getMermaidGraph(workspaceFolder);
-                        this._view?.webview.postMessage({ command: 'scanResult', status, mermaid });
+                        const security = await this._backendClient.getSecurityAudit(workspaceFolder);
+                        this._view?.webview.postMessage({ command: 'scanResult', status, mermaid, security });
                         vscode.window.showInformationMessage(`Indexed ${status.filesCount} files and ${status.symbolsCount} symbols.`);
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`Scanning failed: ${err.message}`);
+                    }
+                    break;
+                }
+                case 'getSecurityAudit': {
+                    const workspaceFolder = data.path || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+                    try {
+                        const security = await this._backendClient.getSecurityAudit(workspaceFolder);
+                        this._view?.webview.postMessage({ command: 'securityAuditResult', security });
+                    } catch (err: any) {
+                        this._view?.webview.postMessage({ command: 'securityAuditResult', error: err.message });
                     }
                     break;
                 }
@@ -138,6 +182,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     });
                     if (uris && uris.length > 0) {
                         const selectedPath = uris[0].fsPath;
+                        if (this._context) {
+                            await this._context.globalState.update('lastRepoPath', selectedPath);
+                        }
                         await this._backendClient.updateSettings({ model: undefined });
                         const treeData = await this._backendClient.getRepoTree(selectedPath);
                         this._view?.webview.postMessage({
@@ -150,13 +197,28 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     }
                     break;
                 }
+                case 'setRepoPath': {
+                    const newPath = (data.path || '').trim();
+                    if (this._context) {
+                        await this._context.globalState.update('lastRepoPath', newPath);
+                    }
+                    break;
+                }
                 case 'getInitialState': {
-                    const activeFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+                    const savedRepo = this._context?.globalState.get<string>('lastRepoPath');
+                    const activeFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                    const initialRepo = savedRepo !== undefined ? savedRepo : (data.currentPath || activeFolder || '');
                     const isWin = process.platform === 'win32';
-                    this._view?.webview.postMessage({
-                        command: 'repoPathSelected',
-                        path: activeFolder
-                    });
+                    if (initialRepo) {
+                        this._view?.webview.postMessage({
+                            command: 'repoPathSelected',
+                            path: initialRepo
+                        });
+                    } else if (savedRepo === '') {
+                        this._view?.webview.postMessage({
+                            command: 'repoPathCleared'
+                        });
+                    }
                     this._view?.webview.postMessage({
                         command: 'systemInfoResult',
                         data: {
@@ -164,7 +226,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             platform: process.platform,
                             is_windows: isWin,
                             shell: isWin ? 'PowerShell / CMD' : (process.env.SHELL || 'bash'),
-                            workspace: activeFolder,
+                            workspace: initialRepo || activeFolder,
                             recommended_commands: isWin
                                 ? ['dir', 'python --version', 'git status', 'pytest']
                                 : ['ls -la', 'python3 --version', 'git status', 'pytest']
@@ -173,22 +235,32 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 case 'resetRepoPath': {
-                    const defaultPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
-                    const treeData = await this._backendClient.getRepoTree(defaultPath);
+                    if (this._context) {
+                        await this._context.globalState.update('lastRepoPath', '');
+                    }
                     this._view?.webview.postMessage({
-                        command: 'repoPathSelected',
-                        path: defaultPath,
-                        tree: treeData.tree,
-                        stats: treeData.stats
+                        command: 'repoPathCleared'
                     });
-                    vscode.window.showInformationMessage(`Codebase Copilot: Repository path reset to ${defaultPath}`);
+                    vscode.window.showInformationMessage('Codebase Copilot: Repository path cleared');
                     break;
                 }
                 case 'getRepoTree': {
-                    let targetPath = data.path;
-                    const activeFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-                    if (!targetPath || !fs.existsSync(targetPath)) {
-                        targetPath = activeFolder || process.cwd();
+                    let targetPath = (data.path || '').trim();
+                    if (!targetPath) {
+                        this._view?.webview.postMessage({
+                            command: 'repoTreeResult',
+                            tree: [],
+                            stats: { filesCount: 0, dirsCount: 0 },
+                            root: ''
+                        });
+                        break;
+                    }
+                    if (!fs.existsSync(targetPath)) {
+                        this._view?.webview.postMessage({
+                            command: 'repoTreeResult',
+                            error: `Directory not found: ${targetPath}`
+                        });
+                        break;
                     }
                     try {
                         const treeData = await this._backendClient.getRepoTree(targetPath);
@@ -373,7 +445,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         });
     }
 
-    private async _handleUserQuery(query: string, workspacePath?: string, securityMode?: string) {
+    private async _handleUserQuery(
+        query: string,
+        workspacePath?: string,
+        securityMode?: string,
+        inferenceOptions?: { temperature?: number; num_ctx?: number; num_predict?: number }
+    ) {
         let activeDoc = vscode.window.activeTextEditor?.document;
         if ((!activeDoc || activeDoc.uri.scheme !== 'file') && this._lastActiveDocument && !this._lastActiveDocument.isClosed) {
             activeDoc = this._lastActiveDocument;
@@ -416,7 +493,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             workspacePath,
             securityMode,
             activeFileContent,
-            openFiles
+            openFiles,
+            inferenceOptions
         );
     }
 
@@ -546,7 +624,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             <!-- CLI Style Task Planner Input -->
             <div class="user-console-cli-bar">
                 <span class="user-console-prompt">&gt;</span>
-                <input type="text" class="user-task-input" id="agent-goal-input" placeholder="Enter task goal (e.g. Refactor error handling or add unit tests)..." spellcheck="false" autocomplete="off">
+                <textarea class="user-task-input" id="agent-goal-input" rows="1" placeholder="Enter task goal (e.g. Refactor error handling or add unit tests)..." spellcheck="false" autocomplete="off"></textarea>
                 <button class="btn-run-task" id="btn-run-agent" title="Execute Task">Run</button>
                 <button class="btn-stop-task" id="btn-stop-agent" style="display: none;" title="Stop Task">Stop</button>
             </div>
@@ -647,8 +725,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 Scan & Index Workspace
             </button>
             <div style="margin-top: 10px; padding: 8px; background: var(--surface-subtle); border-radius: 10px; font-size: 11px;">
-                Status: <strong id="repo-status-label">Ready to scan</strong><br/>
-                Security: <strong>Zero Leaked Secrets Detected</strong>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                    <div>Status: <strong id="repo-status-label">Ready to scan</strong></div>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div>Security: <strong id="repo-security-label" style="color: #4ade80;">Zero Leaked Secrets Detected</strong></div>
+                    <button class="pixel-mini-btn" id="btn-security-scan" style="padding: 2px 7px; font-size: 10px;" title="Scan repository for leaked credentials and sensitive files">Audit</button>
+                </div>
+                <div id="repo-security-details" style="display: none; margin-top: 6px; padding: 6px 8px; background: rgba(0,0,0,0.2); border-radius: 6px; font-size: 10px; font-family: var(--font-mono); max-height: 120px; overflow-y: auto;">
+                </div>
             </div>
         </div>
         <div class="task-card" style="margin-top: 10px;">

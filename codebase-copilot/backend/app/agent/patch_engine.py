@@ -94,9 +94,17 @@ class PatchEngine:
                 if diff_file_path.exists() or not target_path.exists():
                     target_path = diff_file_path
 
-        # Check if this is a new file creation
+        # Check if this is a new file creation or populating an empty file
+        is_empty = False
+        if target_path.exists() and target_path.is_file():
+            try:
+                is_empty = target_path.stat().st_size == 0
+            except Exception:
+                pass
+
         is_new_file = (
             not target_path.exists()
+            or is_empty
             or "--- /dev/null" in diff_text
             or "@@ -0,0" in diff_text
         )

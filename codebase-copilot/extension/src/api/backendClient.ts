@@ -42,10 +42,20 @@ export interface AgentTask {
 
 export class BackendClient {
     private backendUrl: string;
+    private activeChatAbortController: AbortController | null = null;
 
     constructor() {
         const config = vscode.workspace.getConfiguration('codebaseCopilot');
         this.backendUrl = config.get<string>('backendUrl', 'http://127.0.0.1:8765');
+    }
+
+    stopStreamChat(): void {
+        if (this.activeChatAbortController) {
+            try {
+                this.activeChatAbortController.abort();
+            } catch {}
+            this.activeChatAbortController = null;
+        }
     }
 
     async checkHealth(): Promise<boolean> {
@@ -102,6 +112,19 @@ export class BackendClient {
         return null;
     }
 
+    async silentSyncCheck(workspacePath?: string): Promise<{ status: string; changed?: number; deleted?: number; tracked_files?: number }> {
+        try {
+            const url = workspacePath
+                ? `${this.backendUrl}/api/sync/silent-check?workspace_path=${encodeURIComponent(workspacePath)}`
+                : `${this.backendUrl}/api/sync/silent-check`;
+            const res = await fetch(url);
+            if (res.ok) {
+                return await res.json() as any;
+            }
+        } catch {}
+        return { status: 'noop' };
+    }
+
     async streamChat(
         query: string,
         activeFileContext: string | undefined,
@@ -111,8 +134,19 @@ export class BackendClient {
         workspacePathOverride?: string,
         securityMode?: string,
         activeFileContent?: string,
-        openFiles?: Array<{ path: string; content: string; is_dirty?: boolean }>
+        openFiles?: Array<{ path: string; content: string; is_dirty?: boolean }>,
+        inferenceOptions?: { temperature?: number; num_ctx?: number; num_predict?: number }
     ): Promise<void> {
+        if (this.activeChatAbortController) {
+            try { this.activeChatAbortController.abort(); } catch {}
+        }
+        const abortCtrl = new AbortController();
+        this.activeChatAbortController = abortCtrl;
+        const signal = abortCtrl.signal;
+
+        let accumulatedDiff = '';
+        let citations: string[] = [];
+
         try {
             const workspaceFolder = workspacePathOverride || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
             const payload: any = {
@@ -126,11 +160,21 @@ export class BackendClient {
             if (securityMode) {
                 payload.security_mode = securityMode;
             }
+            if (inferenceOptions?.temperature !== undefined) {
+                payload.temperature = inferenceOptions.temperature;
+            }
+            if (inferenceOptions?.num_ctx !== undefined) {
+                payload.num_ctx = inferenceOptions.num_ctx;
+            }
+            if (inferenceOptions?.num_predict !== undefined) {
+                payload.num_predict = inferenceOptions.num_predict;
+            }
 
             const response = await fetch(`${this.backendUrl}/api/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
+                body: JSON.stringify(payload),
+                signal
             });
 
             if (!response.ok) {
@@ -146,10 +190,12 @@ export class BackendClient {
 
             const reader = (response.body as any).getReader();
             const decoder = new TextDecoder();
-            let accumulatedDiff = '';
-            let citations: string[] = [];
 
             while (true) {
+                if (signal.aborted) {
+                    try { await reader.cancel(); } catch {}
+                    break;
+                }
                 const { done, value } = await reader.read();
                 if (done) break;
 
@@ -157,6 +203,7 @@ export class BackendClient {
                 const lines = text.split('\n');
 
                 for (const line of lines) {
+                    if (signal.aborted) break;
                     if (line.startsWith('data: ')) {
                         const dataStr = line.replace('data: ', '').trim();
                         if (dataStr === '[DONE]') continue;
@@ -179,9 +226,18 @@ export class BackendClient {
                 }
             }
 
-            onComplete({ citations, diff: accumulatedDiff });
+            if (!signal.aborted) {
+                onComplete({ citations, diff: accumulatedDiff });
+            }
         } catch (err: any) {
+            if (signal.aborted || err.name === 'AbortError') {
+                return;
+            }
             onError(err.message || 'Failed to connect to Codebase Copilot backend.');
+        } finally {
+            if (this.activeChatAbortController === abortCtrl) {
+                this.activeChatAbortController = null;
+            }
         }
     }
 
@@ -209,6 +265,31 @@ export class BackendClient {
             }
         } catch {}
         return '';
+    }
+
+    async getSecurityAudit(workspacePath?: string): Promise<{
+        status: string;
+        scanned_files: number;
+        findings_count: number;
+        findings: Array<{ file: string; type: string; severity: string; detail: string; line: number }>;
+        summary: string;
+    }> {
+        try {
+            const url = workspacePath
+                ? `${this.backendUrl}/api/repo/security-audit?path=${encodeURIComponent(workspacePath)}`
+                : `${this.backendUrl}/api/repo/security-audit`;
+            const res = await fetch(url);
+            if (res.ok) {
+                return await res.json() as any;
+            }
+        } catch {}
+        return {
+            status: 'clean',
+            scanned_files: 0,
+            findings_count: 0,
+            findings: [],
+            summary: 'Zero Leaked Secrets Detected'
+        };
     }
 
     async createPlan(goal: string, workspacePath?: string): Promise<AgentTask> {

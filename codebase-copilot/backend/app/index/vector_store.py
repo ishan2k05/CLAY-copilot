@@ -3,6 +3,7 @@ import math
 import json
 import urllib.request
 import urllib.error
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 from ..parser.symbols import CodeChunk
 
@@ -17,6 +18,30 @@ class LocalVectorStore:
         self.embed_model = embed_model
         self.chunks: List[CodeChunk] = []
         self.vectors: List[List[float]] = []
+
+    def remove_chunks_for_file(self, file_path: str):
+        """Purges both chunks and their corresponding embeddings for a file to maintain exact synchronization."""
+        target_name = Path(file_path).name
+        try:
+            target_norm = str(Path(file_path).resolve())
+        except Exception:
+            target_norm = str(file_path)
+
+        new_chunks = []
+        new_vectors = []
+        for chunk, vec in zip(self.chunks, self.vectors):
+            try:
+                c_norm = str(Path(chunk.file_path).resolve())
+            except Exception:
+                c_norm = str(chunk.file_path)
+            c_name = Path(chunk.file_path).name
+
+            if c_norm != target_norm and c_name != target_name:
+                new_chunks.append(chunk)
+                new_vectors.append(vec)
+
+        self.chunks = new_chunks
+        self.vectors = new_vectors
 
     async def get_embedding(self, text: str) -> List[float]:
         """Fetches vector embedding from Ollama or computes fallback frequency vector."""

@@ -25,10 +25,12 @@
   // State
   let currentModel = 'gemma4:31b-cloud';
   let currentHost = 'http://127.0.0.1:11434';
-  let currentTemperature = 0.2;
-  let currentNumCtx = 32768;
-  let currentNumPredict = 2048;
-  let currentRepoPath = savedRepoPath || '.';
+  let currentTemperature = parseFloat(localStorage.getItem('clay_temperature') || '0.20');
+  let currentNumCtx = parseInt(localStorage.getItem('clay_num_ctx') || '32768', 10);
+  let currentNumPredict = parseInt(localStorage.getItem('clay_num_predict') || '2048', 10);
+  let currentPrivacyFilter = localStorage.getItem('clay_privacy_filter') !== 'false';
+  let currentPrivacyPatterns = localStorage.getItem('clay_privacy_patterns') || '.env, *.pem, credentials.json, id_rsa, *.key';
+  let currentRepoPath = savedRepoPath || '';
   let stagedDiffData = null;
   let isAgentRunning = false;
   let lastUserQuery = '';
@@ -36,6 +38,7 @@
 
   // Active repository files registry for real-time diff mapping
   let currentRepoFilesList = [];
+  let activeEditorFile = '';
 
   function extractDiffFilename(diffText) {
     if (!diffText) return null;
@@ -72,7 +75,26 @@
   }
 
 
-  // Minimal non-blocking Toast System
+  // Single-Instance Retro Pixel Toast System
+  let activeToastEl = null;
+  let activeToastTimer = null;
+
+  function dismissActiveToast() {
+    if (!activeToastEl) return;
+    const el = activeToastEl;
+    el.style.opacity = '0';
+    el.style.transform = 'translateY(6px)';
+    setTimeout(() => {
+      if (el && el.parentNode) {
+        el.remove();
+      }
+      if (activeToastEl === el) {
+        activeToastEl = null;
+        activeToastTimer = null;
+      }
+    }, 200);
+  }
+
   function showToast(message, type = 'success') {
     let container = document.getElementById('copilot-toast-container');
     if (!container) {
@@ -81,17 +103,41 @@
       container.className = 'toast-container';
       document.body.appendChild(container);
     }
+
+    const glyph = type === 'success' ? '[✓]' : type === 'error' ? '[✖]' : '[»]';
+    const contentHtml = `<span class="pixel-toast-glyph">${glyph}</span><span class="pixel-toast-text">${escapeHtml(message)}</span>`;
+
+    if (activeToastEl && activeToastEl.parentNode) {
+      // Re-use active single instance: update contents, pulse/blink animation, and refresh dismissal timer
+      activeToastEl.className = `pixel-toast toast toast-${type}`;
+      activeToastEl.innerHTML = contentHtml;
+      activeToastEl.style.opacity = '1';
+      activeToastEl.style.transform = 'translateY(0)';
+
+      // Trigger high-contrast retro pixel blink
+      activeToastEl.classList.remove('toast-blink');
+      void activeToastEl.offsetWidth; // Force layout reflow
+      activeToastEl.classList.add('toast-blink');
+
+      if (activeToastTimer) {
+        clearTimeout(activeToastTimer);
+      }
+      activeToastTimer = setTimeout(() => dismissActiveToast(), 2600);
+      return;
+    }
+
+    // Otherwise create brand new single instance (ensure container is clean)
+    container.innerHTML = '';
     const toast = document.createElement('div');
-    toast.className = `toast toast-${type}`;
-    const icon = type === 'success' ? '✓' : '⚠';
-    toast.innerHTML = `<span style="font-weight: bold; margin-right: 4px;">${icon}</span><span>${escapeHtml(message)}</span>`;
+    toast.className = `pixel-toast toast toast-${type}`;
+    toast.innerHTML = contentHtml;
     container.appendChild(toast);
-    setTimeout(() => {
-      toast.style.opacity = '0';
-      toast.style.transform = 'translateY(6px)';
-      toast.style.transition = 'all 0.2s ease';
-      setTimeout(() => toast.remove(), 200);
-    }, 2800);
+    activeToastEl = toast;
+
+    if (activeToastTimer) {
+      clearTimeout(activeToastTimer);
+    }
+    activeToastTimer = setTimeout(() => dismissActiveToast(), 2600);
   }
 
   // Elements
@@ -128,6 +174,11 @@
     }
     if (target === 'repo') {
       loadRepoTree();
+    }
+    if (target === 'diff') {
+      const diffTabBtn = document.querySelector('.nav-tab[data-target="diff"]');
+      const dot = diffTabBtn?.querySelector('.diff-staged-dot');
+      if (dot) dot.remove();
     }
   }
 
@@ -172,6 +223,24 @@
   let currentApiKey = localStorage.getItem('clay_api_key') || '';
   let currentSecurityMode = localStorage.getItem('clay_security_mode') || 'sandboxed';
   let currentAllowNetwork = localStorage.getItem('clay_allow_net') !== 'false';
+
+  // Immediately reflect saved local storage values in the UI controls
+  if (tempSlider && tempValDisplay) {
+    tempSlider.value = currentTemperature.toString();
+    tempValDisplay.textContent = currentTemperature.toFixed(2);
+  }
+  if (ctxSelect) {
+    ctxSelect.value = currentNumCtx.toString();
+  }
+  if (maxTokensSelect) {
+    maxTokensSelect.value = currentNumPredict.toString();
+  }
+  if (privacyCheck) {
+    privacyCheck.checked = currentPrivacyFilter;
+  }
+  if (privacyPatterns) {
+    privacyPatterns.value = currentPrivacyPatterns;
+  }
 
   // 1. 3-Card Security Mode Grid
   const securityCards = document.querySelectorAll('.security-mode-card');
@@ -229,44 +298,116 @@
   }
 
   // 5. Host OS Autodetection & Dynamic CLI Chips
+  function getSyntaxCheckCommand() {
+    try {
+      const isWin = detectedSystem && detectedSystem.is_windows;
+      const py = isWin ? 'python' : 'python3';
+      const inputEl = document.getElementById('input-repo-path');
+      const inputVal = inputEl ? inputEl.value.trim() : '';
+      const repoRoot = (currentRepoPath && currentRepoPath !== '.' ? currentRepoPath : (inputVal && inputVal !== '.' ? inputVal : '')).replace(/\\/g, '/').replace(/\/+$/, '');
+
+      // 1. Check if user has an active file open in the editor within the repo
+      if (typeof activeEditorFile === 'string' && activeEditorFile) {
+        const activeNorm = activeEditorFile.replace(/\\/g, '/');
+        if (repoRoot && activeNorm.startsWith(repoRoot)) {
+          let rel = activeNorm.slice(repoRoot.length).replace(/^\/+/, '');
+          if (rel.endsWith('.py')) {
+            return `${py} -m py_compile ${rel}`;
+          }
+        } else {
+          const parts = activeNorm.split('/');
+          const base = parts[parts.length - 1];
+          if (base.endsWith('.py')) {
+            return `${py} -m py_compile ${base}`;
+          }
+        }
+      }
+
+      // 2. Check currentRepoFilesList for actual files in the uploaded repository
+      if (Array.isArray(currentRepoFilesList) && currentRepoFilesList.length > 0) {
+        const pyFiles = currentRepoFilesList.filter(f => (f.path || f.name || '').endsWith('.py'));
+        if (pyFiles.length > 0) {
+          const preferred = pyFiles.find(f => {
+            const n = (f.name || f.path || '').toLowerCase();
+            return !n.includes('test_') && !n.includes('__') && !n.includes('test.') && !n.includes('tests/');
+          }) || pyFiles[0];
+
+          let target = (preferred.path || preferred.name).replace(/\\/g, '/');
+          if (repoRoot && target.startsWith(repoRoot)) {
+            target = target.slice(repoRoot.length).replace(/^\/+/, '');
+          }
+          return `${py} -m py_compile ${target}`;
+        }
+      }
+
+      // 3. Fallback to primary repo file if ends with .py
+      if (typeof getPrimaryRepoFile === 'function') {
+        const primary = getPrimaryRepoFile();
+        if (primary && primary.endsWith('.py')) {
+          return `${py} -m py_compile ${primary}`;
+        }
+      }
+
+      // 4. Default: compile all python files in the current repository folder
+      return `${py} -m compileall -q .`;
+    } catch (err) {
+      console.warn('Error determining syntax check command:', err);
+      return 'python3 -m compileall -q .';
+    }
+  }
+
   function applySystemInfo(info) {
     if (!info) return;
     detectedSystem = info;
-    const osBadge = document.getElementById('terminal-os-badge');
-    if (osBadge) {
-      osBadge.textContent = `${info.os.toUpperCase()} : ${info.shell}`;
-    }
+    try {
+      const osBadge = document.getElementById('terminal-os-badge');
+      if (osBadge) {
+        const osName = (info.os || (info.is_windows ? 'WINDOWS' : 'LINUX')).toUpperCase();
+        const shellName = info.shell || (info.is_windows ? 'powershell' : 'bash');
+        osBadge.textContent = `${osName} : ${shellName}`;
+      }
 
-    // Dynamically populate CLI chips for host OS
-    const quickChipsContainer = document.getElementById('terminal-quick-chips');
-    if (quickChipsContainer) {
-      quickChipsContainer.innerHTML = '<span class="terminal-quick-chips-label">Quick:</span>';
-      const chips = info.is_windows ? [
-        { label: 'syntax check', cmd: 'python -m py_compile backend/app/main.py' },
-        { label: 'pytest', cmd: 'python -m pytest' },
-        { label: 'git status', cmd: 'git status' },
-        { label: 'dir', cmd: 'dir' }
-      ] : [
-        { label: 'syntax check', cmd: 'python3 -m py_compile backend/app/main.py' },
-        { label: 'pytest', cmd: 'pytest' },
-        { label: 'git status', cmd: 'git status' },
-        { label: 'ls -la', cmd: 'ls -la' }
-      ];
+      // Dynamically populate CLI chips for host OS
+      const quickChipsContainer = document.getElementById('terminal-quick-chips');
+      if (quickChipsContainer) {
+        quickChipsContainer.innerHTML = '<span class="terminal-quick-chips-label">Quick:</span>';
+        const isWin = !!info.is_windows;
+        const chips = isWin ? [
+          { label: 'syntax check', cmd: () => getSyntaxCheckCommand() },
+          { label: 'pytest', cmd: () => 'python -m pytest' },
+          { label: 'git status', cmd: () => 'git status' },
+          { label: 'dir', cmd: () => 'dir' }
+        ] : [
+          { label: 'syntax check', cmd: () => getSyntaxCheckCommand() },
+          { label: 'pytest', cmd: () => 'pytest' },
+          { label: 'git status', cmd: () => 'git status' },
+          { label: 'ls -la', cmd: () => 'ls -la' }
+        ];
 
-      chips.forEach((c) => {
-        const chipEl = document.createElement('span');
-        chipEl.className = 'cli-chip';
-        chipEl.setAttribute('data-cmd', c.cmd);
-        chipEl.textContent = c.label;
-        chipEl.addEventListener('click', () => {
-          if (inputTerminalCmd) {
-            inputTerminalCmd.value = c.cmd;
-            updateCommandPreview(c.cmd);
-          }
-          executeCliCommand(c.cmd);
+        chips.forEach((c) => {
+          const chipEl = document.createElement('span');
+          chipEl.className = 'cli-chip';
+          const initialCmd = typeof c.cmd === 'function' ? c.cmd() : c.cmd;
+          chipEl.setAttribute('data-cmd', initialCmd);
+          chipEl.textContent = c.label;
+          chipEl.addEventListener('click', () => {
+            const cmdToRun = typeof c.cmd === 'function' ? c.cmd() : c.cmd;
+            const inputTerminalCmd = document.getElementById('input-terminal-cmd');
+            if (inputTerminalCmd) {
+              inputTerminalCmd.value = cmdToRun;
+              if (typeof updateCommandPreview === 'function') {
+                updateCommandPreview(cmdToRun);
+              }
+            }
+            if (typeof executeCliCommand === 'function') {
+              executeCliCommand(cmdToRun);
+            }
+          });
+          quickChipsContainer.appendChild(chipEl);
         });
-        quickChipsContainer.appendChild(chipEl);
-      });
+      }
+    } catch (e) {
+      console.warn('Error applying system info to chips:', e);
     }
   }
 
@@ -392,18 +533,30 @@
 
       // Populate models dropdown dynamically
       if (modelSelect && data.models && data.models.length > 0) {
-        const currentVal = modelSelect.value || currentModel;
+        const savedModel = localStorage.getItem('clay_model');
+        const currentVal = savedModel || modelSelect.value || currentModel;
         modelSelect.innerHTML = '';
+        let matched = false;
         data.models.forEach((m) => {
           const opt = document.createElement('option');
           opt.value = m;
           opt.textContent = m;
-          if (m === currentVal || (m.includes('gemma4') && currentVal.includes('gemma4'))) {
+          if (m === currentVal) {
             opt.selected = true;
+            matched = true;
           }
           modelSelect.appendChild(opt);
         });
+        if (!matched && modelSelect.options.length > 0) {
+          const partial = Array.from(modelSelect.options).find(o => o.value.includes(currentVal) || currentVal.includes(o.value));
+          if (partial) {
+            partial.selected = true;
+          } else {
+            modelSelect.selectedIndex = 0;
+          }
+        }
         currentModel = modelSelect.value;
+        localStorage.setItem('clay_model', currentModel);
         updateActiveModelDisplays(currentModel);
       }
     } else {
@@ -425,6 +578,25 @@
     if (chatModelBadge) chatModelBadge.textContent = model;
   }
 
+  if (modelSelect) {
+    modelSelect.addEventListener('change', () => {
+      currentModel = modelSelect.value;
+      localStorage.setItem('clay_model', currentModel);
+      updateActiveModelDisplays(currentModel);
+      showToast(`Active model switched to ${currentModel}`, 'info');
+      const payload = { model: currentModel };
+      if (isVsCode) {
+        vscode.postMessage({ command: 'saveSettings', settings: payload });
+      } else {
+        fetch(`${BACKEND_URL}/api/settings`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }).catch(() => {});
+      }
+    });
+  }
+
   if (btnTestOllama) {
     btnTestOllama.addEventListener('click', testOllamaConnection);
   }
@@ -440,13 +612,34 @@
         num_ctx: ctxSelect ? parseInt(ctxSelect.value, 10) : currentNumCtx,
         num_predict: maxTokensSelect ? parseInt(maxTokensSelect.value, 10) : currentNumPredict,
         privacy_filter: privacyCheck ? privacyCheck.checked : true,
-        exclusion_patterns: privacyPatterns ? privacyPatterns.value.trim() : '.env, *.pem',
+        exclusion_patterns: privacyPatterns ? privacyPatterns.value.trim() : '.env, *.pem, credentials.json, id_rsa, *.key',
         security_mode: currentSecurityMode,
         allow_network: currentAllowNetwork
       };
 
+      // Persist to local storage immediately
+      currentTemperature = payload.temperature;
+      currentNumCtx = payload.num_ctx;
+      currentNumPredict = payload.num_predict;
+      currentPrivacyFilter = payload.privacy_filter;
+      currentPrivacyPatterns = payload.exclusion_patterns;
+      localStorage.setItem('clay_temperature', payload.temperature.toString());
+      localStorage.setItem('clay_num_ctx', payload.num_ctx.toString());
+      localStorage.setItem('clay_num_predict', payload.num_predict.toString());
+      localStorage.setItem('clay_privacy_filter', payload.privacy_filter ? 'true' : 'false');
+      localStorage.setItem('clay_privacy_patterns', payload.exclusion_patterns);
+      localStorage.setItem('clay_model', payload.model);
+      if (payload.host) localStorage.setItem('clay_host', payload.host);
+      if (payload.connection_type) localStorage.setItem('clay_connection_type', payload.connection_type);
+      if (payload.api_key !== undefined) localStorage.setItem('clay_api_key', payload.api_key);
+
+      btnSaveSettings.textContent = 'Settings Saved!';
+      setTimeout(() => (btnSaveSettings.textContent = 'Save All Settings'), 2000);
+      updateActiveModelDisplays(payload.model);
+
       if (isVsCode) {
         vscode.postMessage({ command: 'saveSettings', settings: payload });
+        showToast('Settings saved successfully', 'success');
       } else {
         try {
           const res = await fetch(`${BACKEND_URL}/api/settings`, {
@@ -455,10 +648,9 @@
             body: JSON.stringify(payload)
           });
           if (res.ok) {
-            btnSaveSettings.textContent = 'Settings Saved!';
-            setTimeout(() => (btnSaveSettings.textContent = 'Save All Settings'), 2000);
-            updateActiveModelDisplays(payload.model);
             showToast('Settings saved successfully', 'success');
+          } else {
+            showToast('Failed to save settings', 'error');
           }
         } catch (e) {
           showToast('Failed to save settings', 'error');
@@ -476,21 +668,28 @@
         if (s.temperature !== undefined && tempSlider && tempValDisplay) {
           tempSlider.value = s.temperature;
           tempValDisplay.textContent = parseFloat(s.temperature).toFixed(2);
-          currentTemperature = s.temperature;
+          currentTemperature = parseFloat(s.temperature);
+          localStorage.setItem('clay_temperature', s.temperature.toString());
         }
         if (s.num_ctx && ctxSelect) {
           ctxSelect.value = s.num_ctx.toString();
-          currentNumCtx = s.num_ctx;
+          currentNumCtx = parseInt(s.num_ctx, 10);
+          localStorage.setItem('clay_num_ctx', s.num_ctx.toString());
         }
         if (s.num_predict && maxTokensSelect) {
           maxTokensSelect.value = s.num_predict.toString();
-          currentNumPredict = s.num_predict;
+          currentNumPredict = parseInt(s.num_predict, 10);
+          localStorage.setItem('clay_num_predict', s.num_predict.toString());
         }
         if (s.privacy_filter !== undefined && privacyCheck) {
-          privacyCheck.checked = s.privacy_filter;
+          privacyCheck.checked = !!s.privacy_filter;
+          currentPrivacyFilter = !!s.privacy_filter;
+          localStorage.setItem('clay_privacy_filter', s.privacy_filter ? 'true' : 'false');
         }
         if (s.exclusion_patterns && privacyPatterns) {
           privacyPatterns.value = s.exclusion_patterns;
+          currentPrivacyPatterns = s.exclusion_patterns;
+          localStorage.setItem('clay_privacy_patterns', s.exclusion_patterns);
         }
         if (s.connection_type) {
           currentConnectionType = s.connection_type;
@@ -603,7 +802,63 @@
     }
   }
 
+  const SEND_ICON_SVG = `
+    <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" shape-rendering="crispEdges">
+      <path d="M2,7 h6 v2 h-6 z M8,5 h2 v6 h-2 z M10,6 h2 v4 h-2 z M12,7 h2 v2 h-2 z"/>
+    </svg>
+  `;
+
+  const STOP_ICON_SVG = `
+    <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" shape-rendering="crispEdges">
+      <rect x="3" y="3" width="10" height="10" fill="currentColor"/>
+    </svg>
+  `;
+
   let isChatStreaming = false;
+  let chatAbortController = null;
+
+  function setChatGeneratingState(generating) {
+    isChatStreaming = generating;
+    if (!sendBtn) return;
+    if (generating) {
+      sendBtn.classList.add('is-stop', 'is-generating');
+      sendBtn.title = 'Stop Generating (Click to cancel)';
+      sendBtn.setAttribute('aria-label', 'Stop Generating');
+      sendBtn.innerHTML = STOP_ICON_SVG;
+    } else {
+      sendBtn.classList.remove('is-stop', 'is-generating');
+      sendBtn.title = 'Send (Enter)';
+      sendBtn.setAttribute('aria-label', 'Send');
+      sendBtn.innerHTML = SEND_ICON_SVG;
+    }
+  }
+
+  function stopChatGeneration(notifyHost = true) {
+    if (!isChatStreaming) return;
+
+    if (notifyHost && isVsCode) {
+      vscode.postMessage({ command: 'stopChat' });
+    }
+
+    if (chatAbortController) {
+      try {
+        chatAbortController.abort();
+      } catch {}
+      chatAbortController = null;
+    }
+
+    setChatGeneratingState(false);
+    updateAssistantCursorStates(null, false);
+
+    if (currentAssistantTextEl) {
+      const stopNotice = document.createElement('div');
+      stopNotice.className = 'chat-stopped-notice';
+      stopNotice.style.cssText = 'color: #F97316; font-size: 10.5px; font-family: var(--font-mono); margin-top: 8px; display: inline-flex; align-items: center; gap: 4px;';
+      stopNotice.innerHTML = '<span style="font-size: 11px;">■</span> [Generation stopped by user]';
+      currentAssistantTextEl.appendChild(stopNotice);
+    }
+    showToast('Generation stopped', 'info');
+  }
 
   async function sendChatMessage() {
     if (!chatInput) return;
@@ -615,7 +870,7 @@
 
   async function dispatchChatMessage(text) {
     if (!text) return;
-    isChatStreaming = true;
+    setChatGeneratingState(true);
 
     // Hide empty state immediately
     hideChatEmptyState();
@@ -642,11 +897,15 @@
         command: 'userQuery',
         text,
         workspace_path: currentRepoPath,
-        security_mode: currentSecurityMode
+        security_mode: currentSecurityMode,
+        temperature: currentTemperature,
+        num_ctx: currentNumCtx,
+        num_predict: currentNumPredict
       });
-      isChatStreaming = false;
+      // Remains in generating state until streamComplete or streamStopped
     } else {
       try {
+        chatAbortController = new AbortController();
         const response = await fetch(`${BACKEND_URL}/api/chat`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -654,13 +913,17 @@
             query: text,
             workspace_path: currentRepoPath,
             security_mode: currentSecurityMode,
+            temperature: currentTemperature,
+            num_ctx: currentNumCtx,
+            num_predict: currentNumPredict,
             stream: true
-          })
+          }),
+          signal: chatAbortController.signal
         });
 
         if (!response.ok) {
           appendStreamToken(`\n[Backend Error ${response.status}: Failed to stream]`);
-          isChatStreaming = false;
+          setChatGeneratingState(false);
           return;
         }
 
@@ -696,19 +959,34 @@
           }
         }
       } catch (err) {
-        appendStreamToken(`\n[Connection Error: ${err.message}]`);
+        if (err.name !== 'AbortError') {
+          appendStreamToken(`\n[Connection Error: ${err.message}]`);
+        }
       } finally {
-        isChatStreaming = false;
+        setChatGeneratingState(false);
+        chatAbortController = null;
       }
     }
   }
 
-  if (sendBtn) sendBtn.addEventListener('click', sendChatMessage);
+  if (sendBtn) {
+    sendBtn.addEventListener('click', () => {
+      if (isChatStreaming) {
+        stopChatGeneration(true);
+      } else {
+        sendChatMessage();
+      }
+    });
+  }
 
   if (chatInput) {
     chatInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
+        if (isChatStreaming) {
+          showToast('Model is currently generating. Click Stop to cancel.', 'info');
+          return;
+        }
         sendChatMessage();
       }
     });
@@ -927,6 +1205,7 @@
   }
 
   function onStreamFinished(fullText, citations) {
+    setChatGeneratingState(false);
     if (currentAssistantTextEl) {
       currentAssistantTextEl.innerHTML = formatMarkdown(fullText);
       const card = currentAssistantTextEl.closest('.assistant-card');
@@ -991,6 +1270,7 @@
             const agentTaskLabel = capturedTarget ? `Apply changes for ${capturedTarget}` : capturedGoal;
             if (agentGoalInput) {
               agentGoalInput.value = agentTaskLabel;
+              resizeAgentGoalInput();
             }
             runAgentTask({
               pregeneratedDiff: capturedDiff,
@@ -1088,8 +1368,9 @@
 
         let diffToApply = chatPayload.pregeneratedDiff;
         if (!diffToApply && chatPayload.pregeneratedCode) {
-          diffToApply = `--- a/${targetFilename}\n+++ b/${targetFilename}\n@@ -1,1 +1,1 @@\n` +
-            chatPayload.pregeneratedCode.split('\n').map(l => `+${l}`).join('\n');
+          const codeLines = chatPayload.pregeneratedCode.split('\n');
+          diffToApply = `--- /dev/null\n+++ b/${targetFilename}\n@@ -0,0 +1,${Math.max(1, codeLines.length)} @@\n` +
+            codeLines.map(l => `+${l}`).join('\n');
         }
 
         if (diffToApply) {
@@ -1099,15 +1380,34 @@
         updateStepUI(2, 'done', `Applied code changes for ${targetFilename}.`);
         appendTerminalLog(`[step 2] Code changes from chat applied cleanly.`);
       } else {
-        setAgentProgress(60, 'Step 2 of 3: Synthesizing code solution via Gemma 4...');
+        setAgentProgress(60, `Step 2 of 3: Synthesizing code solution via ${currentModel}...`);
         appendTerminalLog(`[step 2] Querying ${currentModel} for code changes...`);
         const step2Res = await executeStep(2, goal);
         if (!isAgentRunning) return;
         updateStepUI(2, 'done', 'Solution synthesized cleanly.');
         appendTerminalLog(`[step 2] ${step2Res.log || 'Code synthesized.'}`);
-        if (step2Res.diff) {
-          const targetFilename = step2Res.target_file || extractDiffFilename(step2Res.diff) || getPrimaryRepoFile(goal);
-          stageDiff(targetFilename, step2Res.diff);
+
+        let diffToStage = step2Res.diff;
+        const targetFilename = step2Res.target_file || (diffToStage ? extractDiffFilename(diffToStage) : '') || getPrimaryRepoFile(goal);
+
+        // Robust fallback: if diff was empty but LLM generated code or raw text
+        if (!diffToStage && step2Res.generated) {
+          const raw = step2Res.generated.trim();
+          let codeBody = '';
+          const codeMatch = raw.match(/```(?:python|py|python3|code)?\s*\n([\s\S]*?)```/i);
+          if (codeMatch) {
+            codeBody = codeMatch[1].trim();
+          } else if (raw.startsWith('def ') || raw.startsWith('class ') || raw.startsWith('import ') || raw.startsWith('from ')) {
+            codeBody = raw;
+          }
+          if (codeBody) {
+            const lines = codeBody.split('\n');
+            diffToStage = `--- /dev/null\n+++ b/${targetFilename}\n@@ -0,0 +1,${Math.max(1, lines.length)} @@\n` + lines.map(l => `+${l}`).join('\n');
+          }
+        }
+
+        if (diffToStage) {
+          stageDiff(targetFilename, diffToStage);
           appendTerminalLog(`[diff] Staged surgical diff for ${targetFilename} in Diff Reviewer tab.`);
         }
       }
@@ -1238,13 +1538,23 @@
   if (btnRunAgent) btnRunAgent.addEventListener('click', () => runAgentTask());
   if (btnStopAgent) btnStopAgent.addEventListener('click', () => stopAgentTask(true));
 
+  function resizeAgentGoalInput() {
+    if (!agentGoalInput) return;
+    agentGoalInput.style.height = 'auto';
+    const newHeight = Math.min(agentGoalInput.scrollHeight, 140);
+    agentGoalInput.style.height = (newHeight > 20 ? newHeight : 20) + 'px';
+    agentGoalInput.style.overflowY = agentGoalInput.scrollHeight > 140 ? 'auto' : 'hidden';
+  }
+
   if (agentGoalInput) {
     agentGoalInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
+      if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         runAgentTask();
       }
     });
+
+    agentGoalInput.addEventListener('input', resizeAgentGoalInput);
   }
 
   function appendTerminalLog(text) {
@@ -1433,6 +1743,14 @@
     if (diffBadgeDel) diffBadgeDel.textContent = `-${dels}`;
     if (diffActionBar) diffActionBar.style.display = 'flex';
 
+    const diffTabBtn = document.querySelector('.nav-tab[data-target="diff"]');
+    if (diffTabBtn && !diffTabBtn.querySelector('.diff-staged-dot')) {
+      const dot = document.createElement('span');
+      dot.className = 'diff-staged-dot';
+      dot.style.cssText = 'display:inline-block;width:6px;height:6px;border-radius:50%;background:#F97316;margin-left:4px;vertical-align:middle;';
+      diffTabBtn.appendChild(dot);
+    }
+
     if (diffStagedContainer) {
       diffStagedContainer.innerHTML = `
         <div class="diff-box" style="margin-top: 0;">
@@ -1501,6 +1819,9 @@
 
   function clearStagedDiff() {
     stagedDiffData = null;
+    const diffTabBtn = document.querySelector('.nav-tab[data-target="diff"]');
+    const dot = diffTabBtn?.querySelector('.diff-staged-dot');
+    if (dot) dot.remove();
     if (diffActionBar) diffActionBar.style.display = 'none';
     if (diffSummaryLabel) diffSummaryLabel.textContent = 'Staged Changes // 0 files';
     if (diffBadgeAdd) diffBadgeAdd.textContent = '+0';
@@ -1554,6 +1875,9 @@
   const btnScanRepo = document.getElementById('btn-scan-repo');
   const repoStatsText = document.getElementById('repo-stats-text');
   const repoStatusLabel = document.getElementById('repo-status-label');
+  const repoSecurityLabel = document.getElementById('repo-security-label');
+  const btnSecurityScan = document.getElementById('btn-security-scan');
+  const repoSecurityDetails = document.getElementById('repo-security-details');
   const mermaidCode = document.getElementById('mermaid-code');
 
   const DEFAULT_REPO_PATH = '.';
@@ -1569,7 +1893,15 @@
       mermaidCode.textContent = "No SQLite code graph available for this repository.\nClick 'Scan & Index Workspace' to analyze codebase structure.";
     }
     if (repoStatusLabel) {
-      repoStatusLabel.textContent = "Ready to scan (Path updated)";
+      repoStatusLabel.textContent = currentRepoPath ? "Ready to scan (Path updated)" : "No repository selected";
+    }
+    if (repoSecurityLabel) {
+      repoSecurityLabel.textContent = "Ready to audit";
+      repoSecurityLabel.style.color = "var(--text-muted)";
+    }
+    if (repoSecurityDetails) {
+      repoSecurityDetails.style.display = "none";
+      repoSecurityDetails.innerHTML = "";
     }
   }
 
@@ -1577,10 +1909,11 @@
     inputRepoPath.value = currentRepoPath;
     const syncRepoPath = async () => {
       const val = inputRepoPath.value.trim();
-      if (!val) return;
       currentRepoPath = val;
       resetRepoGraphState();
-      if (!isVsCode) {
+      if (isVsCode) {
+        vscode.postMessage({ command: 'setRepoPath', path: currentRepoPath });
+      } else {
         try {
           const res = await fetch(`${BACKEND_URL}/api/settings`, {
             method: 'POST',
@@ -1596,7 +1929,11 @@
           }
         } catch (e) { }
       }
-      localStorage.setItem('codebase_copilot_repo_path', currentRepoPath);
+      if (currentRepoPath) {
+        localStorage.setItem('codebase_copilot_repo_path', currentRepoPath);
+      } else {
+        localStorage.removeItem('codebase_copilot_repo_path');
+      }
     };
     inputRepoPath.addEventListener('input', syncRepoPath);
     inputRepoPath.addEventListener('change', async () => {
@@ -1605,24 +1942,28 @@
     });
   }
 
-  // Reset button fix: restores default path, updates storage & backend, and refreshes file tree
+  // Reset button: completely clears the path bar, storage, backend, and resets tree view
   if (btnResetRepoPath) {
     btnResetRepoPath.addEventListener('click', () => {
-      currentRepoPath = DEFAULT_REPO_PATH;
-      if (inputRepoPath) inputRepoPath.value = currentRepoPath;
-      localStorage.setItem('codebase_copilot_repo_path', currentRepoPath);
+      currentRepoPath = '';
+      if (inputRepoPath) inputRepoPath.value = '';
+      localStorage.removeItem('codebase_copilot_repo_path');
       resetRepoGraphState();
+      if (repoFileTree) {
+        repoFileTree.innerHTML = '<div class="tree-empty-state"><span class="pixel-glyph">»</span> No repository selected. Enter a path above or click BROWSE.</div>';
+      }
+      if (repoTreeCount) repoTreeCount.textContent = '0 Files';
+      if (repoStatsText) repoStatsText.textContent = 'Indexed: 0 Files // 0 Functions & Classes // 0 Vector Chunks';
       if (isVsCode) {
         vscode.postMessage({ command: 'resetRepoPath' });
       } else {
         fetch(`${BACKEND_URL}/api/settings`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ repo_path: currentRepoPath })
+          body: JSON.stringify({ repo_path: '' })
         }).catch(() => { });
       }
-      showToast('Repository path reset to default', 'success');
-      loadRepoTree(currentRepoPath);
+      showToast('Repository path cleared', 'info');
     });
   }
 
@@ -1828,7 +2169,14 @@
 
   // File tree loader & hierarchical pixelated renderer
   async function loadRepoTree(targetPath) {
-    const path = targetPath || (inputRepoPath ? inputRepoPath.value.trim() : currentRepoPath);
+    const path = targetPath !== undefined ? targetPath : (inputRepoPath ? inputRepoPath.value.trim() : currentRepoPath);
+    if (!path) {
+      if (repoFileTree) {
+        repoFileTree.innerHTML = '<div class="tree-empty-state"><span class="pixel-glyph">»</span> No repository selected. Enter a path above or click BROWSE.</div>';
+      }
+      if (repoTreeCount) repoTreeCount.textContent = '0 Files';
+      return;
+    }
     if (repoTreeCount) repoTreeCount.textContent = 'Loading...';
     if (isVsCode) {
       vscode.postMessage({ command: 'getRepoTree', path });
@@ -1869,6 +2217,9 @@
       });
     }
     countFiles(treeNodes);
+    if (detectedSystem) {
+      applySystemInfo(detectedSystem);
+    }
 
     if (repoTreeCount) {
       repoTreeCount.textContent = stats ? `${stats.total_files} Files` : `${fileCount} Files`;
@@ -1994,6 +2345,76 @@
     });
   }
 
+  function applySecurityResults(data) {
+    if (!repoSecurityLabel) return;
+    if (!data) {
+      repoSecurityLabel.textContent = '✓ Zero Leaked Secrets Detected';
+      repoSecurityLabel.style.color = '#4ade80';
+      if (repoSecurityDetails) repoSecurityDetails.style.display = 'none';
+      return;
+    }
+
+    const count = data.findings_count !== undefined ? data.findings_count : (data.findings ? data.findings.length : 0);
+    if (count === 0) {
+      repoSecurityLabel.textContent = '✓ Zero Leaked Secrets Detected';
+      repoSecurityLabel.style.color = '#4ade80';
+      if (repoSecurityDetails) {
+        repoSecurityDetails.style.display = 'none';
+        repoSecurityDetails.innerHTML = '';
+      }
+    } else {
+      repoSecurityLabel.textContent = `⚠ ${count} Leaked Secret${count === 1 ? '' : 's'} Flagged`;
+      repoSecurityLabel.style.color = '#f87171';
+      if (repoSecurityDetails) {
+        repoSecurityDetails.style.display = 'block';
+        const findings = data.findings || [];
+        repoSecurityDetails.innerHTML = findings.map(f => `
+          <div class="sec-finding-item">
+            <div class="sec-finding-header">
+              <span class="sec-finding-file">${escapeHtml(f.file)}${f.line ? `:${f.line}` : ''}</span>
+              <span class="${f.severity === 'CRITICAL' ? 'sec-badge-critical' : 'sec-badge-high'}">${escapeHtml(f.severity || 'HIGH')}</span>
+            </div>
+            <div class="sec-finding-detail">${escapeHtml(f.detail || f.type || 'Secret pattern detected')}</div>
+          </div>
+        `).join('');
+      }
+    }
+  }
+
+  async function loadSecurityAudit(targetPath) {
+    const path = targetPath || (inputRepoPath ? inputRepoPath.value.trim() : currentRepoPath);
+    if (repoSecurityLabel) {
+      repoSecurityLabel.textContent = 'Auditing secrets...';
+      repoSecurityLabel.style.color = 'var(--text-muted)';
+    }
+
+    if (isVsCode) {
+      vscode.postMessage({ command: 'getSecurityAudit', path });
+    } else {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/repo/security-audit?path=${encodeURIComponent(path || '')}`);
+        if (res.ok) {
+          const secData = await res.json();
+          applySecurityResults(secData);
+        } else {
+          applySecurityResults({ findings_count: 0 });
+        }
+      } catch (err) {
+        if (repoSecurityLabel) {
+          repoSecurityLabel.textContent = 'Audit service offline';
+          repoSecurityLabel.style.color = 'var(--text-muted)';
+        }
+      }
+    }
+  }
+
+  if (btnSecurityScan) {
+    btnSecurityScan.addEventListener('click', () => {
+      showToast('Running security secret audit...', 'info');
+      loadSecurityAudit();
+    });
+  }
+
   async function scanRepository() {
     const path = inputRepoPath ? inputRepoPath.value.trim() : currentRepoPath;
     if (repoStatusLabel) repoStatusLabel.textContent = 'Scanning AST & Call Graph...';
@@ -2009,11 +2430,13 @@
           body: JSON.stringify({ workspace_path: path })
         });
         const graphRes = await fetch(`${BACKEND_URL}/api/graph/mermaid?path=${encodeURIComponent(path)}`);
+        const secRes = await fetch(`${BACKEND_URL}/api/repo/security-audit?path=${encodeURIComponent(path)}`);
 
         if (scanRes.ok) {
           const scanData = await scanRes.json();
           const graphData = graphRes.ok ? await graphRes.json() : { mermaid: '', available: false };
-          applyScanResults(scanData, graphData.mermaid);
+          const secData = secRes.ok ? await secRes.json() : null;
+          applyScanResults(scanData, graphData.mermaid, secData);
         }
       } catch (err) {
         if (repoStatusLabel) repoStatusLabel.textContent = `Scan failed: ${err.message}`;
@@ -2023,7 +2446,7 @@
     }
   }
 
-  function applyScanResults(scanData, mermaid) {
+  function applyScanResults(scanData, mermaid, security) {
     if (repoStatsText) {
       repoStatsText.textContent = `Indexed: ${scanData.filesCount} Files // ${scanData.symbolsCount} Functions & Classes // ${scanData.chunksCount} Vector Chunks`;
     }
@@ -2036,6 +2459,9 @@
       } else {
         mermaidCode.textContent = "No SQLite code graph available for this repository.\nClick 'Scan & Index Workspace' to analyze codebase structure.";
       }
+    }
+    if (security) {
+      applySecurityResults(security);
     }
   }
 
@@ -2076,18 +2502,30 @@
 
       case 'settingsSaved':
         testOllamaConnection();
+        showToast('Settings saved successfully', 'success');
         break;
 
       case 'streamToken':
+        if (!isChatStreaming) {
+          setChatGeneratingState(true);
+        }
+        if (msg.token && msg.token.startsWith('\n\n[Error:')) {
+          setChatGeneratingState(false);
+        }
         appendStreamToken(msg.token);
         break;
 
       case 'streamComplete':
+        setChatGeneratingState(false);
         onStreamFinished(accumulatedRawText, msg.citations);
         if (msg.diff) {
           const targetFilename = extractDiffFilename(msg.diff) || getPrimaryRepoFile();
           stageDiff(targetFilename, msg.diff);
         }
+        break;
+
+      case 'streamStopped':
+        stopChatGeneration(false);
         break;
 
       case 'patchApplied':
@@ -2097,8 +2535,19 @@
         break;
 
       case 'scanResult':
-        applyScanResults(msg.status, msg.mermaid);
+        applyScanResults(msg.status, msg.mermaid, msg.security);
         loadRepoTree();
+        break;
+
+      case 'securityAuditResult':
+        applySecurityResults(msg.security);
+        break;
+
+      case 'activeFileChanged':
+        if (msg.file) {
+          activeEditorFile = msg.file;
+          if (detectedSystem) applySystemInfo(detectedSystem);
+        }
         break;
 
       case 'renderMermaid':
@@ -2111,13 +2560,25 @@
         }
         break;
 
+      case 'repoPathCleared':
+        currentRepoPath = '';
+        if (inputRepoPath) inputRepoPath.value = '';
+        localStorage.removeItem('codebase_copilot_repo_path');
+        resetRepoGraphState();
+        if (repoFileTree) {
+          repoFileTree.innerHTML = '<div class="tree-empty-state"><span class="pixel-glyph">»</span> No repository selected. Enter a path above or click BROWSE.</div>';
+        }
+        if (repoTreeCount) repoTreeCount.textContent = '0 Files';
+        if (repoStatsText) repoStatsText.textContent = 'Indexed: 0 Files // 0 Functions & Classes // 0 Vector Chunks';
+        break;
+
       case 'repoPathSelected':
         if (msg.path) {
           currentRepoPath = msg.path;
           if (inputRepoPath) inputRepoPath.value = currentRepoPath;
           localStorage.setItem('codebase_copilot_repo_path', currentRepoPath);
           resetRepoGraphState();
-          showToast(`Repository path set to ${currentRepoPath}`, 'success');
+          loadSecurityAudit(currentRepoPath);
           if (msg.tree) {
             renderRepoTree(msg.tree, msg.stats);
           } else {
@@ -2159,46 +2620,205 @@
 
   function formatMarkdown(text) {
     if (!text) return '';
-    let out = escapeHtml(text);
 
-    // Code blocks with language label and dynamic copy button
+    // 1. Stash and protect complete code blocks
     const codeBlocks = [];
-    out = out.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, function (_, lang, code) {
+    let out = text.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, function (_, lang, code) {
       const displayLang = lang ? lang.toLowerCase() : 'code';
       const index = codeBlocks.length;
       codeBlocks.push(
         `<div class="code-block-wrapper">` +
         `<div class="code-block-header">` +
-        `<span class="code-block-lang">${displayLang}</span>` +
+        `<span class="code-block-lang">${escapeHtml(displayLang)}</span>` +
         `<button class="btn-copy-code" type="button" title="Copy code">` +
         `<svg class="icon-code-copy" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>` +
         `<span class="btn-copy-code-text">Copy</span>` +
         `</button>` +
         `</div>` +
-        `<pre class="code-block-pre"><code>${code}</code></pre>` +
+        `<pre class="code-block-pre"><code>${escapeHtml(code)}</code></pre>` +
         `</div>`
       );
-      return `__CODE_BLOCK_${index}__`;
+      return `\n__CODE_BLOCK_${index}__\n`;
     });
 
-    // Inline code
-    out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+    // Helper for inline elements (bold, italic, inline code)
+    function formatInline(str) {
+      if (!str) return '';
+      let s = escapeHtml(str);
+      // Inline code `...`
+      s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+      // Bold **...**
+      s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      // Italic *...*
+      s = s.replace(/(^|[^*])\*([^*]+)\*([^*]|$)/g, '$1<em>$2</em>$3');
+      return s;
+    }
 
-    // Bold
-    out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    // 2. Parse Markdown Tables
+    const tableBlocks = [];
+    const lines = out.split('\n');
+    const processedLines = [];
+    let i = 0;
 
-    // Italics
-    out = out.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    while (i < lines.length) {
+      const line = lines[i];
+      const trimmed = line.trim();
 
-    // Line breaks outside code blocks
-    out = out.replace(/\n/g, '<br/>');
+      const nextLine = (i + 1 < lines.length) ? lines[i + 1].trim() : '';
+      const isHeaderCandidate = trimmed.includes('|') && !trimmed.startsWith('__CODE_BLOCK_');
+      const isDelimiter = isHeaderCandidate && /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(nextLine);
+
+      if (isHeaderCandidate && isDelimiter) {
+        const headerRow = trimmed;
+        const delimRow = nextLine;
+        i += 2;
+
+        const delimCols = delimRow.replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+        const alignments = delimCols.map(col => {
+          if (col.startsWith(':') && col.endsWith(':')) return 'center';
+          if (col.endsWith(':')) return 'right';
+          if (col.startsWith(':')) return 'left';
+          return 'left';
+        });
+
+        const headerCols = headerRow.replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+
+        const bodyRows = [];
+        while (i < lines.length) {
+          const bodyLine = lines[i].trim();
+          if (!bodyLine || !bodyLine.includes('|') || bodyLine.startsWith('__CODE_BLOCK_')) {
+            break;
+          }
+          const cells = bodyLine.replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+          bodyRows.push(cells);
+          i++;
+        }
+
+        let tableHtml = '<div class="clay-table-wrapper"><table class="clay-table"><thead><tr>';
+        headerCols.forEach((h, colIdx) => {
+          const align = alignments[colIdx] || 'left';
+          tableHtml += `<th style="text-align: ${align};">${formatInline(h)}</th>`;
+        });
+        tableHtml += '</tr></thead><tbody>';
+
+        bodyRows.forEach(row => {
+          tableHtml += '<tr>';
+          for (let colIdx = 0; colIdx < headerCols.length; colIdx++) {
+            const cell = row[colIdx] !== undefined ? row[colIdx] : '';
+            const align = alignments[colIdx] || 'left';
+            tableHtml += `<td style="text-align: ${align};">${formatInline(cell)}</td>`;
+          }
+          tableHtml += '</tr>';
+        });
+        tableHtml += '</tbody></table></div>';
+
+        const tIdx = tableBlocks.length;
+        tableBlocks.push(tableHtml);
+        processedLines.push(`__TABLE_BLOCK_${tIdx}__`);
+        continue;
+      }
+
+      processedLines.push(line);
+      i++;
+    }
+
+    // 3. Process Headings, Lists, Blockquotes, HR, Paragraphs
+    const renderedBlocks = [];
+    let currentList = null;
+
+    function flushList() {
+      if (!currentList) return;
+      const tag = currentList.type;
+      const cls = tag === 'ul' ? 'clay-chat-ul' : 'clay-chat-ol';
+      let listHtml = `<${tag} class="${cls}">`;
+      currentList.items.forEach(it => {
+        listHtml += `<li class="clay-chat-li">${formatInline(it)}</li>`;
+      });
+      listHtml += `</${tag}>`;
+      renderedBlocks.push(listHtml);
+      currentList = null;
+    }
+
+    for (let j = 0; j < processedLines.length; j++) {
+      const raw = processedLines[j];
+      const trim = raw.trim();
+
+      if (trim.startsWith('__CODE_BLOCK_') || trim.startsWith('__TABLE_BLOCK_')) {
+        flushList();
+        renderedBlocks.push(trim);
+        continue;
+      }
+
+      // Headings: # to ######
+      const headingMatch = trim.match(/^(#{1,6})\s+(.+)$/);
+      if (headingMatch) {
+        flushList();
+        const level = Math.min(headingMatch[1].length, 4);
+        const headingText = headingMatch[2].replace(/#+\s*$/, '');
+        renderedBlocks.push(`<h${level} class="clay-chat-h clay-chat-h${level}">${formatInline(headingText)}</h${level}>`);
+        continue;
+      }
+
+      // Horizontal Rule
+      if (/^(\*{3,}|-{3,}|_{3,})$/.test(trim)) {
+        flushList();
+        renderedBlocks.push('<hr class="clay-chat-hr"/>');
+        continue;
+      }
+
+      // Blockquote
+      const quoteMatch = trim.match(/^>\s*(.+)$/);
+      if (quoteMatch) {
+        flushList();
+        renderedBlocks.push(`<blockquote class="clay-chat-quote">${formatInline(quoteMatch[1])}</blockquote>`);
+        continue;
+      }
+
+      // Ordered List (1. item)
+      const olMatch = trim.match(/^(\d+)\.\s+(.+)$/);
+      if (olMatch) {
+        if (!currentList || currentList.type !== 'ol') {
+          flushList();
+          currentList = { type: 'ol', items: [] };
+        }
+        currentList.items.push(olMatch[2]);
+        continue;
+      }
+
+      // Unordered List (- item or * item)
+      const ulMatch = trim.match(/^[-*+]\s+(.+)$/);
+      if (ulMatch) {
+        if (!currentList || currentList.type !== 'ul') {
+          flushList();
+          currentList = { type: 'ul', items: [] };
+        }
+        currentList.items.push(ulMatch[1]);
+        continue;
+      }
+
+      // Normal paragraph or spacer
+      flushList();
+      if (!trim) {
+        renderedBlocks.push('<div class="clay-chat-spacer"></div>');
+      } else {
+        renderedBlocks.push(`<div class="clay-chat-p">${formatInline(raw)}</div>`);
+      }
+    }
+    flushList();
+
+    let finalHtml = renderedBlocks.join('');
+
+    // Restore tables
+    tableBlocks.forEach((tblHtml, idx) => {
+      finalHtml = finalHtml.replace(`__TABLE_BLOCK_${idx}__`, tblHtml);
+    });
 
     // Restore code blocks
-    codeBlocks.forEach((blockHtml, i) => {
-      out = out.replace(`__CODE_BLOCK_${i}__`, blockHtml);
+    codeBlocks.forEach((codeHtml, idx) => {
+      finalHtml = finalHtml.replace(`__CODE_BLOCK_${idx}__`, codeHtml);
     });
 
-    return out;
+    return finalHtml;
   }
 
   // Delegated dynamic copy button listener for code blocks
@@ -2293,7 +2913,7 @@
 
   // Initial sync with extension host
   if (isVsCode) {
-    vscode.postMessage({ command: 'getInitialState' });
+    vscode.postMessage({ command: 'getInitialState', currentPath: currentRepoPath });
   }
 
   // Initial tree load
