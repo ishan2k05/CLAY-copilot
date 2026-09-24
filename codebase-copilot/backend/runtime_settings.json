@@ -5,7 +5,7 @@
   "exclusion_patterns": ".env, *.pem, credentials.json, id_rsa, *.key",
   "connection_type": "local",
   "api_key": "",
-  "repo_path": "C:\\Users\\igautam\\Desktop\\q_path",
+  "repo_path": "C:\\Users\\igautam\\Desktop\\CLAY-copilot",
   "temperature": 0.2,
   "num_ctx": 32768,
   "num_predict": 4096,
