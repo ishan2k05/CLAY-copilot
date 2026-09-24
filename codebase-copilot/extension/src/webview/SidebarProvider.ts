@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as cp from 'child_process';
 import * as fs from 'fs';
+import * as path from 'path';
 import { BackendClient } from '../api/backendClient';
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
@@ -109,6 +110,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case 'scanWorkspace': {
                     const workspaceFolder = data.path || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
                     try {
+                        await vscode.workspace.saveAll(false);
                         const status = await this._backendClient.triggerIndexing(workspaceFolder);
                         const mermaid = await this._backendClient.getMermaidGraph(workspaceFolder);
                         const security = await this._backendClient.getSecurityAudit(workspaceFolder);
@@ -116,6 +118,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         vscode.window.showInformationMessage(`Indexed ${status.filesCount} files and ${status.symbolsCount} symbols.`);
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`Scanning failed: ${err.message}`);
+                        this._view?.webview.postMessage({ command: 'scanError', error: err.message });
                     }
                     break;
                 }
@@ -275,6 +278,61 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             command: 'repoTreeResult',
                             error: err.message
                         });
+                    }
+                    break;
+                }
+                case 'openFile': {
+                    let filePath = (data.path || data.file_path || '').trim();
+                    if (!filePath) {
+                        break;
+                    }
+                    try {
+                        const savedRepo = this._context?.globalState.get<string>('lastRepoPath') || '';
+                        const repoHint = (data.repo_path || savedRepo || '').trim();
+                        const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+
+                        let candidate = filePath;
+                        if (!path.isAbsolute(candidate) || !fs.existsSync(candidate)) {
+                            if (repoHint && fs.existsSync(path.resolve(repoHint, filePath))) {
+                                candidate = path.resolve(repoHint, filePath);
+                            } else if (wsFolder && fs.existsSync(path.resolve(wsFolder, filePath))) {
+                                candidate = path.resolve(wsFolder, filePath);
+                            }
+                        }
+
+                        const targetUri = vscode.Uri.file(candidate);
+                        let opened = false;
+                        try {
+                            await vscode.commands.executeCommand('vscode.open', targetUri);
+                            opened = true;
+                        } catch (_cmdErr) {
+                            try {
+                                const doc = await vscode.workspace.openTextDocument(targetUri);
+                                await vscode.window.showTextDocument(doc, { preview: false });
+                                opened = true;
+                            } catch (_docErr) {
+                                const isWin = process.platform === 'win32';
+                                if (isWin) {
+                                    cp.exec(`start "" "${candidate}"`);
+                                    opened = true;
+                                } else if (process.platform === 'darwin') {
+                                    cp.exec(`open "${candidate}"`);
+                                    opened = true;
+                                } else {
+                                    cp.exec(`xdg-open "${candidate}"`);
+                                    opened = true;
+                                }
+                            }
+                        }
+
+                        if (opened) {
+                            this._view?.webview.postMessage({
+                                command: 'fileOpened',
+                                file: candidate
+                            });
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`CLAY: Could not open file ${filePath}: ${err.message}`);
                     }
                     break;
                 }

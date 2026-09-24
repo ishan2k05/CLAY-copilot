@@ -14,6 +14,7 @@ from .index.graph_store import SQLiteGraphStore
 from .index.vector_store import LocalVectorStore
 from .retrieval.hybrid_search import HybridSearchEngine
 from .retrieval.file_resolver import WorkspaceFileResolver
+from .retrieval.repo_map import RepoMapGenerator
 from .agent.planner import AgentPlanner
 from .agent.patch_engine import PatchEngine
 from .agent.repair_loop import SelfHealingRepairLoop
@@ -219,6 +220,7 @@ async def auto_index_workspace(workspace_dir: str) -> Dict[str, int]:
         await graph_store.insert_batch(all_symbols, all_relationships)
     if all_chunks:
         await vector_store.add_chunks(all_chunks)
+        await graph_store.index_chunks_bm25(all_chunks)
 
     return {
         "filesCount": indexed_files,
@@ -285,6 +287,7 @@ async def reindex_file(file_path: str, content: Optional[str] = None) -> bool:
             await graph_store.insert_batch(new_symbols, new_relationships)
         if new_chunks:
             await vector_store.add_chunks(new_chunks)
+            await graph_store.index_chunks_bm25(new_chunks)
         return True
     except Exception as e:
         logger.error(f"Failed to incrementally reindex {file_path}: {e}")
@@ -718,8 +721,18 @@ async def chat_endpoint(req: ChatRequest):
                     file_body = "\n".join(lines[:1000])[:30000]
                     file_context = f"[Active File: {rel_name} ({total_lines} lines total)]\n{file_body}\n"
 
+    # 2b. Global Repository Map for whole-codebase architectural awareness
+    repo_map = RepoMapGenerator.generate_repo_map(
+        workspace_dir,
+        graph_store=graph_store,
+        max_chars=4000,
+        security_mode=sec_mode
+    )
+
     # Combine contexts with context-window token budgeting
     parts = []
+    if repo_map:
+        parts.append(f"<repository_map>\n{repo_map}\n</repository_map>")
     if catalog_context:
         parts.append(catalog_context)
     if file_context:
@@ -797,7 +810,7 @@ async def get_mermaid_graph(path: Optional[str] = None):
     """Generates a dynamic Mermaid.js diagram from indexed SQLite relationships."""
     import sqlite3
     diagram_lines = ["graph TD"]
-    target_norm = str(resolve_workspace_path(path or runtime_settings.get("repo_path")))
+    target_norm = str(resolve_workspace_path(path or runtime_settings.get("repo_path"))).lower()
 
     try:
         with sqlite3.connect(graph_store.db_path) as db:
@@ -808,13 +821,28 @@ async def get_mermaid_graph(path: Optional[str] = None):
             for src, tgt, rel, fpath in rows:
                 if fpath:
                     try:
-                        if not str(Path(fpath).resolve()).startswith(target_norm):
+                        if not str(Path(fpath).resolve()).lower().startswith(target_norm):
                             continue
                     except Exception:
                         pass
                 clean_src = src.split("#")[-1].replace(".", "_")
                 clean_tgt = tgt.split("#")[-1].replace(".", "_")
                 diagram_lines.append(f"  {clean_src} -->|{rel}| {clean_tgt}")
+
+            # If no call relationships exist, fallback to displaying indexed functions & classes
+            if len(diagram_lines) == 1:
+                sym_cursor = db.execute(
+                    "SELECT name, symbol_type, file_path FROM symbols LIMIT 25"
+                )
+                for sname, stype, sfpath in sym_cursor.fetchall():
+                    if sfpath:
+                        try:
+                            if not str(Path(sfpath).resolve()).lower().startswith(target_norm):
+                                continue
+                        except Exception:
+                            pass
+                    clean_name = sname.split("#")[-1].replace(".", "_")
+                    diagram_lines.append(f"  {clean_name}[\"{stype}: {clean_name}\"]")
     except Exception:
         pass
 
@@ -876,6 +904,7 @@ def build_essential_file_tree(root_path: Path) -> Dict[str, Any]:
                         "name": name,
                         "type": "directory",
                         "path": str(item.relative_to(root_path)),
+                        "full_path": str(item.resolve()),
                         "children": children
                     })
             elif item.is_file():
@@ -900,6 +929,7 @@ def build_essential_file_tree(root_path: Path) -> Dict[str, Any]:
                     "name": name,
                     "type": "file",
                     "path": str(item.relative_to(root_path)),
+                    "full_path": str(item.resolve()),
                     "ext": ext,
                     "size": format_size(fsize),
                     "bytes": fsize,
@@ -948,6 +978,28 @@ async def get_repo_tree(path: Optional[str] = None, req: Optional[TreeRequest] =
     root = resolve_workspace_path(raw_path)
     return build_essential_file_tree(root)
 
+# ---------------------------------------------------------
+# 3c. Global Architecture Repo Map
+# ---------------------------------------------------------
+class RepoMapRequest(BaseModel):
+    workspace_path: Optional[str] = None
+    max_chars: Optional[int] = 5000
+
+@app.get("/api/repo/map")
+@app.post("/api/repo/map")
+async def get_repo_map_endpoint(workspace_path: Optional[str] = None, req: Optional[RepoMapRequest] = None):
+    """
+    Returns an architectural blueprint of the workspace repository (Global Repo Map)
+    with classes, functions, methods, line ranges, and entrypoints.
+    """
+    raw_path = (req.workspace_path if req and req.workspace_path else None) or workspace_path or runtime_settings.get("repo_path")
+    root = resolve_workspace_path(raw_path)
+    max_c = (req.max_chars if req and req.max_chars else None) or 5000
+    map_text = RepoMapGenerator.generate_repo_map(str(root), graph_store=graph_store, max_chars=max_c)
+    data = RepoMapGenerator.get_repo_map_data(str(root), graph_store=graph_store)
+    data["map_text"] = map_text
+    return data
+
 class SecurityAuditRequest(BaseModel):
     path: Optional[str] = None
 
@@ -958,6 +1010,43 @@ async def get_repo_security_audit(path: Optional[str] = None, req: Optional[Secu
     raw_path = path or (req.path if req else None) or runtime_settings.get("repo_path")
     root = resolve_workspace_path(raw_path)
     return SecretMasker.scan_repository(str(root))
+
+class FileOpenRequest(BaseModel):
+    file_path: str
+    repo_path: Optional[str] = None
+
+@app.post("/api/file/open")
+async def open_file_in_system(req: FileOpenRequest):
+    """
+    Opens the requested file using the operating system default application/helper.
+    On Windows: os.startfile(p) prompts the Windows open helper if no program is bound.
+    On Linux/macOS: xdg-open / open.
+    """
+    raw_path = req.file_path.strip()
+    p = Path(raw_path).resolve()
+    if not p.exists() and req.repo_path:
+        alt_p = (Path(req.repo_path) / raw_path).resolve()
+        if alt_p.exists():
+            p = alt_p
+    if not p.exists() and runtime_settings.get("repo_path"):
+        alt_p = (Path(runtime_settings.get("repo_path")) / raw_path).resolve()
+        if alt_p.exists():
+            p = alt_p
+    if not p.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {raw_path}")
+    
+    import platform, subprocess
+    os_name = platform.system().lower()
+    try:
+        if os_name == "windows":
+            os.startfile(str(p))
+        elif os_name == "darwin":
+            subprocess.Popen(["open", str(p)])
+        else:
+            subprocess.Popen(["xdg-open", str(p)])
+        return {"status": "success", "file": str(p)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ---------------------------------------------------------

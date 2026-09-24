@@ -10,9 +10,10 @@ class HybridSearchEngine:
     """
     Token-Efficient Reciprocal Rank Fusion (RRF) combining:
     1. Direct Query-to-Filename Keyword Matching
-    2. Vector Semantic Similarity (Chroma / Local Embeddings)
-    3. Structural Graph Traversal (SQLite Call Graph)
-    4. Surgical Token-Budget Context Formatting (< 350-450 tokens)
+    2. SQLite FTS5 BM25 Full-Text Keyword & Symbol Matching
+    3. Vector Semantic Similarity (Ollama / Local Embeddings)
+    4. Structural Graph Traversal (SQLite Call Graph)
+    5. Surgical Token-Budget Context Formatting (< 350-450 tokens)
     """
 
     def __init__(self, vector_store: LocalVectorStore, graph_store: SQLiteGraphStore):
@@ -22,7 +23,7 @@ class HybridSearchEngine:
     async def search(
         self,
         query: str,
-        top_k: int = 3,
+        top_k: int = 4,
         k_constant: int = 60,
         security_mode: str = "sandboxed",
         workspace_root: Optional[str] = None
@@ -33,7 +34,10 @@ class HybridSearchEngine:
         # 2. Structural Symbol & Call Graph Search
         symbol_results = await self.graph_store.find_symbols(query, limit=top_k * 2)
 
-        # 3. Direct Query Filename Matching (boost chunks matching named files in query)
+        # 3. SQLite FTS5 BM25 Full-Text Keyword Search
+        bm25_results = await self.graph_store.bm25_search(query, limit=top_k * 3)
+
+        # 4. Direct Query Filename Matching (boost chunks matching named files in query)
         query_words = set(query.lower().replace("/", " ").replace("\\", " ").split())
         direct_file_matches = []
         for chunk in self.vector_store.chunks:
@@ -41,17 +45,27 @@ class HybridSearchEngine:
             if p.name.lower() in query_words or p.stem.lower() in query_words:
                 direct_file_matches.append(chunk)
 
-        # 4. Compute RRF Scores
+        # 5. Compute Unified RRF Scores across all 4 streams
         scores: Dict[str, float] = {}
         chunk_map: Dict[str, CodeChunk] = {}
 
-        # Direct filename matches get high initial boost
+        # Stream A: Direct filename matches get high initial boost (weight: 2.0)
         for rank, chunk in enumerate(direct_file_matches[:6], start=1):
             cid = chunk.chunk_id
             chunk_map[cid] = chunk
             scores[cid] = scores.get(cid, 0.0) + (2.0 / (k_constant + rank))
 
-        # Accumulate Vector Ranks
+        # Stream B: SQLite FTS5 BM25 Full-Text Keyword Matches (weight: 1.5)
+        for rank, bm in enumerate(bm25_results, start=1):
+            cid = bm.get("chunk_id")
+            if cid:
+                for chunk in self.vector_store.chunks:
+                    if chunk.chunk_id == cid:
+                        chunk_map[cid] = chunk
+                        scores[cid] = scores.get(cid, 0.0) + (1.5 / (k_constant + rank))
+                        break
+
+        # Stream C: Semantic Vector Ranks (weight: 1.0)
         for item in vector_results:
             chunk: CodeChunk = item["chunk"]
             cid = chunk.chunk_id
@@ -59,7 +73,7 @@ class HybridSearchEngine:
             rank = item["rank"]
             scores[cid] = scores.get(cid, 0.0) + (1.0 / (k_constant + rank))
 
-        # Accumulate Symbol Proximity Ranks
+        # Stream D: Symbol Proximity Ranks (weight: 1.0)
         for rank, sym in enumerate(symbol_results, start=1):
             for chunk in self.vector_store.chunks:
                 if chunk.symbol_name == sym["name"]:
@@ -67,11 +81,11 @@ class HybridSearchEngine:
                     chunk_map[cid] = chunk
                     scores[cid] = scores.get(cid, 0.0) + (1.0 / (k_constant + rank))
 
-        # Sort by unified score
+        # Sort by unified RRF score
         sorted_cids = sorted(scores.keys(), key=lambda cid: scores[cid], reverse=True)
         all_candidates = [chunk_map[cid] for cid in sorted_cids]
 
-        # 5. Security Boundary Filtering
+        # 6. Security Boundary Filtering
         filtered_chunks = self.filter_chunks_by_security(
             all_candidates,
             security_mode=security_mode,
@@ -161,12 +175,10 @@ class HybridSearchEngine:
             block = f"{header}\n{body}\n"
 
             if current_len + len(block) > max_chars:
-                # If we already have at least one block, break to respect token budget
                 if context_parts:
                     if not context_parts[-1].rstrip().endswith("... [truncated]"):
                         context_parts.append("... [truncated]")
                     break
-                # Otherwise truncate the single block to fit budget
                 avail = max(0, max_chars - 17)
                 block = block[:avail] + "\n... [truncated]"
 

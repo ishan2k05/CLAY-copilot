@@ -2185,7 +2185,7 @@
         const res = await fetch(`${BACKEND_URL}/api/repo/tree?path=${encodeURIComponent(path || '')}`);
         if (res.ok) {
           const data = await res.json();
-          renderRepoTree(data.tree, data.stats);
+          renderRepoTree(data.tree, data.stats, data.root || path);
         } else {
           renderTreeError(`Server response (${res.status})`);
         }
@@ -2195,7 +2195,61 @@
     }
   }
 
-  function renderRepoTree(treeNodes, stats) {
+  let pendingFileOpenTimer = null;
+
+  function openFileInIdeOrSystem(fullPath) {
+    if (!fullPath) return;
+    const repoHint = (inputRepoPath ? inputRepoPath.value.trim() : '') || currentRepoPath || '';
+    let targetPath = fullPath;
+    if (targetPath && !/^[a-zA-Z]:[\\\/]/.test(targetPath) && !targetPath.startsWith('/') && repoHint) {
+      const sep = repoHint.includes('/') && !repoHint.includes('\\') ? '/' : '\\';
+      targetPath = `${repoHint.replace(/[\\\/]+$/, '')}${sep}${targetPath.replace(/^[\\\/]+/, '')}`;
+    }
+    const fileName = targetPath.split(/[\\/]/).pop() || targetPath;
+
+    showToast(`Opening ${fileName}...`, 'info');
+
+    if (isVsCode) {
+      vscode.postMessage({ command: 'openFile', path: targetPath, repo_path: repoHint });
+
+      // Fallback: If extension host hasn't acknowledged in 500ms, call backend /api/file/open
+      if (pendingFileOpenTimer) clearTimeout(pendingFileOpenTimer);
+      pendingFileOpenTimer = setTimeout(() => {
+        pendingFileOpenTimer = null;
+        fetch(`${BACKEND_URL}/api/file/open`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file_path: targetPath, repo_path: repoHint })
+        })
+        .then(res => res.json())
+        .then(data => {
+          if (data.status === 'success') {
+            showToast(`Opened: ${fileName}`, 'success');
+          }
+        })
+        .catch(() => {});
+      }, 500);
+    } else {
+      fetch(`${BACKEND_URL}/api/file/open`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_path: targetPath, repo_path: repoHint })
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.status === 'success') {
+          showToast(`Opened: ${fileName}`, 'success');
+        } else {
+          showToast(`Could not open file: ${data.detail || data.error || 'Unknown error'}`, 'error');
+        }
+      })
+      .catch(err => {
+        showToast(`Error opening file: ${err.message}`, 'error');
+      });
+    }
+  }
+
+  function renderRepoTree(treeNodes, stats, rootPath) {
     if (!repoFileTree) return;
     if (!treeNodes || treeNodes.length === 0) {
       repoFileTree.innerHTML = '<div class="tree-empty-state"><span class="pixel-glyph">»</span> No files found in directory.</div>';
@@ -2266,8 +2320,23 @@
         const linesStr = node.lines ? `${node.lines}L` : '';
         const sizeStr = node.size || '';
         const metaStr = [linesStr, sizeStr].filter(Boolean).join(' • ');
+
+        // Resolve absolute full path
+        const effectiveRoot = (rootPath || (inputRepoPath ? inputRepoPath.value.trim() : '') || currentRepoPath || '').trim();
+        let fullPath = node.full_path;
+        if (!fullPath) {
+          if (effectiveRoot) {
+            const sep = effectiveRoot.includes('/') && !effectiveRoot.includes('\\') ? '/' : '\\';
+            const cleanRoot = effectiveRoot.replace(/[\\\/]+$/, '');
+            const cleanRel = (node.path || '').replace(/^[\\\/]+/, '');
+            fullPath = `${cleanRoot}${sep}${cleanRel}`;
+          } else {
+            fullPath = node.path;
+          }
+        }
+
         return `
-          <div class="tree-node tree-file" style="padding-left: ${indent + 22}px;" data-file-path="${escapeHtml(node.path)}" title="${escapeHtml(node.path)} (Click to copy path)">
+          <div class="tree-node tree-file" style="padding-left: ${indent + 22}px;" data-file-path="${escapeHtml(node.path)}" data-full-path="${escapeHtml(fullPath)}" title="${escapeHtml(fullPath)}&#10;Single-click: Copy full path&#10;Double-click: Open file in IDE">
             ${badge}
             <span class="tree-file-name">${escapeHtml(node.name)}</span>
             ${metaStr ? `<span class="tree-file-meta">${metaStr}</span>` : ''}
@@ -2293,16 +2362,68 @@
       });
     });
 
-    // Attach click to copy path on files
+    // Single-click copies full path, Double-click opens file in IDE / OS
+    let fileClickTimer = null;
     repoFileTree.querySelectorAll('.tree-file').forEach(fileItem => {
-      fileItem.addEventListener('click', () => {
-        const path = fileItem.getAttribute('data-file-path');
-        if (path) {
-          navigator.clipboard.writeText(path).then(() => {
-            showToast(`Copied: ${path}`, 'success');
-          }).catch(() => {
-            showToast(`Path: ${path}`, 'info');
-          });
+      fileItem.addEventListener('click', (e) => {
+        e.stopPropagation();
+        let fullPath = fileItem.getAttribute('data-full-path') || fileItem.getAttribute('data-file-path');
+        const currentRoot = (inputRepoPath ? inputRepoPath.value.trim() : '') || currentRepoPath || '';
+        if (fullPath && !/^[a-zA-Z]:[\\\/]/.test(fullPath) && !fullPath.startsWith('/') && currentRoot) {
+          const sep = currentRoot.includes('/') && !currentRoot.includes('\\') ? '/' : '\\';
+          fullPath = `${currentRoot.replace(/[\\\/]+$/, '')}${sep}${fullPath.replace(/^[\\\/]+/, '')}`;
+        }
+
+        if (fileClickTimer) {
+          clearTimeout(fileClickTimer);
+          fileClickTimer = null;
+        }
+        fileClickTimer = setTimeout(() => {
+          fileClickTimer = null;
+          if (fullPath) {
+            const copyPromise = (navigator.clipboard && navigator.clipboard.writeText)
+              ? navigator.clipboard.writeText(fullPath)
+              : new Promise((resolve, reject) => {
+                  try {
+                    const ta = document.createElement('textarea');
+                    ta.value = fullPath;
+                    ta.style.position = 'fixed';
+                    ta.style.opacity = '0';
+                    document.body.appendChild(ta);
+                    ta.focus();
+                    ta.select();
+                    const success = document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    if (success) resolve();
+                    else reject(new Error('Copy failed'));
+                  } catch (err) {
+                    reject(err);
+                  }
+                });
+
+            copyPromise.then(() => {
+              showToast(`Copied full path: ${fullPath}`, 'success');
+            }).catch(() => {
+              showToast(`Full path: ${fullPath}`, 'info');
+            });
+          }
+        }, 220);
+      });
+
+      fileItem.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        if (fileClickTimer) {
+          clearTimeout(fileClickTimer);
+          fileClickTimer = null;
+        }
+        let fullPath = fileItem.getAttribute('data-full-path') || fileItem.getAttribute('data-file-path');
+        const currentRoot = (inputRepoPath ? inputRepoPath.value.trim() : '') || currentRepoPath || '';
+        if (fullPath && !/^[a-zA-Z]:[\\\/]/.test(fullPath) && !fullPath.startsWith('/') && currentRoot) {
+          const sep = currentRoot.includes('/') && !currentRoot.includes('\\') ? '/' : '\\';
+          fullPath = `${currentRoot.replace(/[\\\/]+$/, '')}${sep}${fullPath.replace(/^[\\\/]+/, '')}`;
+        }
+        if (fullPath) {
+          openFileInIdeOrSystem(fullPath);
         }
       });
     });
@@ -2417,11 +2538,18 @@
 
   async function scanRepository() {
     const path = inputRepoPath ? inputRepoPath.value.trim() : currentRepoPath;
+    if (path) {
+      currentRepoPath = path;
+      localStorage.setItem('codebase_copilot_repo_path', currentRepoPath);
+    }
     if (repoStatusLabel) repoStatusLabel.textContent = 'Scanning AST & Call Graph...';
     if (btnScanRepo) btnScanRepo.disabled = true;
 
     if (isVsCode) {
       vscode.postMessage({ command: 'scanWorkspace', path });
+      setTimeout(() => {
+        if (btnScanRepo) btnScanRepo.disabled = false;
+      }, 15000);
     } else {
       try {
         const scanRes = await fetch(`${BACKEND_URL}/api/index/scan`, {
@@ -2447,8 +2575,9 @@
   }
 
   function applyScanResults(scanData, mermaid, security) {
-    if (repoStatsText) {
-      repoStatsText.textContent = `Indexed: ${scanData.filesCount} Files // ${scanData.symbolsCount} Functions & Classes // ${scanData.chunksCount} Vector Chunks`;
+    if (btnScanRepo) btnScanRepo.disabled = false;
+    if (repoStatsText && scanData) {
+      repoStatsText.textContent = `Indexed: ${scanData.filesCount ?? 0} Files // ${scanData.symbolsCount ?? 0} Functions & Classes // ${scanData.chunksCount ?? 0} Vector Chunks`;
     }
     if (repoStatusLabel) {
       repoStatusLabel.textContent = 'Indexed & Synced (SQLite Graph Active)';
@@ -2535,8 +2664,14 @@
         break;
 
       case 'scanResult':
+        if (btnScanRepo) btnScanRepo.disabled = false;
         applyScanResults(msg.status, msg.mermaid, msg.security);
-        loadRepoTree();
+        loadRepoTree(currentRepoPath);
+        break;
+
+      case 'scanError':
+        if (btnScanRepo) btnScanRepo.disabled = false;
+        if (repoStatusLabel) repoStatusLabel.textContent = `Scan failed: ${msg.error || 'Unknown error'}`;
         break;
 
       case 'securityAuditResult':
@@ -2580,7 +2715,7 @@
           resetRepoGraphState();
           loadSecurityAudit(currentRepoPath);
           if (msg.tree) {
-            renderRepoTree(msg.tree, msg.stats);
+            renderRepoTree(msg.tree, msg.stats, msg.path);
           } else {
             loadRepoTree(currentRepoPath);
           }
@@ -2589,7 +2724,7 @@
 
       case 'repoTreeResult':
         if (msg.tree) {
-          renderRepoTree(msg.tree, msg.stats);
+          renderRepoTree(msg.tree, msg.stats, msg.root);
         } else if (msg.error) {
           renderTreeError(msg.error);
         }
@@ -2598,6 +2733,14 @@
         if (msg.data) {
           applySystemInfo(msg.data);
         }
+        break;
+      case 'fileOpened':
+        if (pendingFileOpenTimer) {
+          clearTimeout(pendingFileOpenTimer);
+          pendingFileOpenTimer = null;
+        }
+        const openName = (msg.file || '').split(/[\\/]/).pop() || 'File';
+        showToast(`Opened ${openName} in IDE`, 'success');
         break;
     }
   });

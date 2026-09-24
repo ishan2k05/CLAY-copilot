@@ -19,6 +19,7 @@ from app.security.secret_masker import SecretMasker
 from app.index.graph_store import SQLiteGraphStore
 from app.agent.patch_engine import PatchEngine
 from app.retrieval.file_resolver import WorkspaceFileResolver
+from app.retrieval.repo_map import RepoMapGenerator
 
 OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = "gpt-oss:120b-cloud"
@@ -90,8 +91,9 @@ def _silent_sync_workspace_sync(workspace_dir: str):
                 graph_store._sync_delete_file_symbols(p_str)
                 if st.st_size > 0 and p.suffix == ".py":
                     content = p.read_text(encoding="utf-8", errors="ignore")
-                    syms, rels, _ = ast_chunker.parse_file(p_str, content)
+                    syms, rels, chunks = ast_chunker.parse_file(p_str, content)
                     graph_store._sync_insert_batch(syms, rels)
+                    graph_store._sync_index_chunks_bm25(chunks)
                 changed_count += 1
         except Exception:
             continue
@@ -200,20 +202,33 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                 import sqlite3
                 from app.main import graph_store, runtime_settings, DEFAULT_WORKSPACE
                 target_path = runtime_settings.get("repo_path") or DEFAULT_WORKSPACE
-                target_norm = str(Path(target_path).resolve())
+                target_norm = str(Path(target_path).resolve()).lower()
                 diagram_lines = ["graph TD"]
                 with sqlite3.connect(graph_store.db_path) as db:
                     cursor = db.execute("SELECT source_symbol, target_symbol, relation_type, file_path FROM relationships LIMIT 30")
                     for src, tgt, rel, fpath in cursor.fetchall():
                         if fpath:
                             try:
-                                if not str(Path(fpath).resolve()).startswith(target_norm):
+                                if not str(Path(fpath).resolve()).lower().startswith(target_norm):
                                     continue
                             except Exception:
                                 pass
                         clean_src = src.split("#")[-1].replace(".", "_")
                         clean_tgt = tgt.split("#")[-1].replace(".", "_")
                         diagram_lines.append(f"  {clean_src} -->|{rel}| {clean_tgt}")
+
+                    if len(diagram_lines) == 1:
+                        sym_cursor = db.execute("SELECT name, symbol_type, file_path FROM symbols LIMIT 25")
+                        for sname, stype, sfpath in sym_cursor.fetchall():
+                            if sfpath:
+                                try:
+                                    if not str(Path(sfpath).resolve()).lower().startswith(target_norm):
+                                        continue
+                                except Exception:
+                                    pass
+                            clean_name = sname.split("#")[-1].replace(".", "_")
+                            diagram_lines.append(f"  {clean_name}[\"{stype}: {clean_name}\"]")
+
                 if len(diagram_lines) > 1:
                     data = {"mermaid": "\n".join(diagram_lines), "available": True}
                 else:
@@ -235,6 +250,20 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                 data = build_essential_file_tree(root)
             except Exception as e:
                 data = {"status": "error", "error": str(e), "tree": [], "stats": {"total_files": 0, "total_dirs": 0, "total_lines": 0}}
+            self.send_response(200)
+            self._set_cors_headers()
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif self.path.startswith("/api/repo/map"):
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(self.path)
+            qs = parse_qs(parsed.query)
+            target_path = qs.get("workspace_path", [None])[0] or qs.get("path", [None])[0] or runtime_settings.get("repo_path") or "."
+            try:
+                data = RepoMapGenerator.get_repo_map_data(target_path, graph_store=graph_store)
+            except Exception as e:
+                data = {"status": "error", "error": str(e), "files_count": 0, "symbols_count": 0, "map_text": ""}
             self.send_response(200)
             self._set_cors_headers()
             self.end_headers()
@@ -325,8 +354,9 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                 graph_store._sync_delete_file_symbols(str(p))
                 if content and content.strip():
                     try:
-                        syms, rels, _ = ast_chunker.parse_file(str(p), content)
+                        syms, rels, chunks = ast_chunker.parse_file(str(p), content)
                         graph_store._sync_insert_batch(syms, rels)
+                        graph_store._sync_index_chunks_bm25(chunks)
                     except Exception:
                         pass
             self.send_response(200)
@@ -363,6 +393,14 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                     code_ctx = Path(context_file).read_text(encoding="utf-8", errors="ignore")
             else:
                 code_ctx = ""
+
+            # Generate Global Repo Map for whole-codebase architectural awareness
+            try:
+                repo_map = RepoMapGenerator.generate_repo_map(ws_path, graph_store=graph_store, max_chars=4000)
+                if repo_map:
+                    code_ctx = f"<repository_map>\n{repo_map}\n</repository_map>\n\n" + (code_ctx or "")
+            except Exception:
+                pass
 
             is_privacy_guard = runtime_settings.get("privacy_filter", True)
             sanitized_query = SecretMasker.mask_text(query, enabled=is_privacy_guard)
@@ -437,6 +475,7 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             root = Path(root_dir)
             all_syms = []
             all_rels = []
+            all_chunks = []
             indexed_count = 0
 
             if root.exists():
@@ -447,14 +486,16 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                         continue
                     try:
                         content = p.read_text(encoding="utf-8", errors="ignore")
-                        syms, rels, _ = ast_chunker.parse_file(str(p), content)
+                        syms, rels, chunks = ast_chunker.parse_file(str(p), content)
                         all_syms.extend(syms)
                         all_rels.extend(rels)
+                        all_chunks.extend(chunks)
                         indexed_count += 1
                     except Exception:
                         continue
 
             graph_store._sync_insert_batch(all_syms, all_rels)
+            graph_store._sync_index_chunks_bm25(all_chunks)
 
             self.send_response(200)
             self._set_cors_headers()
@@ -565,6 +606,55 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             self._set_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif self.path == "/api/repo/map":
+            target_path = body.get("workspace_path") or body.get("path") or runtime_settings.get("repo_path") or "."
+            try:
+                data = RepoMapGenerator.get_repo_map_data(target_path, graph_store=graph_store)
+            except Exception as e:
+                data = {"status": "error", "error": str(e), "files_count": 0, "symbols_count": 0, "map_text": ""}
+            self.send_response(200)
+            self._set_cors_headers()
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif self.path == "/api/file/open":
+            raw_path = body.get("file_path", "").strip()
+            repo_hint = body.get("repo_path", "").strip()
+            p = Path(raw_path).resolve()
+            if not p.exists() and repo_hint:
+                alt_p = (Path(repo_hint) / raw_path).resolve()
+                if alt_p.exists():
+                    p = alt_p
+            if not p.exists() and runtime_settings.get("repo_path"):
+                alt_p = (Path(runtime_settings.get("repo_path")) / raw_path).resolve()
+                if alt_p.exists():
+                    p = alt_p
+            if not p.exists():
+                self.send_response(404)
+                self._set_cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": f"File not found: {raw_path}"}).encode("utf-8"))
+            else:
+                import platform, subprocess
+                os_name = platform.system().lower()
+                try:
+                    if os_name == "windows":
+                        import os
+                        os.startfile(str(p))
+                    elif os_name == "darwin":
+                        subprocess.Popen(["open", str(p)])
+                    else:
+                        subprocess.Popen(["xdg-open", str(p)])
+                    self.send_response(200)
+                    self._set_cors_headers()
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"status": "success", "file": str(p)}).encode("utf-8"))
+                except Exception as e:
+                    self.send_response(500)
+                    self._set_cors_headers()
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
 
         elif self.path == "/api/agent/apply-patch":
             file_path = body.get("file_path", "")
