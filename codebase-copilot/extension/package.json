@@ -1,6 +1,6 @@
 {
   "name": "codebase-copilot",
-  "displayName": "Codebase Copilot",
+  "displayName": "CLAY Copilot",
   "description": "Repository Intelligence & Autonomous Coding Agent powered by Cloud Gemma 4 (31B)",
   "version": "0.1.0",
   "publisher": "codebase-copilot",
@@ -21,7 +21,7 @@
       "activitybar": [
         {
           "id": "codebase-copilot",
-          "title": "Codebase Copilot",
+          "title": "CLAY Copilot",
           "icon": "resources/icon.svg"
         }
       ]
@@ -31,39 +31,39 @@
         {
           "type": "webview",
           "id": "codebaseCopilot.sidebarView",
-          "name": "Copilot"
+          "name": "CLAY Copilot"
         }
       ]
     },
     "commands": [
       {
         "command": "codebaseCopilot.ask",
-        "title": "Codebase Copilot: Ask Question"
+        "title": "CLAY Copilot: Ask Question"
       },
       {
         "command": "codebaseCopilot.analyzeRepo",
-        "title": "Codebase Copilot: Analyze Repository"
+        "title": "CLAY Copilot: Analyze Repository"
       },
       {
         "command": "codebaseCopilot.explainSelection",
-        "title": "Codebase Copilot: Explain Selected Code"
+        "title": "CLAY Copilot: Explain Selected Code"
       },
       {
         "command": "codebaseCopilot.checkOllama",
-        "title": "Codebase Copilot: Check Ollama Connection"
+        "title": "CLAY Copilot: Check Ollama Connection"
       },
       {
         "command": "codebaseCopilot.fixCurrentError",
-        "title": "Codebase Copilot: Fix Current Error"
+        "title": "CLAY Copilot: Fix Current Error"
       }
     ],
     "configuration": {
-      "title": "Codebase Copilot",
+      "title": "CLAY Copilot",
       "properties": {
         "codebaseCopilot.backendUrl": {
           "type": "string",
           "default": "http://127.0.0.1:8765",
-          "description": "URL of the local Codebase Copilot Python FastAPI backend"
+          "description": "URL of the local CLAY Copilot Python FastAPI backend"
         },
         "codebaseCopilot.privacyFilter": {
           "type": "boolean",

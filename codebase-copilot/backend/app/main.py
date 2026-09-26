@@ -6,10 +6,14 @@ from typing import Optional, List, Dict, Any, Tuple
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+import logging
 from pydantic import BaseModel
+
+logger = logging.getLogger("clay")
 
 from .security.secret_masker import SecretMasker
 from .parser.ast_chunker import PythonASTChunker
+from .parser.symbols import CodeChunk
 from .index.graph_store import SQLiteGraphStore
 from .index.vector_store import LocalVectorStore
 from .retrieval.hybrid_search import HybridSearchEngine
@@ -17,11 +21,17 @@ from .retrieval.file_resolver import WorkspaceFileResolver
 from .retrieval.repo_map import RepoMapGenerator
 from .agent.planner import AgentPlanner
 from .agent.patch_engine import PatchEngine
+from .agent.instruction_parser import (
+    InstructionClassifier,
+    SymbolEntityResolver,
+    AmbiguityDetector,
+    ContextWindowBuilder,
+)
 from .agent.repair_loop import SelfHealingRepairLoop
 from .agent.tools.terminal_agent import TerminalAgent
 from .llm.gemma_provider import OllamaGemmaProvider
 
-app = FastAPI(title="CLAY Intelligence Engine", version="0.2.0")
+app = FastAPI(title="CLAY Copilot", version="0.2.0")
 
 # Enable CORS for local VS Code extension webview communication
 app.add_middleware(
@@ -495,6 +505,7 @@ class SettingsUpdateRequest(BaseModel):
     security_mode: Optional[str] = None
     allow_network: Optional[bool] = None
     repo_path: Optional[str] = None
+    theme_mode: Optional[str] = None
 
 @app.get("/api/settings")
 async def get_settings():
@@ -555,6 +566,8 @@ async def update_settings(req: SettingsUpdateRequest):
         runtime_settings["repo_path"] = str(resolved)
         if current_indexed_workspace != str(resolved):
             await auto_index_workspace(str(resolved))
+    if req.theme_mode:
+        runtime_settings["theme_mode"] = req.theme_mode
 
     save_persisted_settings()
 
@@ -585,6 +598,10 @@ class ChatRequest(BaseModel):
     num_ctx: Optional[int] = None
     num_predict: Optional[int] = None
     stream: bool = True
+    cursor_line: Optional[int] = None
+    history: Optional[List[Dict[str, str]]] = None
+
+active_chat_history: List[Dict[str, str]] = []
 
 @app.post("/api/chat")
 async def chat_endpoint(req: ChatRequest):
@@ -626,7 +643,16 @@ async def chat_endpoint(req: ChatRequest):
     if current_indexed_workspace != workspace_dir or len(vector_store.chunks) == 0:
         await auto_index_workspace(workspace_dir)
 
-    # 1. Direct file resolution via WorkspaceFileResolver (handles typos, exact matches, top-level scripts, active editor file, live in-memory buffers)
+    # Determine conversation history: prefer req.history from client, fallback to backend session
+    effective_history: List[Dict[str, str]] = []
+    if req.history is not None:
+        effective_history = list(req.history)
+        active_chat_history.clear()
+        active_chat_history.extend(effective_history)
+    else:
+        effective_history = list(active_chat_history)
+
+    # 1. Direct file resolution via WorkspaceFileResolver (handles typos, exact matches, top-level scripts, active editor file, live in-memory buffers, multi-turn session history)
     direct_file_chunks = WorkspaceFileResolver.resolve_query_files(
         query=req.query,
         workspace_root=workspace_dir,
@@ -634,7 +660,8 @@ async def chat_endpoint(req: ChatRequest):
         max_chars_per_file=50000,
         context_file=req.context_file,
         context_file_content=req.active_file_content,
-        live_buffers=live_file_buffers
+        live_buffers=live_file_buffers,
+        history=effective_history
     )
 
     # 2. Retrieve top relevant code chunks via Hybrid Search
@@ -718,8 +745,23 @@ async def chat_endpoint(req: ChatRequest):
                         f"[Status: This file is currently empty on disk. When asked to write, implement, or generate code for this file or repository, provide the complete new code implementation.]\n"
                     )
                 else:
-                    file_body = "\n".join(lines[:1000])[:30000]
-                    file_context = f"[Active File: {rel_name} ({total_lines} lines total)]\n{file_body}\n"
+                    if total_lines <= 600:
+                        numbered_lines = [f"{i+1:3d}: {line}" for i, line in enumerate(lines)]
+                    else:
+                        if req.cursor_line and 1 <= req.cursor_line <= total_lines:
+                            c_idx = req.cursor_line - 1
+                            w_start = max(0, c_idx - 250)
+                            w_end = min(total_lines, c_idx + 250)
+                        else:
+                            w_start = 0
+                            w_end = min(total_lines, 500)
+                        numbered_lines = [f"{i+1:3d}: {line}" for i, line in enumerate(lines[w_start:w_end], start=w_start)]
+                    file_body = "\n".join(numbered_lines)[:35000]
+                    file_context = (
+                        f"[Active File: {rel_name} ({total_lines} lines total, with EXACT 1-Indexed Line Numbers)]\n"
+                        f"[IMPORTANT: Use the exact line numbers shown before the colons. Do NOT make up line numbers.]\n"
+                        f"{file_body}\n"
+                    )
 
     # 2b. Global Repository Map for whole-codebase architectural awareness
     repo_map = RepoMapGenerator.generate_repo_map(
@@ -754,12 +796,29 @@ async def chat_endpoint(req: ChatRequest):
             rel = Path(c.file_path).name
         citations.append(f"{rel}:{c.start_line}-{c.end_line}")
 
+    accumulated_tokens: List[str] = []
+
     async def event_stream():
+        nonlocal accumulated_tokens
         # Stream reasoning tokens directly from Ollama respecting Zero-Leak Privacy Guard
         is_privacy_guard = runtime_settings.get("privacy_filter", True)
-        async for token in ollama_provider.stream_reasoning(req.query, code_context=full_code_context, privacy_filter=is_privacy_guard):
-            yield f"data: {json.dumps({'token': token})}\n\n"
+        async for token in ollama_provider.stream_reasoning(
+            req.query,
+            code_context=full_code_context,
+            privacy_filter=is_privacy_guard,
+            history=effective_history
+        ):
+            clean_token = token.replace(r'\"\"\"', '"""').replace(r"\'\'\'", "'''")
+            accumulated_tokens.append(clean_token)
+            yield f"data: {json.dumps({'token': clean_token})}\n\n"
             await asyncio.sleep(0.01)
+
+        # Update in-memory session history with completed turn
+        full_assistant_reply = "".join(accumulated_tokens)
+        active_chat_history.append({"role": "user", "content": req.query})
+        active_chat_history.append({"role": "assistant", "content": full_assistant_reply})
+        if len(active_chat_history) > 20:
+            active_chat_history[:] = active_chat_history[-20:]
 
         # Send completion with citations
         yield f"data: {json.dumps({'done': True, 'citations': citations})}\n\n"
@@ -771,6 +830,7 @@ async def chat_endpoint(req: ChatRequest):
 async def clear_chat_context():
     """Clears any active conversation context, query state, and temporary agent tasks."""
     global active_task
+    active_chat_history.clear()
     active_task = {
         "id": "TASK #0001",
         "title": "Awaiting Goal",
@@ -806,54 +866,92 @@ async def scan_repository(req: ScanRequest):
 # 3. Dynamic Architecture Visualizer (Mermaid Graph)
 # ---------------------------------------------------------
 @app.get("/api/graph/mermaid")
-async def get_mermaid_graph(path: Optional[str] = None):
-    """Generates a dynamic Mermaid.js diagram from indexed SQLite relationships."""
+async def get_mermaid_graph(path: Optional[str] = None, file: Optional[str] = None):
+    """Generates a dynamic Mermaid.js diagram from indexed SQLite relationships, optionally focused on a selected file."""
     import sqlite3
     diagram_lines = ["graph TD"]
+    seen_edges = set()
     target_norm = str(resolve_workspace_path(path or runtime_settings.get("repo_path"))).lower()
+    selected_file_norm = file.strip().replace("\\", "/").lower() if file and file.strip() else None
 
     try:
         with sqlite3.connect(graph_store.db_path) as db:
-            cursor = db.execute(
-                "SELECT source_symbol, target_symbol, relation_type, file_path FROM relationships LIMIT 30"
-            )
+            if selected_file_norm:
+                sel_filename = Path(selected_file_norm).name.lower()
+                cursor = db.execute(
+                    "SELECT source_symbol, target_symbol, relation_type, file_path FROM relationships "
+                    "WHERE LOWER(file_path) LIKE ? OR LOWER(file_path) LIKE ? LIMIT 60",
+                    (f"%{selected_file_norm}%", f"%{sel_filename}%")
+                )
+            else:
+                cursor = db.execute(
+                    "SELECT source_symbol, target_symbol, relation_type, file_path FROM relationships LIMIT 60"
+                )
             rows = cursor.fetchall()
             for src, tgt, rel, fpath in rows:
                 if fpath:
                     try:
-                        if not str(Path(fpath).resolve()).lower().startswith(target_norm):
+                        resolved_fpath = str(Path(fpath).resolve()).lower()
+                        if not resolved_fpath.startswith(target_norm) and not str(Path(fpath)).lower().startswith(target_norm):
                             continue
+                        if selected_file_norm:
+                            fpath_norm = str(Path(fpath)).replace("\\", "/").lower()
+                            if sel_filename not in fpath_norm and selected_file_norm not in fpath_norm:
+                                continue
                     except Exception:
                         pass
                 clean_src = src.split("#")[-1].replace(".", "_")
                 clean_tgt = tgt.split("#")[-1].replace(".", "_")
-                diagram_lines.append(f"  {clean_src} -->|{rel}| {clean_tgt}")
+                edge = f"  {clean_src} -->|{rel}| {clean_tgt}"
+                if edge not in seen_edges:
+                    seen_edges.add(edge)
+                    diagram_lines.append(edge)
 
             # If no call relationships exist, fallback to displaying indexed functions & classes
             if len(diagram_lines) == 1:
-                sym_cursor = db.execute(
-                    "SELECT name, symbol_type, file_path FROM symbols LIMIT 25"
-                )
+                if selected_file_norm:
+                    sym_cursor = db.execute(
+                        "SELECT name, symbol_type, file_path FROM symbols "
+                        "WHERE LOWER(file_path) LIKE ? OR LOWER(file_path) LIKE ? LIMIT 35",
+                        (f"%{selected_file_norm}%", f"%{sel_filename}%")
+                    )
+                else:
+                    sym_cursor = db.execute(
+                        "SELECT name, symbol_type, file_path FROM symbols LIMIT 30"
+                    )
                 for sname, stype, sfpath in sym_cursor.fetchall():
                     if sfpath:
                         try:
-                            if not str(Path(sfpath).resolve()).lower().startswith(target_norm):
+                            resolved_sfpath = str(Path(sfpath).resolve()).lower()
+                            if not resolved_sfpath.startswith(target_norm) and not str(Path(sfpath)).lower().startswith(target_norm):
                                 continue
+                            if selected_file_norm:
+                                sfpath_norm = str(Path(sfpath)).replace("\\", "/").lower()
+                                if sel_filename not in sfpath_norm and selected_file_norm not in sfpath_norm:
+                                    continue
                         except Exception:
                             pass
                     clean_name = sname.split("#")[-1].replace(".", "_")
-                    diagram_lines.append(f"  {clean_name}[\"{stype}: {clean_name}\"]")
+                    node_line = f"  {clean_name}[\"{stype}: {clean_name}\"]"
+                    if node_line not in seen_edges:
+                        seen_edges.add(node_line)
+                        diagram_lines.append(node_line)
     except Exception:
         pass
 
     if len(diagram_lines) == 1:
+        msg = (
+            f"No call relationships or symbols found for '{file}'.\nClick 'Scan & Index Workspace' to analyze this file or select another file."
+            if file
+            else "No SQLite code graph available for this repository.\nClick 'Scan & Index Workspace' to analyze codebase structure."
+        )
         return {
             "mermaid": "",
             "available": False,
-            "message": "No SQLite code graph available for this repository.\nClick 'Scan & Index Workspace' to analyze codebase structure."
+            "message": msg
         }
 
-    return {"mermaid": "\n".join(diagram_lines), "available": True}
+    return {"mermaid": "\n".join(diagram_lines), "available": True, "focused_file": file}
 
 
 # ---------------------------------------------------------
@@ -1062,6 +1160,12 @@ async def create_plan(req: PlanRequest):
     if current_indexed_workspace != workspace_dir:
         await auto_index_workspace(workspace_dir)
 
+    intent_info = InstructionClassifier.classify(req.goal)
+    accessible = WorkspaceFileResolver.list_accessible_files(workspace_dir)
+    target_files = SymbolEntityResolver.resolve_target_files(req.goal, workspace_dir, accessible)
+    ambiguity = AmbiguityDetector.check_ambiguity(req.goal, target_files)
+    change_specs = SymbolEntityResolver.extract_change_specs(req.goal)
+
     summary = f"Repository at '{workspace_dir}' with {len(vector_store.chunks)} indexed code chunks."
     plan_data = await planner.create_plan(req.goal, summary)
     
@@ -1072,6 +1176,10 @@ async def create_plan(req: PlanRequest):
         "priority": "HIGH PRIORITY",
         "mode": "autonomous",
         "model": ollama_provider.model_name,
+        "intent": intent_info.get("intent", "EDIT_EXISTING"),
+        "targetFiles": target_files,
+        "ambiguity": ambiguity,
+        "changeSpecs": change_specs,
         "totalSteps": plan_data["total_steps"],
         "completedSteps": 1,
         "steps": plan_data["steps"],
@@ -1088,6 +1196,9 @@ class StepExecuteRequest(BaseModel):
     step_id: int
     task_id: Optional[str] = None
     workspace_path: Optional[str] = None
+    cursor_line: Optional[int] = None
+    active_file: Optional[str] = None
+    target_file: Optional[str] = None
 
 @app.post("/api/agent/step")
 async def execute_agent_step(req: StepExecuteRequest):
@@ -1100,34 +1211,74 @@ async def execute_agent_step(req: StepExecuteRequest):
 
     # Step 1: Symbol scanning and repository context retrieval
     if req.step_id == 1:
+        intent_info = InstructionClassifier.classify(req.goal)
+        accessible = WorkspaceFileResolver.list_accessible_files(workspace_dir)
+        target_files = SymbolEntityResolver.resolve_target_files(req.goal, workspace_dir, accessible)
+        ambiguity = AmbiguityDetector.check_ambiguity(req.goal, target_files)
+        change_specs = SymbolEntityResolver.extract_change_specs(req.goal)
+
         retrieved = await hybrid_engine.search(req.goal, top_k=3, workspace_root=workspace_dir)
         direct_files = WorkspaceFileResolver.resolve_query_files(req.goal, workspace_dir)
-        files_found = list({Path(c.file_path).name for c in (direct_files + retrieved)})
-        msg = f"Analyzed AST symbols. Correlated files: {', '.join(files_found) if files_found else 'root workspace'}"
+        all_found = list({Path(c.file_path).name for c in (direct_files + retrieved)})
+        for tf in target_files:
+            all_found.append(Path(tf).name)
+        files_found = list(dict.fromkeys(all_found))
+
+        is_ambiguous = bool(ambiguity and ambiguity.get("detected") and len(ambiguity.get("candidates", [])) > 1)
+        msg = f"Intent: {intent_info.get('intent', 'EDIT_EXISTING')}. Correlated files: {', '.join(files_found) if files_found else 'root workspace'}"
+        if is_ambiguous:
+            msg += f" (Ambiguity detected: {', '.join(ambiguity['candidates'])})"
         return {
             "step_id": 1,
-            "status": "done",
+            "status": "ambiguous" if is_ambiguous else "done",
+            "intent": intent_info,
+            "target_files": target_files,
+            "ambiguity": ambiguity,
+            "change_specs": change_specs,
             "log": msg
         }
     # Step 2: Code synthesis / Unified Diff via Gemma 4 LLM
     elif req.step_id == 2:
-        direct_files = WorkspaceFileResolver.resolve_query_files(req.goal, workspace_dir)
-        all_accessible = WorkspaceFileResolver.list_accessible_files(workspace_dir)
+        accessible = WorkspaceFileResolver.list_accessible_files(workspace_dir)
+        target_files = SymbolEntityResolver.resolve_target_files(req.goal, workspace_dir, accessible)
+        ambiguity = AmbiguityDetector.check_ambiguity(req.goal, target_files)
+        change_specs = SymbolEntityResolver.extract_change_specs(req.goal)
 
         target_filename = None
         target_path_obj = None
 
-        if direct_files:
-            target_path_obj = Path(direct_files[0].file_path)
-            target_filename = target_path_obj.name
-        elif all_accessible:
-            py_files = [p for p in all_accessible.values() if p.suffix == ".py"]
-            if py_files:
-                target_path_obj = py_files[0]
+        if req.target_file:
+            tf_clean = req.target_file.strip()
+            if tf_clean in accessible:
+                target_path_obj = accessible[tf_clean]
+                target_filename = target_path_obj.name
+            elif (Path(workspace_dir) / tf_clean).exists():
+                target_path_obj = Path(workspace_dir) / tf_clean
                 target_filename = target_path_obj.name
             else:
-                target_path_obj = list(all_accessible.values())[0]
+                for k, p in accessible.items():
+                    if p.name.lower() == tf_clean.lower() or k.lower() == tf_clean.lower():
+                        target_path_obj = p
+                        target_filename = p.name
+                        break
+
+        if not target_path_obj:
+            if target_files:
+                target_path_obj = accessible.get(target_files[0]) or (Path(workspace_dir) / target_files[0])
                 target_filename = target_path_obj.name
+            else:
+                direct_files = WorkspaceFileResolver.resolve_query_files(req.goal, workspace_dir)
+                if direct_files:
+                    target_path_obj = Path(direct_files[0].file_path)
+                    target_filename = target_path_obj.name
+                elif accessible:
+                    py_files = [p for p in accessible.values() if p.suffix == ".py"]
+                if py_files:
+                    target_path_obj = py_files[0]
+                    target_filename = target_path_obj.name
+                else:
+                    target_path_obj = list(accessible.values())[0]
+                    target_filename = target_path_obj.name
 
         if not target_filename:
             words = req.goal.split()
@@ -1139,80 +1290,123 @@ async def execute_agent_step(req: StepExecuteRequest):
             if not target_filename:
                 target_filename = "test_c.py" if (Path(workspace_dir) / "test_c.py").exists() else "main.py"
 
+        # AST Skeleton + Target Context
+        orig_lines = []
+        raw_file_content = ""
+        file_content_context = ""
+        target_symbols = []
+        preferred_line = req.cursor_line
+        if target_path_obj and target_path_obj.exists() and target_path_obj.is_file():
+            try:
+                raw_file_content = target_path_obj.read_text(encoding="utf-8", errors="ignore")
+                orig_lines = raw_file_content.splitlines()
+                target_symbols = SymbolEntityResolver.resolve_target_symbols(req.goal, raw_file_content)
+                if preferred_line is None:
+                    sym_positions = SymbolEntityResolver.resolve_target_symbols_with_positions(req.goal, raw_file_content)
+                    if sym_positions:
+                        preferred_line = sym_positions[0]["lineno"]
+
+                file_content_context, _ = ContextWindowBuilder.build_ast_skeleton_context(
+                    raw_file_content,
+                    target_filename,
+                    target_symbols=target_symbols,
+                    preferred_line=preferred_line
+                )
+            except Exception:
+                orig_lines = []
+
+        direct_files = WorkspaceFileResolver.resolve_query_files(req.goal, workspace_dir)
         retrieved = await hybrid_engine.search(req.goal, top_k=3, workspace_root=workspace_dir)
         combined = direct_files + [c for c in retrieved if c.file_path not in {d.file_path for d in direct_files}]
         context = HybridSearchEngine.build_context_prompt(combined[:3], workspace_root=workspace_dir)
+
+        specs_info = ""
+        if change_specs:
+            specs_info += f"Identified Change Targets: {json.dumps(change_specs)}\n"
+        if target_symbols:
+            specs_info += f"Identified Target Symbols: {', '.join(target_symbols)}\n"
+        if preferred_line:
+            specs_info += f"Target Code Region Focus: around line {preferred_line}\n"
+
         prompt = (
             f"Goal: {req.goal}\n"
-            f"Target File: {target_filename}\n\n"
-            f"You are implementing the code solution for '{target_filename}' to achieve: {req.goal}\n"
-            f"Write the complete, runnable Python code or standard unified diff for '{target_filename}'.\n"
-            "Format your output inside a ```diff code block or ```python code block.\n"
+            f"Target File: {target_filename}\n"
+            f"{specs_info}"
+            f"{file_content_context}\n"
+            f"You are implementing the surgical code solution for '{target_filename}' to achieve: {req.goal}\n"
+            "STRICT OPERATIONAL & SURGICAL CODING RULES:\n"
+            "- ZERO EMOJIS: Do not use emojis anywhere in your output.\n"
+            f"- MINIMAL SURGICAL SCOPE: If '{target_filename}' exists, make ONLY the minimal changes required to achieve the goal. Do NOT rewrite unchanged logic or delete the file.\n"
+            "- EXACT LINE NUMBERS: Use the exact literal 1-indexed line numbers shown before the colons in the context above. NEVER guess or hallucinate line numbers.\n"
+            "- CONTEXT ANCHORING: Include 2 to 3 lines of unchanged context above and below the change to ensure unambiguous anchor matching.\n"
+            "- EXACT INDENTATION: Preserve the target file's exact leading indentation (spaces/tabs) to prevent syntax or indentation errors.\n"
+            "- NO LAZY TRUNCATIONS: Never write placeholder comments like '// ... rest of code unchanged ...' or '# ... existing code ...'.\n"
+            "- REAL-TIME & GAMEPLAY PARAMS: If adjusting game mechanics or timing (e.g. speed, delay, fps, timeout, interval), identify the exact constant and update it cleanly.\n"
+            "- Output your solution in ONE of these formats:\n"
+            "  Format A (SEARCH/REPLACE block - recommended for 1-5 line edits):\n"
+            "  <<<<<<< SEARCH\n"
+            "  <exact existing lines to replace>\n"
+            "  =======\n"
+            "  <new replacement lines>\n"
+            "  >>>>>>> REPLACE\n\n"
+            "  Format B (Standard Unified Diff with EXACT line numbers from context above):\n"
+            "  ```diff\n"
+            "  @@ -line,count +line,count @@\n"
+            "  -old line\n"
+            "  +new line\n"
+            "  ```\n\n"
+            "  Format C (Updated function or variable assignment in code block):\n"
+            "  ```python\n"
+            "  <the updated function or statement>\n"
+            "  ```\n\n"
             f"If '{target_filename}' is empty or new, write the full, working implementation from scratch.\n"
-            "Do NOT refuse. Do NOT output conversational meta-text or emojis. Output the code block directly."
+            "Do NOT refuse. Do NOT output conversational fluff. Output the code block directly."
         )
         generated = await ollama_provider.generate_text(prompt, code_context=context)
 
-        # 1. Multi-strategy diff extraction
-        diff_text = ""
-        # 1a. Diff block with @@ header
-        diff_match = re.search(r"```(?:diff|patch)?\s*\n([\s\S]*?@@[\s\S]*?)```", generated, re.IGNORECASE)
-        if diff_match:
-            diff_text = diff_match.group(1).strip()
-        else:
-            # 1b. Raw diff format without backticks
-            raw_diff = re.search(r"(--- (?:a\/|\/dev\/null)[^\n]+\n\+\+\+ (?:b\/|[^\n]+)[^\n]*\n@@[\s\S]*?)(?:```|$)", generated)
-            if raw_diff:
-                diff_text = raw_diff.group(1).strip()
+        # Build surgical minimal diff using multi-strategy builder (eliminates full-file wipes and line desync)
+        diff_text = PatchEngine.build_surgical_diff(orig_lines, generated, target_filename, preferred_line=preferred_line)
 
-        # 2. Code block extraction (```python, ```py, ```python3, or generic ```)
-        if not diff_text:
-            code_body = None
-            code_block_match = re.search(r"```(?:python|py|python3|code)?\s*\n([\s\S]*?)```", generated, re.IGNORECASE)
-            if code_block_match:
-                code_body = code_block_match.group(1).strip()
-            elif not generated.strip().startswith("I'm unable") and not generated.strip().startswith("I cannot"):
-                # Check for raw Python code without markdown backticks
-                raw_code = generated.strip()
-                if raw_code.startswith(("def ", "class ", "import ", "from ", "#!", "async def ", '"""', "'''")):
-                    code_body = raw_code
+        # Pre-staging AST syntax validation & automated self-healing
+        is_valid, final_diff, err_msg = PatchEngine.validate_and_heal_diff(orig_lines, diff_text, target_filename)
 
-            if code_body:
-                orig_lines = []
-                if target_path_obj and target_path_obj.exists() and target_path_obj.is_file():
-                    try:
-                        orig_lines = target_path_obj.read_text(encoding="utf-8", errors="ignore").splitlines()
-                    except Exception:
-                        orig_lines = []
-
-                code_lines = code_body.splitlines()
-                # If target file is empty or new, generate valid creation diff (@@ -0,0 +1,N @@)
-                if not orig_lines or not any(l.strip() for l in orig_lines):
-                    diff_text = (
-                        f"--- /dev/null\n+++ b/{target_filename}\n"
-                        f"@@ -0,0 +1,{max(1, len(code_lines))} @@\n"
-                        + "\n".join(f"+{line}" for line in code_lines)
-                    )
-                else:
-                    diff_text = (
-                        f"--- a/{target_filename}\n+++ b/{target_filename}\n"
-                        f"@@ -1,{len(orig_lines)} +1,{max(1, len(code_lines))} @@\n"
-                        + "\n".join(f"-{line}" for line in orig_lines) + "\n"
-                        + "\n".join(f"+{line}" for line in code_lines)
-                    )
+        # 1-shot self-healing repair loop if syntax error remains
+        if not is_valid and err_msg and target_filename.endswith(".py"):
+            try:
+                repair_prompt = (
+                    f"The proposed modification for '{target_filename}' caused: {err_msg}\n"
+                    f"Goal was: {req.goal}\n"
+                    f"Original diff was:\n{diff_text}\n"
+                    f"Please provide the corrected, syntactically valid code or SEARCH/REPLACE block for '{target_filename}'.\n"
+                    "Output ONLY the corrected code or diff inside a code block."
+                )
+                repair_gen = await ollama_provider.generate_text(repair_prompt, code_context=context)
+                repaired_diff = PatchEngine.build_surgical_diff(orig_lines, repair_gen, target_filename)
+                rep_valid, rep_diff, _ = PatchEngine.validate_and_heal_diff(orig_lines, repaired_diff, target_filename)
+                if rep_valid:
+                    final_diff = rep_diff
+                    is_valid = True
+            except Exception:
+                pass
 
         # Extract filename from diff header if present
-        if diff_text:
-            header_match = re.search(r"\+\+\+\s+(?:b/)?([^\s\n\r]+)", diff_text)
+        if final_diff:
+            header_match = re.search(r"\+\+\+\s+(?:b/)?([^\s\n\r]+)", final_diff)
             if header_match and header_match.group(1) != "/dev/null":
                 target_filename = Path(header_match.group(1)).name
 
-        log_msg = f"Synthesized solution for {target_filename}." if diff_text else f"Generated response for {target_filename}."
+        hunks = PatchEngine.split_into_hunks(final_diff)
+        staged_files = PatchEngine.split_multi_file_diff(final_diff)
+
+        log_msg = f"Synthesized surgical solution for {target_filename}." if final_diff else f"Generated response for {target_filename}."
         return {
             "step_id": 2,
             "status": "done",
             "target_file": target_filename,
-            "diff": diff_text,
+            "diff": final_diff,
+            "hunks": hunks,
+            "staged_files": staged_files,
+            "valid": is_valid,
             "generated": generated,
             "log": log_msg
         }
@@ -1224,6 +1418,7 @@ async def execute_agent_step(req: StepExecuteRequest):
             "log": "Syntax and AST verification passed. Changes ready for inspection in Diff tab."
         }
     return {"status": "error", "message": "Unknown step"}
+
 
 # ---------------------------------------------------------
 # 5. Patch Application & Self-Healing Repair Loop
@@ -1258,6 +1453,103 @@ async def apply_patch(req: ApplyPatchRequest):
             logger.error(f"Failed to auto-reindex patched file {patched_file}: {e}")
 
     return result
+
+class ComputeDiffRequest(BaseModel):
+    target_file: str
+    code_or_snippet: str
+    workspace_path: Optional[str] = None
+    preferred_line: Optional[int] = None
+
+@app.post("/api/agent/compute-diff")
+async def compute_diff(req: ComputeDiffRequest):
+    workspace = resolve_workspace_path(req.workspace_path)
+    target_path = PatchEngine.resolve_target_path(req.target_file, str(workspace))
+    orig_lines = []
+    if target_path.exists() and target_path.is_file():
+        try:
+            orig_lines = target_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except Exception:
+            orig_lines = []
+
+    diff_text = PatchEngine.build_surgical_diff(orig_lines, req.code_or_snippet, target_path.name, preferred_line=req.preferred_line)
+    is_valid, final_diff, err = PatchEngine.validate_and_heal_diff(orig_lines, diff_text, target_path.name)
+    hunks = PatchEngine.split_into_hunks(final_diff)
+    staged_files = PatchEngine.split_multi_file_diff(final_diff)
+    return {
+        "status": "success",
+        "target_file": target_path.name,
+        "diff": final_diff,
+        "hunks": hunks,
+        "staged_files": staged_files,
+        "valid": is_valid,
+        "error": err
+    }
+
+class ParseInstructionRequest(BaseModel):
+    goal: str
+    workspace_path: Optional[str] = None
+
+@app.post("/api/agent/parse-instruction")
+async def parse_instruction(req: ParseInstructionRequest):
+    workspace_dir = str(resolve_workspace_path(req.workspace_path or runtime_settings.get("repo_path")))
+    intent_info = InstructionClassifier.classify(req.goal)
+    accessible = WorkspaceFileResolver.list_accessible_files(workspace_dir)
+    target_files = SymbolEntityResolver.resolve_target_files(req.goal, workspace_dir, accessible)
+    ambiguity = AmbiguityDetector.check_ambiguity(req.goal, target_files)
+    change_specs = SymbolEntityResolver.extract_change_specs(req.goal)
+
+    target_symbols = []
+    if target_files:
+        primary_path = accessible.get(target_files[0]) or (Path(workspace_dir) / target_files[0])
+        if primary_path.exists() and primary_path.is_file():
+            try:
+                content = primary_path.read_text(encoding="utf-8", errors="ignore")
+                target_symbols = SymbolEntityResolver.resolve_target_symbols(req.goal, content)
+            except Exception:
+                pass
+
+    return {
+        "goal": req.goal,
+        "intent": intent_info,
+        "target_files": target_files,
+        "target_symbols": target_symbols,
+        "change_specs": change_specs,
+        "ambiguity": ambiguity
+    }
+
+class DiscardHunkRequest(BaseModel):
+    file_path: str
+    diff: str
+    hunk_index: int
+    workspace_path: Optional[str] = None
+
+@app.post("/api/agent/discard-hunk")
+async def discard_diff_hunk(req: DiscardHunkRequest):
+    workspace = resolve_workspace_path(req.workspace_path)
+    target_path = PatchEngine.resolve_target_path(req.file_path, str(workspace))
+    orig_lines = []
+    if target_path.exists() and target_path.is_file():
+        try:
+            orig_lines = target_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except Exception:
+            orig_lines = []
+
+    new_diff = PatchEngine.discard_hunk(orig_lines, req.diff, req.hunk_index, target_path.name)
+    hunks = PatchEngine.split_into_hunks(new_diff)
+    return {
+        "status": "success",
+        "file_path": target_path.name,
+        "diff": new_diff,
+        "hunks": hunks
+    }
+
+class IntraDiffRequest(BaseModel):
+    old_line: str
+    new_line: str
+
+@app.post("/api/agent/intra-diff")
+async def get_intra_diff(req: IntraDiffRequest):
+    return PatchEngine.compute_intra_line_diff(req.old_line, req.new_line)
 
 @app.get("/api/system/info")
 async def get_system_info(workspace_path: Optional[str] = None):

@@ -12,10 +12,19 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const backendClient = new BackendClient();
 
-    // 2. Register Webview View Provider (Primary Sidebar)
+    // 2. Register Webview View Provider (Primary Sidebar) with retainContextWhenHidden
+    // Keeps webview execution context alive when minimized, collapsed, or when switching sidebar views
     const sidebarProvider = new SidebarProvider(context.extensionUri, backendClient, context);
     context.subscriptions.push(
-        vscode.window.registerWebviewViewProvider(SidebarProvider.viewType, sidebarProvider)
+        vscode.window.registerWebviewViewProvider(
+            SidebarProvider.viewType,
+            sidebarProvider,
+            {
+                webviewOptions: {
+                    retainContextWhenHidden: true
+                }
+            }
+        )
     );
 
     // 3. Command: Check Ollama Status
@@ -24,11 +33,11 @@ export async function activate(context: vscode.ExtensionContext) {
             const status = await backendClient.checkOllamaStatus();
             if (status.connected) {
                 vscode.window.showInformationMessage(
-                    `Codebase Copilot: Ollama connected! Active model: gemma4:31b-cloud.`
+                    `CLAY Copilot: Ollama connected! Active model: gemma4:31b-cloud.`
                 );
             } else {
                 vscode.window.showWarningMessage(
-                    'Codebase Copilot: Ollama daemon not detected. Run "ollama serve" in your terminal.'
+                    'CLAY Copilot: Ollama daemon not detected. Run "ollama serve" in your terminal.'
                 );
             }
         })
@@ -39,7 +48,7 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('codebaseCopilot.analyzeRepo', async () => {
             const workspaceFolders = vscode.workspace.workspaceFolders;
             if (!workspaceFolders || workspaceFolders.length === 0) {
-                vscode.window.showWarningMessage('Codebase Copilot: Open a workspace folder to index.');
+                vscode.window.showWarningMessage('CLAY Copilot: Open a workspace folder to index.');
                 return;
             }
 
@@ -47,17 +56,17 @@ export async function activate(context: vscode.ExtensionContext) {
             vscode.window.withProgress(
                 {
                     location: vscode.ProgressLocation.Notification,
-                    title: 'Codebase Copilot: Scanning & Indexing AST...',
+                    title: 'CLAY Copilot: Scanning & Indexing AST...',
                     cancellable: false
                 },
                 async () => {
                     try {
                         const status = await backendClient.triggerIndexing(rootPath);
                         vscode.window.showInformationMessage(
-                            `Codebase Copilot: Successfully indexed ${status.filesCount} files and ${status.symbolsCount} symbols into code graph.`
+                            `CLAY Copilot: Successfully indexed ${status.filesCount} files and ${status.symbolsCount} symbols into code graph.`
                         );
                     } catch (err: any) {
-                        vscode.window.showErrorMessage(`Codebase Copilot Indexing failed: ${err.message}`);
+                        vscode.window.showErrorMessage(`CLAY Copilot Indexing failed: ${err.message}`);
                     }
                 }
             );
@@ -69,12 +78,12 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('codebaseCopilot.explainSelection', async () => {
             const editor = vscode.window.activeTextEditor;
             if (!editor) {
-                vscode.window.showInformationMessage('Codebase Copilot: Select code in an open editor first.');
+                vscode.window.showInformationMessage('CLAY Copilot: Select code in an open editor first.');
                 return;
             }
             const selection = editor.document.getText(editor.selection);
             if (!selection) {
-                vscode.window.showInformationMessage('Codebase Copilot: No code selected.');
+                vscode.window.showInformationMessage('CLAY Copilot: No code selected.');
                 return;
             }
 
@@ -93,13 +102,13 @@ export async function activate(context: vscode.ExtensionContext) {
             const errors = diagnostics.filter(d => d.severity === vscode.DiagnosticSeverity.Error);
 
             if (errors.length === 0) {
-                vscode.window.showInformationMessage('Codebase Copilot: No active errors detected in current file.');
+                vscode.window.showInformationMessage('CLAY Copilot: No active errors detected in current file.');
                 return;
             }
 
             const firstError = errors[0];
             vscode.window.showInformationMessage(
-                `Codebase Copilot: Diagnosing "${firstError.message}" with gemma4:31b-cloud...`
+                `CLAY Copilot: Diagnosing "${firstError.message}" with gemma4:31b-cloud...`
             );
             await vscode.commands.executeCommand('codebaseCopilot.sidebarView.focus');
         })

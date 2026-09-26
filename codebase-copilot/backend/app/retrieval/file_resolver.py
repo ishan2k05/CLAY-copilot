@@ -115,7 +115,8 @@ class WorkspaceFileResolver:
         max_chars_per_file: int = 50000,
         context_file: Optional[str] = None,
         context_file_content: Optional[str] = None,
-        live_buffers: Optional[Dict[str, str]] = None
+        live_buffers: Optional[Dict[str, str]] = None,
+        history: Optional[List[Dict[str, str]]] = None
     ) -> List[CodeChunk]:
         """
         Identifies if user query references any workspace files or package directories (exact, substring, or typo/fuzzy).
@@ -195,6 +196,19 @@ class WorkspaceFileResolver:
                 ]
                 if any(ind in normalized_query for ind in ref_indicators) or not matched_paths:
                     matched_paths[str(cp)] = cp
+
+        # 4.5. Multi-turn session context fallback: if query did not match any files directly (e.g. "yes give me flowchart", "draw the diagram", "how does it work?", "explain this"), inspect recent history turns to maintain session continuity
+        if not matched_paths and history:
+            for turn in reversed(history[-4:]):
+                turn_text = (turn.get("content") or "").lower()
+                for rel_str, p in file_map.items():
+                    name_lower = p.name.lower()
+                    if name_lower in turn_text or rel_str.lower() in turn_text:
+                        matched_paths[str(p.resolve())] = p
+                        if len(matched_paths) >= 3:
+                            break
+                if matched_paths:
+                    break
 
         # 5. Read matched files directly (always prioritizing fresh disk state and active editor buffers)
         chunks: List[CodeChunk] = []

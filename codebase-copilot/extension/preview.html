@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CLAY: Autonomous Coding Agent</title>
+  <title>CLAY Copilot</title>
   <link rel="stylesheet" href="src/webview/media/style.css">
 </head>
 
@@ -76,7 +76,7 @@
               </g>
             </svg>
           </div>
-          <div class="empty-state-title">CLAY Intelligence Engine</div>
+          <div class="empty-state-title">CLAY Copilot</div>
           <div class="empty-state-desc">Autonomous repository agent & surgical engineering copilot. Running on <strong
               id="welcome-model-text">gemma4:31b-cloud</strong>.</div>
         </div>
@@ -124,6 +124,15 @@
           <span class="console-title user-console-title">user-console</span>
         </div>
 
+        <!-- Ambiguity Clarification Bar -->
+        <div class="agent-ambiguity-bar" id="agent-ambiguity-bar" style="display: none;">
+          <div class="ambiguity-header">
+            <span class="ambiguity-title">Target Ambiguity:</span>
+            <span class="ambiguity-question" id="ambiguity-question">Which file would you like to update?</span>
+          </div>
+          <div class="ambiguity-chips-list" id="ambiguity-chips-list"></div>
+        </div>
+
         <!-- CLI Style Task Planner Input -->
         <div class="user-console-cli-bar">
           <span class="user-console-prompt">&gt;</span>
@@ -155,10 +164,18 @@
     <!-- 3. Diff Reviewer View -->
     <div id="view-diff" class="view-container">
       <div class="diff-summary-bar">
-        <span id="diff-summary-label">Staged Changes // 0 files</span>
-        <div>
-          <span class="diff-badge-add" id="diff-badge-add">+0</span>
-          <span class="diff-badge-del" id="diff-badge-del">-0</span>
+        <div class="diff-summary-left">
+          <span id="diff-summary-label">Staged Changes // 0 files</span>
+          <div class="diff-file-selector" id="diff-file-selector" style="display: none;"></div>
+        </div>
+        <div class="diff-summary-controls">
+          <button type="button" class="btn-diff-view-toggle" id="btn-diff-view-mode" title="Toggle Split / Unified Diff View">
+            <span id="diff-mode-label">Unified</span>
+          </button>
+          <div class="diff-badges-wrap">
+            <span class="diff-badge-add" id="diff-badge-add">+0</span>
+            <span class="diff-badge-del" id="diff-badge-del">-0</span>
+          </div>
         </div>
       </div>
 
@@ -251,7 +268,13 @@
         </div>
       </div>
       <div class="task-card" style="margin-top: 10px;">
-        <div class="task-title">Call Hierarchy & Relationships</div>
+        <div class="task-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <div class="task-title" style="margin-bottom: 0;" id="hierarchy-card-title">Call Hierarchy & Relationships</div>
+          <div class="pixel-badge active-file-badge" id="hierarchy-file-badge" style="display: none;" title="Filtered by selected file. Click to clear filter.">
+            <span id="hierarchy-file-badge-text">All Files</span>
+            <span class="badge-close">✕</span>
+          </div>
+        </div>
         <pre
           style="font-family: var(--font-mono); font-size: 10.5px; line-height: 1.4; color: var(--text-secondary); background: var(--surface-subtle); padding: 8px; border-radius: 10px; overflow-x: auto; white-space: pre;"
           id="mermaid-code">No SQLite code graph available for this repository.
@@ -279,6 +302,48 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
 
     <!-- 5. Settings View (Agent Security Mode, Sandbox Network, Ollama Daemon & Cloud Models) -->
     <div id="view-settings" class="view-container">
+      <!-- Section 0: Theme & IDE Bindings -->
+      <div class="settings-section">
+        <div class="settings-section-title">Theme &amp; IDE Bindings</div>
+        <div class="settings-section-desc">Choose between the signature CLAY warm palette or adopt native VS Code editor tokens (var(--vscode-editor-background)).</div>
+        <div class="theme-binding-grid" id="theme-mode-selector">
+          <div class="theme-binding-card active" data-theme="claude" id="card-theme-claude">
+            <div class="theme-binding-badge">DEFAULT</div>
+            <div class="theme-binding-title">
+              <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
+                <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 1.5v11A5.5 5.5 0 0 1 8 2.5z"/>
+              </svg>
+              CLAY Palette
+            </div>
+            <div class="theme-binding-desc">Signature warm minimalist canvas with custom Claude Light &amp; Dark tones.</div>
+          </div>
+          <div class="theme-binding-card" data-theme="vscode" id="card-theme-vscode">
+            <div class="theme-binding-badge">IDE BINDING</div>
+            <div class="theme-binding-title">
+              <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
+                <path d="M14.5 1.5l-5 4.5v4l5 4.5v-13zM1.5 5.2L7 1.5v13L1.5 10.8V5.2z"/>
+              </svg>
+              VS Code Native
+            </div>
+            <div class="theme-binding-desc">Binds live to IDE editor tokens (var(--vscode-editor-background), foreground, diffs &amp; borders).</div>
+          </div>
+        </div>
+        <div class="settings-card" style="margin-top: 10px;">
+          <div class="settings-row">
+            <div class="settings-row-info">
+              <div class="settings-row-title">Adopt VS Code Editor Tokens</div>
+              <div class="settings-row-desc">Automatically synchronize background, text, and diffs with your current active VS Code color theme</div>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="chk-vscode-native-theme">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-divider"></div>
+
       <!-- Section 1: Agent Security Mode -->
       <div class="settings-section">
         <div class="settings-section-title">Agent security mode</div>
@@ -458,7 +523,7 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
       </button>
       <div class="input-container">
         <textarea class="chat-textarea" id="chat-input"
-          placeholder="Ask CLAY (Enter to send, Shift+Enter for newline)..."></textarea>
+          placeholder="Start typing to mold CLAY"></textarea>
         <div class="input-toolbar">
           <div class="input-meta-hint">
             <span class="pill-dot"></span> <span id="input-model-hint">CLAY // gemma4:31b-cloud</span>

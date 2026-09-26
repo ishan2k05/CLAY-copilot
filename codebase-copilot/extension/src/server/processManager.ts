@@ -7,7 +7,7 @@ export class ServerProcessManager {
     private outputChannel: vscode.OutputChannel;
 
     constructor() {
-        this.outputChannel = vscode.window.createOutputChannel('Codebase Copilot Server');
+        this.outputChannel = vscode.window.createOutputChannel('CLAY Copilot Server');
     }
 
     /**

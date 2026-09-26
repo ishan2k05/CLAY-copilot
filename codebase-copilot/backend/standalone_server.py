@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Codebase Copilot - Zero-Dependency Standalone Server
+CLAY Copilot - Zero-Dependency Standalone Server
 Uses standard Python library (http.server, urllib, sqlite3, ast)
 to provide the full backend API on port 8765 with zero pip installs!
 """
@@ -18,6 +18,12 @@ from app.parser.ast_chunker import PythonASTChunker
 from app.security.secret_masker import SecretMasker
 from app.index.graph_store import SQLiteGraphStore
 from app.agent.patch_engine import PatchEngine
+from app.agent.instruction_parser import (
+    InstructionClassifier,
+    SymbolEntityResolver,
+    AmbiguityDetector,
+    ContextWindowBuilder,
+)
 from app.retrieval.file_resolver import WorkspaceFileResolver
 from app.retrieval.repo_map import RepoMapGenerator
 
@@ -64,6 +70,7 @@ graph_store = SQLiteGraphStore("code_graph.sqlite")
 graph_store._sync_init_db()
 ast_chunker = PythonASTChunker()
 workspace_file_states = {}
+standalone_chat_history = []
 
 def _silent_sync_workspace_sync(workspace_dir: str):
     root = Path(workspace_dir).resolve()
@@ -200,41 +207,86 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             try:
                 import sqlite3
+                from urllib.parse import urlparse, parse_qs
                 from app.main import graph_store, runtime_settings, DEFAULT_WORKSPACE
-                target_path = runtime_settings.get("repo_path") or DEFAULT_WORKSPACE
+                parsed = urlparse(self.path)
+                qs = parse_qs(parsed.query)
+                target_path = qs.get("path", [None])[0] or runtime_settings.get("repo_path") or DEFAULT_WORKSPACE
+                target_file = qs.get("file", [None])[0]
                 target_norm = str(Path(target_path).resolve()).lower()
+                selected_file_norm = target_file.strip().replace("\\", "/").lower() if target_file and target_file.strip() else None
                 diagram_lines = ["graph TD"]
+                seen_edges = set()
+
                 with sqlite3.connect(graph_store.db_path) as db:
-                    cursor = db.execute("SELECT source_symbol, target_symbol, relation_type, file_path FROM relationships LIMIT 30")
+                    if selected_file_norm:
+                        sel_filename = Path(selected_file_norm).name.lower()
+                        cursor = db.execute(
+                            "SELECT source_symbol, target_symbol, relation_type, file_path FROM relationships "
+                            "WHERE LOWER(file_path) LIKE ? OR LOWER(file_path) LIKE ? LIMIT 60",
+                            (f"%{selected_file_norm}%", f"%{sel_filename}%")
+                        )
+                    else:
+                        cursor = db.execute("SELECT source_symbol, target_symbol, relation_type, file_path FROM relationships LIMIT 60")
+
                     for src, tgt, rel, fpath in cursor.fetchall():
                         if fpath:
                             try:
-                                if not str(Path(fpath).resolve()).lower().startswith(target_norm):
+                                resolved_fpath = str(Path(fpath).resolve()).lower()
+                                if not resolved_fpath.startswith(target_norm) and not str(Path(fpath)).lower().startswith(target_norm):
                                     continue
+                                if selected_file_norm:
+                                    fpath_norm = str(Path(fpath)).replace("\\", "/").lower()
+                                    if sel_filename not in fpath_norm and selected_file_norm not in fpath_norm:
+                                        continue
                             except Exception:
                                 pass
                         clean_src = src.split("#")[-1].replace(".", "_")
                         clean_tgt = tgt.split("#")[-1].replace(".", "_")
-                        diagram_lines.append(f"  {clean_src} -->|{rel}| {clean_tgt}")
+                        edge = f"  {clean_src} -->|{rel}| {clean_tgt}"
+                        if edge not in seen_edges:
+                            seen_edges.add(edge)
+                            diagram_lines.append(edge)
 
                     if len(diagram_lines) == 1:
-                        sym_cursor = db.execute("SELECT name, symbol_type, file_path FROM symbols LIMIT 25")
+                        if selected_file_norm:
+                            sym_cursor = db.execute(
+                                "SELECT name, symbol_type, file_path FROM symbols "
+                                "WHERE LOWER(file_path) LIKE ? OR LOWER(file_path) LIKE ? LIMIT 35",
+                                (f"%{selected_file_norm}%", f"%{sel_filename}%")
+                            )
+                        else:
+                            sym_cursor = db.execute("SELECT name, symbol_type, file_path FROM symbols LIMIT 30")
+
                         for sname, stype, sfpath in sym_cursor.fetchall():
                             if sfpath:
                                 try:
-                                    if not str(Path(sfpath).resolve()).lower().startswith(target_norm):
+                                    resolved_sfpath = str(Path(sfpath).resolve()).lower()
+                                    if not resolved_sfpath.startswith(target_norm) and not str(Path(sfpath)).lower().startswith(target_norm):
                                         continue
+                                    if selected_file_norm:
+                                        sfpath_norm = str(Path(sfpath)).replace("\\", "/").lower()
+                                        if sel_filename not in sfpath_norm and selected_file_norm not in sfpath_norm:
+                                            continue
                                 except Exception:
                                     pass
                             clean_name = sname.split("#")[-1].replace(".", "_")
-                            diagram_lines.append(f"  {clean_name}[\"{stype}: {clean_name}\"]")
+                            node_line = f"  {clean_name}[\"{stype}: {clean_name}\"]"
+                            if node_line not in seen_edges:
+                                seen_edges.add(node_line)
+                                diagram_lines.append(node_line)
 
                 if len(diagram_lines) > 1:
-                    data = {"mermaid": "\n".join(diagram_lines), "available": True}
+                    data = {"mermaid": "\n".join(diagram_lines), "available": True, "focused_file": target_file}
                 else:
-                    data = {"mermaid": "", "available": False, "message": "No SQLite code graph available for this repository.\nClick 'Scan & Index Workspace' to analyze codebase structure."}
-            except Exception:
-                data = {"mermaid": "", "available": False, "message": "No SQLite code graph available for this repository.\nClick 'Scan & Index Workspace' to analyze codebase structure."}
+                    msg = (
+                        f"No call relationships or symbols found for '{target_file}'.\nClick 'Scan & Index Workspace' to analyze this file or select another file."
+                        if target_file
+                        else "No SQLite code graph available for this repository.\nClick 'Scan & Index Workspace' to analyze codebase structure."
+                    )
+                    data = {"mermaid": "", "available": False, "message": msg}
+            except Exception as e:
+                data = {"mermaid": "", "available": False, "message": f"Graph query error: {str(e)}"}
             self.wfile.write(json.dumps(data).encode("utf-8"))
 
         elif self.path.startswith("/api/repo/tree"):
@@ -377,20 +429,68 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             
-            # Resolve fresh context directly using WorkspaceFileResolver
+            # Resolve conversation history: prefer request history, fallback to server session
+            req_history = body.get("history")
+            effective_history = []
+            if req_history is not None:
+                effective_history = list(req_history)
+                standalone_chat_history.clear()
+                standalone_chat_history.extend(effective_history)
+            else:
+                effective_history = list(standalone_chat_history)
+
+            # Resolve fresh context directly using WorkspaceFileResolver with multi-turn session awareness
             resolved_chunks = WorkspaceFileResolver.resolve_query_files(
                 query=query,
                 workspace_root=ws_path,
                 context_file=context_file,
-                context_file_content=active_file_content
+                context_file_content=active_file_content,
+                history=effective_history
             )
             if resolved_chunks:
                 code_ctx = "\n\n".join(f"[{c.file_path}]\n{c.content}" for c in resolved_chunks)
             elif active_file_content is not None:
-                code_ctx = active_file_content
+                lines = active_file_content.splitlines()
+                total_lines = len(lines)
+                c_line = body.get("cursor_line")
+                if total_lines <= 600:
+                    numbered_lines = [f"{i+1:3d}: {l}" for i, l in enumerate(lines)]
+                else:
+                    if c_line and 1 <= c_line <= total_lines:
+                        c_idx = c_line - 1
+                        w_start = max(0, c_idx - 250)
+                        w_end = min(total_lines, c_idx + 250)
+                    else:
+                        w_start = 0
+                        w_end = min(total_lines, 500)
+                    numbered_lines = [f"{i+1:3d}: {l}" for i, l in enumerate(lines[w_start:w_end], start=w_start)]
+                code_ctx = (
+                    f"[Active Editor File ({total_lines} lines total, with EXACT 1-Indexed Line Numbers)]\n"
+                    f"[IMPORTANT: Use the exact line numbers shown before the colons. Do NOT make up line numbers.]\n"
+                    + "\n".join(numbered_lines)
+                )
             elif context_file and Path(context_file).exists():
                 if not SecretMasker.is_file_sensitive(context_file):
-                    code_ctx = Path(context_file).read_text(encoding="utf-8", errors="ignore")
+                    file_text = Path(context_file).read_text(encoding="utf-8", errors="ignore")
+                    lines = file_text.splitlines()
+                    total_lines = len(lines)
+                    c_line = body.get("cursor_line")
+                    if total_lines <= 600:
+                        numbered_lines = [f"{i+1:3d}: {l}" for i, l in enumerate(lines)]
+                    else:
+                        if c_line and 1 <= c_line <= total_lines:
+                            c_idx = c_line - 1
+                            w_start = max(0, c_idx - 250)
+                            w_end = min(total_lines, c_idx + 250)
+                        else:
+                            w_start = 0
+                            w_end = min(total_lines, 500)
+                        numbered_lines = [f"{i+1:3d}: {l}" for i, l in enumerate(lines[w_start:w_end], start=w_start)]
+                    code_ctx = (
+                        f"[{Path(context_file).name} ({total_lines} lines total, with EXACT 1-Indexed Line Numbers)]\n"
+                        f"[IMPORTANT: Use the exact line numbers shown before the colons. Do NOT make up line numbers.]\n"
+                        + "\n".join(numbered_lines)
+                    )
             else:
                 code_ctx = ""
 
@@ -422,20 +522,43 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             is_win = platform.system().lower() == "windows"
             host_os = "Windows" if is_win else "Linux"
             system_instruction = (
-                f"You are CLAY, an elite autonomous repository intelligence and coding agent. The host operating system is {host_os}. "
+                f"You are CLAY Copilot, an elite autonomous repository intelligence engine and proactive AI coding partner. The host operating system is {host_os}. "
                 f"Adjust all terminal/bash commands and file paths specifically for {host_os}. "
                 + ("On Windows, always use 'python' (never 'python3'), PowerShell/CMD syntax (e.g. 'dir', 'python -m pytest', '.\\venv\\Scripts\\activate'). Never recommend 'source' or 'sudo' or 'python3'." if is_win else "On Linux, use standard bash syntax, 'python3', 'source venv/bin/activate', 'ls -la'.")
-                + " When asked to write, implement, create, or refactor code (e.g. DSA, algorithms, modules): ALWAYS generate the complete working code or unified diff. If a target file is empty or new, populate it from scratch. NEVER refuse a request because a file is empty or missing. Never output emojis. Provide architectural analysis and clean diffs."
-                + " When outputting comparison, component, or file breakdown data, format them using standard markdown tables (| Column 1 | Column 2 |) — the client UI features a built-in renderer that renders them as interactive, styled tables. For section headers, use clean markdown headings (## or ###) without hashtag clutter."
+                + " PERSONA & TONE: For conversational greetings and interactive messages ('hello', 'hi', status checks), be warm, welcoming, intelligent, and collaborative—acknowledge the active workspace context or open files and offer concrete ways you can assist, never giving cold robotic one-word replies like 'Hello.' For technical and coding requests, maintain a direct, rigorous, and razor-sharp technical voice without filler or platitudes (begin directly with the [plan] or summary, followed by the code block or diff). STRICT ZERO EMOJIS: Never output emojis under any circumstances. "
+                + "CLAY ECOSYSTEM CAPABILITIES: You have 4 unified workspaces: 1) Chat (conversational intelligence, explanation, on-demand interactive SVG diagram generation with 30%-500% zoom and Fit to Window), 2) Agent (autonomous multi-step task execution, terminal testing, surgical AST patches, self-healing error repair loop), 3) Diff (split/unified diff viewer, line editing, 1-click patch application), 4) Repo (AST symbol map, dependency graph, real-time indexer). "
+                + "SECURITY & PRIVACY BOUNDARIES: You operate under strict workspace sandboxing, Zero-Leak Privacy secret masking, and prompt injection defense boundaries. "
+                + "STRUCTURED RESPONSE ORDER & [plan] SCOPE: The '[plan]' prefix is EXCLUSIVELY reserved for actionable code modification requests that produce a diff or code patch. NEVER use '[plan]' when generating diagrams, answering architectural questions, summarizing repositories, or greeting the user. "
+                + "When asked to write, implement, create, or refactor code: ALWAYS generate complete working code or surgical updates using standard SEARCH/REPLACE blocks or unified diffs with exact 1-indexed line headers. Include 2-3 lines of unchanged context above and below the change. NEVER hallucinate line numbers. Preserve exact leading indentation. "
+                + "Never emit placeholder comments like '// ... rest of code unchanged ...'. When adjusting game mechanics, timing, or loops (e.g. speed, delay, fps, timeout), identify the exact parameter and update it cleanly. "
+                + "NEVER escape quotes as \\\"\\\"\\\" inside code blocks. If a target file is empty or new, populate it from scratch. NEVER refuse a request because a file is empty or missing. "
+                + "When outputting comparison, component, or file breakdown data, format them using standard markdown tables (| Column 1 | Column 2 |). For section headers, use clean markdown headings (## or ###) without hashtag clutter. "
+                + "STRICT ON-DEMAND DIAGRAM POLICY & PUBLISHING-GRADE FIDELITY: "
+                + "ZERO UNSOLICITED DIAGRAMS: You must NEVER generate or emit a Mermaid diagram (```mermaid) unprompted unless the user explicitly asks for a diagram, flowchart, sequence diagram, or visual architecture graph in their prompt. "
+                + "MULTI-TURN AFFIRMATIVE RESPONSES & SESSION AWARENESS: Maintain strict conversational session awareness across turns. When you previously suggested or offered a diagram in your prior message (e.g. '(Tip: If you would like a visual flowchart of this workflow, just ask!)'), and the user responds affirmatively (e.g. 'yes', 'sure', 'yeah', 'please', 'show me', 'do it', 'draw it', 'ok', 'yes give me flowchart'), you MUST understand that the user is confirming your diagram offer! Immediately generate the requested diagram block visualizing the components discussed. Do NOT greet the user again or treat short confirmations as a blank greeting. "
+                + "STRICT CODE FIDELITY & ANTI-HALLUCINATION: When generating diagrams for code files (such as test1.py, test2.py, or any workspace module), you MUST strictly use the actual functions, classes, methods, and call flows present in context. NEVER hallucinate generic placeholder functions or dummy names like 'step_one()', 'step_two()', 'step_three()', 'foo()', or 'bar()'. Every node must represent real code from the file. "
+                + "ALLOWED DIAGRAM TYPES: Restrict diagrams to relevant software engineering formats: Architecture Flowcharts ('graph TD' or 'flowchart LR'), Class Architecture Diagrams ('classDiagram'), and Sequence Diagrams ('sequenceDiagram'). ZERO GANTT CHARTS FOR CODE: Never suggest or generate Gantt charts for code files or test scripts. "
+                + "When explaining repository modules or workflows WITHOUT an explicit diagram request: explain purely through concise technical text, bullet points, and markdown tables. At the end of your explanation or summary, you may add a brief 1-line note: '(Tip: If you would like a visual flowchart of this workflow, just ask!)'. Under NO circumstances generate a diagram unprompted."
             )
             active_model = runtime_settings.get("model", OLLAMA_MODEL)
             active_host = runtime_settings.get("host", OLLAMA_URL)
+
+            messages = [{"role": "system", "content": system_instruction}]
+            if effective_history:
+                for turn in effective_history[-10:]:
+                    r = turn.get("role", "user")
+                    c = turn.get("content", "")
+                    if c and r in ("user", "assistant"):
+                        m_c = SecretMasker.mask_text(c, enabled=runtime_settings.get("privacy_filter", True))
+                        if len(m_c) > 2000:
+                            m_c = m_c[:2000] + "..."
+                        messages.append({"role": r, "content": m_c})
+
+            messages.append({"role": "user", "content": f"Context:\n{sanitized_ctx}\n\nTask: {sanitized_query}"})
+
             ollama_payload = json.dumps({
                 "model": active_model,
-                "messages": [
-                    {"role": "system", "content": system_instruction},
-                    {"role": "user", "content": f"Context:\n{sanitized_ctx}\n\nTask: {sanitized_query}"}
-                ],
+                "messages": messages,
                 "stream": True,
                 "options": {
                     "temperature": float(body.get("temperature", runtime_settings.get("temperature", 0.2))),
@@ -450,6 +573,7 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                 headers={"Content-Type": "application/json"}
             )
 
+            accumulated_tokens = []
             try:
                 with urllib.request.urlopen(req, timeout=120.0) as resp:
                     for line in resp:
@@ -458,7 +582,9 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                                 chunk = json.loads(line.decode("utf-8"))
                                 token = chunk.get("message", {}).get("content", "")
                                 if token:
-                                    sse = f"data: {json.dumps({'token': token})}\n\n"
+                                    clean_tok = token.replace(r'\"\"\"', '"""').replace(r"\'\'\'", "'''")
+                                    accumulated_tokens.append(clean_tok)
+                                    sse = f"data: {json.dumps({'token': clean_tok})}\n\n"
                                     self.wfile.write(sse.encode("utf-8"))
                                     self.wfile.flush()
                             except Exception:
@@ -467,8 +593,24 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                 err_sse = f"data: {json.dumps({'token': f'\\n⚠️ [Ollama Notice: {str(e)} - Ensure ollama serve is active]' })}\n\n"
                 self.wfile.write(err_sse.encode("utf-8"))
 
+            # Update session history with completed turn
+            full_reply = "".join(accumulated_tokens)
+            if query and full_reply:
+                standalone_chat_history.append({"role": "user", "content": query})
+                standalone_chat_history.append({"role": "assistant", "content": full_reply})
+                if len(standalone_chat_history) > 20:
+                    standalone_chat_history[:] = standalone_chat_history[-20:]
+
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
+
+        elif self.path == "/api/chat/clear":
+            standalone_chat_history.clear()
+            self.send_response(200)
+            self._set_cors_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "cleared", "message": "Chat context reset successfully."}).encode("utf-8"))
 
         elif self.path == "/api/index/scan":
             root_dir = body.get("workspace_path", ".")
@@ -566,7 +708,7 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(resp_data).encode("utf-8"))
 
         elif self.path == "/api/settings":
-            for k in ["model", "connection_type", "host", "api_key", "temperature", "num_ctx", "num_predict", "privacy_filter", "exclusion_patterns", "security_mode", "allow_network", "repo_path"]:
+            for k in ["model", "connection_type", "host", "api_key", "temperature", "num_ctx", "num_predict", "privacy_filter", "exclusion_patterns", "security_mode", "allow_network", "repo_path", "theme_mode"]:
                 if k in body and body[k] is not None:
                     runtime_settings[k] = body[k]
             if "model" in body and body["model"]:
@@ -670,6 +812,104 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(result).encode("utf-8"))
 
+        elif self.path == "/api/agent/compute-diff":
+            file_path = body.get("target_file", "")
+            code_snippet = body.get("code_or_snippet", "")
+            ws_path = body.get("workspace_path") or runtime_settings.get("repo_path", ".")
+            target_path = PatchEngine.resolve_target_path(file_path, str(ws_path))
+            orig_lines = []
+            if target_path.exists() and target_path.is_file():
+                try:
+                    orig_lines = target_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+                except Exception:
+                    orig_lines = []
+
+            pref_line = body.get("preferred_line") or body.get("cursor_line")
+            diff_text = PatchEngine.build_surgical_diff(orig_lines, code_snippet, target_path.name, preferred_line=pref_line)
+            is_valid, final_diff, err = PatchEngine.validate_and_heal_diff(orig_lines, diff_text, target_path.name)
+            hunks = PatchEngine.split_into_hunks(final_diff)
+            staged_files = PatchEngine.split_multi_file_diff(final_diff)
+            res = {
+                "status": "success",
+                "target_file": target_path.name,
+                "diff": final_diff,
+                "hunks": hunks,
+                "staged_files": staged_files,
+                "valid": is_valid,
+                "error": err
+            }
+            self.send_response(200)
+            self._set_cors_headers()
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
+        elif self.path == "/api/agent/parse-instruction":
+            goal = body.get("goal", "")
+            ws_path = body.get("workspace_path") or runtime_settings.get("repo_path", ".")
+            intent_info = InstructionClassifier.classify(goal)
+            accessible = WorkspaceFileResolver.list_accessible_files(ws_path)
+            target_files = SymbolEntityResolver.resolve_target_files(goal, ws_path, accessible)
+            ambiguity = AmbiguityDetector.check_ambiguity(goal, target_files)
+            change_specs = SymbolEntityResolver.extract_change_specs(goal)
+
+            target_symbols = []
+            if target_files:
+                primary_path = accessible.get(target_files[0]) or (Path(ws_path) / target_files[0])
+                if primary_path.exists() and primary_path.is_file():
+                    try:
+                        content = primary_path.read_text(encoding="utf-8", errors="ignore")
+                        target_symbols = SymbolEntityResolver.resolve_target_symbols(goal, content)
+                    except Exception:
+                        pass
+
+            res = {
+                "goal": goal,
+                "intent": intent_info,
+                "target_files": target_files,
+                "target_symbols": target_symbols,
+                "change_specs": change_specs,
+                "ambiguity": ambiguity
+            }
+            self.send_response(200)
+            self._set_cors_headers()
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
+        elif self.path == "/api/agent/discard-hunk":
+            file_path = body.get("file_path", "")
+            diff_text = body.get("diff", "")
+            hunk_index = body.get("hunk_index", 0)
+            ws_path = body.get("workspace_path") or runtime_settings.get("repo_path", ".")
+            target_path = PatchEngine.resolve_target_path(file_path, str(ws_path))
+            orig_lines = []
+            if target_path.exists() and target_path.is_file():
+                try:
+                    orig_lines = target_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+                except Exception:
+                    orig_lines = []
+
+            new_diff = PatchEngine.discard_hunk(orig_lines, diff_text, hunk_index, target_path.name)
+            hunks = PatchEngine.split_into_hunks(new_diff)
+            res = {
+                "status": "success",
+                "file_path": target_path.name,
+                "diff": new_diff,
+                "hunks": hunks
+            }
+            self.send_response(200)
+            self._set_cors_headers()
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
+        elif self.path == "/api/agent/intra-diff":
+            old_line = body.get("old_line", "")
+            new_line = body.get("new_line", "")
+            res = PatchEngine.compute_intra_line_diff(old_line, new_line)
+            self.send_response(200)
+            self._set_cors_headers()
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
         elif self.path == "/api/agent/step":
             step_id = body.get("step_id", 1)
             goal = body.get("goal", "")
@@ -679,29 +919,76 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+            target_file_param = body.get("target_file")
+
             if step_id == 1:
+                intent_info = InstructionClassifier.classify(goal)
+                accessible = WorkspaceFileResolver.list_accessible_files(ws_path)
+                target_files = SymbolEntityResolver.resolve_target_files(goal, ws_path, accessible)
+                ambiguity = AmbiguityDetector.check_ambiguity(goal, target_files)
+                change_specs = SymbolEntityResolver.extract_change_specs(goal)
+
                 direct_files = WorkspaceFileResolver.resolve_query_files(goal, ws_path)
-                files_found = list({Path(c.file_path).name for c in direct_files})
-                msg = f"Analyzed AST symbols. Correlated files: {', '.join(files_found) if files_found else 'root workspace'}"
-                res = {"step_id": 1, "status": "done", "log": msg}
+                all_found = list({Path(c.file_path).name for c in direct_files})
+                for tf in target_files:
+                    all_found.append(Path(tf).name)
+                files_found = list(dict.fromkeys(all_found))
+
+                is_ambiguous = bool(ambiguity and ambiguity.get("detected") and len(ambiguity.get("candidates", [])) > 1)
+                msg = f"Intent: {intent_info.get('intent', 'EDIT_EXISTING')}. Correlated files: {', '.join(files_found) if files_found else 'root workspace'}"
+                if is_ambiguous:
+                    msg += f" (Ambiguity detected: {', '.join(ambiguity['candidates'])})"
+                res = {
+                    "step_id": 1,
+                    "status": "ambiguous" if is_ambiguous else "done",
+                    "intent": intent_info,
+                    "target_files": target_files,
+                    "ambiguity": ambiguity,
+                    "change_specs": change_specs,
+                    "log": msg
+                }
 
             elif step_id == 2:
-                direct_files = WorkspaceFileResolver.resolve_query_files(goal, ws_path)
-                all_accessible = WorkspaceFileResolver.list_accessible_files(ws_path)
+                accessible = WorkspaceFileResolver.list_accessible_files(ws_path)
+                target_files = SymbolEntityResolver.resolve_target_files(goal, ws_path, accessible)
+                ambiguity = AmbiguityDetector.check_ambiguity(goal, target_files)
+                change_specs = SymbolEntityResolver.extract_change_specs(goal)
+
                 target_filename = None
                 target_path_obj = None
 
-                if direct_files:
-                    target_path_obj = Path(direct_files[0].file_path)
-                    target_filename = target_path_obj.name
-                elif all_accessible:
-                    py_files = [p for p in all_accessible.values() if p.suffix == ".py"]
-                    if py_files:
-                        target_path_obj = py_files[0]
+                if target_file_param:
+                    tf_clean = target_file_param.strip()
+                    if tf_clean in accessible:
+                        target_path_obj = accessible[tf_clean]
+                        target_filename = target_path_obj.name
+                    elif (Path(ws_path) / tf_clean).exists():
+                        target_path_obj = Path(ws_path) / tf_clean
                         target_filename = target_path_obj.name
                     else:
-                        target_path_obj = list(all_accessible.values())[0]
+                        for k, p in accessible.items():
+                            if p.name.lower() == tf_clean.lower() or k.lower() == tf_clean.lower():
+                                target_path_obj = p
+                                target_filename = p.name
+                                break
+
+                if not target_path_obj:
+                    if target_files:
+                        target_path_obj = accessible.get(target_files[0]) or (Path(ws_path) / target_files[0])
                         target_filename = target_path_obj.name
+                    else:
+                        direct_files = WorkspaceFileResolver.resolve_query_files(goal, ws_path)
+                        if direct_files:
+                            target_path_obj = Path(direct_files[0].file_path)
+                            target_filename = target_path_obj.name
+                        elif accessible:
+                            py_files = [p for p in accessible.values() if p.suffix == ".py"]
+                        if py_files:
+                            target_path_obj = py_files[0]
+                            target_filename = target_path_obj.name
+                        else:
+                            target_path_obj = list(accessible.values())[0]
+                            target_filename = target_path_obj.name
 
                 if not target_filename:
                     for w in goal.split():
@@ -712,19 +999,64 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                     if not target_filename:
                         target_filename = "test_c.py" if (Path(ws_path) / "test_c.py").exists() else "main.py"
 
-                code_ctx = ""
-                if target_path_obj and target_path_obj.exists():
+                orig_lines = []
+                raw_file_content = ""
+                file_content_context = ""
+                target_symbols = []
+                preferred_line = body.get("cursor_line")
+                if target_path_obj and target_path_obj.exists() and target_path_obj.is_file():
                     try:
-                        code_ctx = target_path_obj.read_text(encoding="utf-8", errors="ignore")
+                        raw_file_content = target_path_obj.read_text(encoding="utf-8", errors="ignore")
+                        orig_lines = raw_file_content.splitlines()
+                        target_symbols = SymbolEntityResolver.resolve_target_symbols(goal, raw_file_content)
+                        if preferred_line is None:
+                            sym_positions = SymbolEntityResolver.resolve_target_symbols_with_positions(goal, raw_file_content)
+                            if sym_positions:
+                                preferred_line = sym_positions[0]["lineno"]
+
+                        file_content_context, _ = ContextWindowBuilder.build_ast_skeleton_context(
+                            raw_file_content,
+                            target_filename,
+                            target_symbols=target_symbols,
+                            preferred_line=preferred_line
+                        )
                     except Exception:
-                        code_ctx = ""
+                        orig_lines = []
+
+                specs_info = ""
+                if change_specs:
+                    specs_info += f"Identified Change Targets: {json.dumps(change_specs)}\n"
+                if target_symbols:
+                    specs_info += f"Identified Target Symbols: {', '.join(target_symbols)}\n"
+                if preferred_line:
+                    specs_info += f"Target Code Region Focus: around line {preferred_line}\n"
 
                 prompt = (
                     f"Goal: {goal}\n"
-                    f"Target File: {target_filename}\n\n"
+                    f"Target File: {target_filename}\n"
+                    f"{specs_info}"
+                    f"{file_content_context}\n"
                     f"You are implementing the code solution for '{target_filename}' to achieve: {goal}\n"
-                    f"Write the complete, runnable Python code or standard unified diff for '{target_filename}'.\n"
-                    "Format your output inside a ```diff code block or ```python code block.\n"
+                    "CRITICAL INSTRUCTIONS FOR MINIMAL/SURGICAL CHANGES:\n"
+                    f"- If '{target_filename}' exists, make ONLY the minimal changes required to achieve the goal.\n"
+                    "- Do NOT rewrite unchanged code or delete the whole file.\n"
+                    "- Output your solution in ONE of these formats:\n"
+                    "  Format A (SEARCH/REPLACE block - recommended for 1-5 line edits):\n"
+                    "  <<<<<<< SEARCH\n"
+                    "  <exact existing lines to replace>\n"
+                    "  =======\n"
+                    "  <new replacement lines>\n"
+                    "  >>>>>>> REPLACE\n\n"
+                    "  Format B (Standard Unified Diff with EXACT line numbers from context above):\n"
+                    "  ```diff\n"
+                    "  @@ -line,count +line,count @@\n"
+                    "  -old line\n"
+                    "  +new line\n"
+                    "  ```\n\n"
+                    "  Format C (Updated function or variable assignment in python block):\n"
+                    "  ```python\n"
+                    "  <the updated function or statement>\n"
+                    "  ```\n\n"
                     f"If '{target_filename}' is empty or new, write the full, working implementation from scratch.\n"
                     "Do NOT refuse. Do NOT output conversational meta-text or emojis. Output the code block directly."
                 )
@@ -736,8 +1068,8 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                     payload = json.dumps({
                         "model": active_model,
                         "messages": [
-                            {"role": "system", "content": "You are CLAY, an autonomous code synthesis engine. Provide complete working implementations or unified diffs."},
-                            {"role": "user", "content": f"Context:\n{code_ctx}\n\n{prompt}"}
+                            {"role": "system", "content": "You are CLAY, an autonomous code synthesis engine. Provide minimal, surgical changes using SEARCH/REPLACE blocks or unified diffs."},
+                            {"role": "user", "content": prompt}
                         ],
                         "stream": False,
                         "options": {
@@ -753,58 +1085,30 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                 except Exception as e:
                     generated = f"// Error connecting to {active_model}: {str(e)}"
 
-                diff_text = ""
-                diff_match = re.search(r"```(?:diff|patch)?\s*\n([\s\S]*?@@[\s\S]*?)```", generated, re.IGNORECASE)
-                if diff_match:
-                    diff_text = diff_match.group(1).strip()
-                else:
-                    raw_diff = re.search(r"(--- (?:a\/|\/dev\/null)[^\n]+\n\+\+\+ (?:b\/|[^\n]+)[^\n]*\n@@[\s\S]*?)(?:```|$)", generated)
-                    if raw_diff:
-                        diff_text = raw_diff.group(1).strip()
+                # Build surgical minimal diff using multi-strategy builder (eliminates full-file wipes and line desync)
+                diff_text = PatchEngine.build_surgical_diff(orig_lines, generated, target_filename, preferred_line=preferred_line)
 
-                if not diff_text:
-                    code_body = None
-                    code_block_match = re.search(r"```(?:python|py|python3|code)?\s*\n([\s\S]*?)```", generated, re.IGNORECASE)
-                    if code_block_match:
-                        code_body = code_block_match.group(1).strip()
-                    elif not generated.strip().startswith("I'm unable") and not generated.strip().startswith("I cannot"):
-                        raw_code = generated.strip()
-                        if raw_code.startswith(("def ", "class ", "import ", "from ", "#!", "async def ", '"""', "'''")):
-                            code_body = raw_code
+                # Pre-staging AST syntax validation & automated self-healing
+                is_valid, final_diff, err_msg = PatchEngine.validate_and_heal_diff(orig_lines, diff_text, target_filename)
 
-                    if code_body:
-                        orig_lines = []
-                        if target_path_obj and target_path_obj.exists() and target_path_obj.is_file():
-                            try:
-                                orig_lines = target_path_obj.read_text(encoding="utf-8", errors="ignore").splitlines()
-                            except Exception:
-                                orig_lines = []
-                        code_lines = code_body.splitlines()
-                        if not orig_lines or not any(l.strip() for l in orig_lines):
-                            diff_text = (
-                                f"--- /dev/null\n+++ b/{target_filename}\n"
-                                f"@@ -0,0 +1,{max(1, len(code_lines))} @@\n"
-                                + "\n".join(f"+{line}" for line in code_lines)
-                            )
-                        else:
-                            diff_text = (
-                                f"--- a/{target_filename}\n+++ b/{target_filename}\n"
-                                f"@@ -1,{len(orig_lines)} +1,{max(1, len(code_lines))} @@\n"
-                                + "\n".join(f"-{line}" for line in orig_lines) + "\n"
-                                + "\n".join(f"+{line}" for line in code_lines)
-                            )
-
-                if diff_text:
-                    header_match = re.search(r"\+\+\+\s+(?:b/)?([^\s\n\r]+)", diff_text)
+                # Extract filename from diff header if present
+                if final_diff:
+                    header_match = re.search(r"\+\+\+\s+(?:b/)?([^\s\n\r]+)", final_diff)
                     if header_match and header_match.group(1) != "/dev/null":
                         target_filename = Path(header_match.group(1)).name
 
-                log_msg = f"Synthesized solution for {target_filename}." if diff_text else f"Generated response for {target_filename}."
+                hunks = PatchEngine.split_into_hunks(final_diff)
+                staged_files = PatchEngine.split_multi_file_diff(final_diff)
+
+                log_msg = f"Synthesized surgical solution for {target_filename}." if final_diff else f"Generated response for {target_filename}."
                 res = {
                     "step_id": 2,
                     "status": "done",
                     "target_file": target_filename,
-                    "diff": diff_text,
+                    "diff": final_diff,
+                    "hunks": hunks,
+                    "staged_files": staged_files,
+                    "valid": is_valid,
                     "generated": generated,
                     "log": log_msg
                 }
@@ -813,7 +1117,7 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                 res = {
                     "step_id": 3,
                     "status": "done",
-                    "log": "Syntax and AST verification passed. Changes ready for inspection in Diff tab."
+                    "log": "Syntax and AST verification passed. Clean surgical changes ready for inspection in Diff tab."
                 }
             else:
                 res = {"status": "error", "message": "Unknown step"}
@@ -837,11 +1141,11 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         # Concise logging
-        sys.stderr.write(f"[Copilot Backend] {self.address_string()} - {format % args}\n")
+        sys.stderr.write(f"[CLAY Copilot Backend] {self.address_string()} - {format % args}\n")
 
 def run():
     server = HTTPServer(("127.0.0.1", PORT), CopilotRequestHandler)
-    print(f"✓ Codebase Copilot Standalone Server running on http://127.0.0.1:{PORT}")
+    print(f"✓ CLAY Copilot Standalone Server running on http://127.0.0.1:{PORT}")
     print(f"✓ Model target: {OLLAMA_MODEL} (Zero external pip dependencies required)")
     try:
         server.serve_forever()

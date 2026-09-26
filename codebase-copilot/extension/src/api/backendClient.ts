@@ -135,7 +135,9 @@ export class BackendClient {
         securityMode?: string,
         activeFileContent?: string,
         openFiles?: Array<{ path: string; content: string; is_dirty?: boolean }>,
-        inferenceOptions?: { temperature?: number; num_ctx?: number; num_predict?: number }
+        inferenceOptions?: { temperature?: number; num_ctx?: number; num_predict?: number },
+        cursorLine?: number,
+        history?: Array<{ role: string; content: string }>
     ): Promise<void> {
         if (this.activeChatAbortController) {
             try { this.activeChatAbortController.abort(); } catch {}
@@ -155,8 +157,12 @@ export class BackendClient {
                 active_file_content: activeFileContent,
                 open_files: openFiles,
                 workspace_path: workspaceFolder,
+                cursor_line: cursorLine,
                 stream: true
             };
+            if (history && history.length > 0) {
+                payload.history = history;
+            }
             if (securityMode) {
                 payload.security_mode = securityMode;
             }
@@ -233,7 +239,7 @@ export class BackendClient {
             if (signal.aborted || err.name === 'AbortError') {
                 return;
             }
-            onError(err.message || 'Failed to connect to Codebase Copilot backend.');
+            onError(err.message || 'Failed to connect to CLAY Copilot backend.');
         } finally {
             if (this.activeChatAbortController === abortCtrl) {
                 this.activeChatAbortController = null;
@@ -253,11 +259,13 @@ export class BackendClient {
         return await response.json() as IndexStatus;
     }
 
-    async getMermaidGraph(workspacePath?: string): Promise<string> {
+    async getMermaidGraph(workspacePath?: string, filePath?: string): Promise<string> {
         try {
-            const url = workspacePath
-                ? `${this.backendUrl}/api/graph/mermaid?path=${encodeURIComponent(workspacePath)}`
-                : `${this.backendUrl}/api/graph/mermaid`;
+            const params = new URLSearchParams();
+            if (workspacePath) params.set('path', workspacePath);
+            if (filePath) params.set('file', filePath);
+            const qs = params.toString();
+            const url = qs ? `${this.backendUrl}/api/graph/mermaid?${qs}` : `${this.backendUrl}/api/graph/mermaid`;
             const res = await fetch(url);
             if (res.ok) {
                 const data = await res.json() as any;
@@ -381,7 +389,7 @@ export class BackendClient {
         return { os: process.platform === 'win32' ? 'windows' : 'linux', is_windows: process.platform === 'win32', shell: 'bash' };
     }
 
-    async executeAgentStep(stepId: number, goal: string, workspacePath?: string): Promise<any> {
+    async executeAgentStep(stepId: number, goal: string, workspacePath?: string, activeFile?: string, cursorLine?: number, targetFile?: string): Promise<any> {
         try {
             const res = await fetch(`${this.backendUrl}/api/agent/step`, {
                 method: 'POST',
@@ -389,7 +397,10 @@ export class BackendClient {
                 body: JSON.stringify({
                     step_id: stepId,
                     goal,
-                    workspace_path: workspacePath
+                    workspace_path: workspacePath,
+                    active_file: activeFile,
+                    cursor_line: cursorLine,
+                    target_file: targetFile
                 })
             });
             if (res.ok) return await res.json();

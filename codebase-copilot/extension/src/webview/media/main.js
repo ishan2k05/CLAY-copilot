@@ -1,5 +1,5 @@
 /**
- * Codebase Copilot: Unified Webview Controller
+ * CLAY Copilot: Unified Webview Controller
  * Powers both the VS Code Webview Provider and Standalone Browser Preview.
  */
 (function () {
@@ -32,6 +32,7 @@
   let currentPrivacyPatterns = localStorage.getItem('clay_privacy_patterns') || '.env, *.pem, credentials.json, id_rsa, *.key';
   let currentRepoPath = savedRepoPath || '';
   let stagedDiffData = null;
+  let stagedDiffIsEdited = false;
   let isAgentRunning = false;
   let lastUserQuery = '';
   const CLAY_ICON_SVG = '<svg viewBox="0 0 512 512" class="clay-cube-icon" shape-rendering="crispEdges"><g transform="translate(64, 148) scale(24)"><rect x="1" y="1" width="2" height="1" fill="#C15C3D"/><rect x="2" y="2" width="2" height="1" fill="#C15C3D"/><rect x="3" y="3" width="2" height="1" fill="#C15C3D"/><rect x="4" y="4" width="2" height="1" fill="#C15C3D"/><rect x="5" y="5" width="2" height="1" fill="#C15C3D"/><rect x="4" y="6" width="2" height="1" fill="#C15C3D"/><rect x="3" y="7" width="2" height="1" fill="#C15C3D"/><rect x="2" y="8" width="2" height="1" fill="#C15C3D"/><rect x="1" y="9" width="2" height="1" fill="#C15C3D"/><rect x="8" y="8" width="6" height="2" fill="#C15C3D"/></g></svg>';
@@ -39,6 +40,7 @@
   // Active repository files registry for real-time diff mapping
   let currentRepoFilesList = [];
   let activeEditorFile = '';
+  let activeEditorCursorLine = null;
 
   function extractDiffFilename(diffText) {
     if (!diffText) return null;
@@ -50,6 +52,16 @@
     const minusMatch = diffText.match(/---\s+(?:a\/)?([^\s\n\r]+)/);
     if (minusMatch && minusMatch[1] && minusMatch[1] !== '/dev/null') {
       const parts = minusMatch[1].split(/[\\/]/);
+      return parts[parts.length - 1];
+    }
+    const srMatch = diffText.match(/<{4,}\s*SEARCH(?::|\s+in|\s+for)?\s+([^\s\n\r]+)/i);
+    if (srMatch && srMatch[1]) {
+      const parts = srMatch[1].split(/[\\/]/);
+      return parts[parts.length - 1];
+    }
+    const fileCommentMatch = diffText.match(/^(?:#|\/\/|\/\*)\s*([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+)/m);
+    if (fileCommentMatch && fileCommentMatch[1]) {
+      const parts = fileCommentMatch[1].split(/[\\/]/);
       return parts[parts.length - 1];
     }
     return null;
@@ -155,6 +167,11 @@
   // 1. Tab Switching
   // ==========================================
   function switchTab(target) {
+    if (!views[target]) return;
+    try {
+      localStorage.setItem('clay_active_tab', target);
+    } catch (e) {}
+
     navTabs.forEach((t) => t.classList.remove('active-tab'));
     const activeTabBtn = document.querySelector(`.nav-tab[data-target="${target}"]`);
     if (activeTabBtn) activeTabBtn.classList.add('active-tab');
@@ -188,6 +205,14 @@
       switchTab(target);
     });
   });
+
+  // Restore last active tab on load
+  try {
+    const savedActiveTab = localStorage.getItem('clay_active_tab');
+    if (savedActiveTab && views[savedActiveTab] && savedActiveTab !== 'chat') {
+      switchTab(savedActiveTab);
+    }
+  } catch (e) {}
 
   // ==========================================
   // 2. Settings: Reference-Styled Architecture & OS Detection
@@ -241,6 +266,61 @@
   if (privacyPatterns) {
     privacyPatterns.value = currentPrivacyPatterns;
   }
+
+  // 0. Theme & IDE Bindings (CLAY Palette vs. VS Code Native Tokens)
+  let currentThemeMode = localStorage.getItem('clay_theme_mode') || 'claude';
+  const themeCards = document.querySelectorAll('.theme-binding-card');
+  const chkVscodeNativeTheme = document.getElementById('chk-vscode-native-theme');
+
+  function applyThemeMode(mode, showFeedback = true) {
+    currentThemeMode = mode;
+    try {
+      localStorage.setItem('clay_theme_mode', mode);
+    } catch (e) { }
+
+    const isNative = mode === 'vscode';
+    if (isNative) {
+      document.body.classList.add('vscode-native');
+    } else {
+      document.body.classList.remove('vscode-native');
+    }
+
+    if (chkVscodeNativeTheme) {
+      chkVscodeNativeTheme.checked = isNative;
+    }
+
+    themeCards.forEach((c) => {
+      if (c.getAttribute('data-theme') === mode) {
+        c.classList.add('active');
+      } else {
+        c.classList.remove('active');
+      }
+    });
+
+    if (showFeedback) {
+      if (isNative) {
+        showToast('VS Code Native Theme Bindings enabled: Adopting IDE editor tokens', 'info');
+      } else {
+        showToast('CLAY Palette active: Using custom Claude warm minimalist tones', 'info');
+      }
+    }
+  }
+
+  themeCards.forEach((card) => {
+    card.addEventListener('click', () => {
+      const mode = card.getAttribute('data-theme') || 'claude';
+      applyThemeMode(mode, true);
+    });
+  });
+
+  if (chkVscodeNativeTheme) {
+    chkVscodeNativeTheme.addEventListener('change', (e) => {
+      applyThemeMode(e.target.checked ? 'vscode' : 'claude', true);
+    });
+  }
+
+  // Apply saved theme mode immediately on initialization
+  applyThemeMode(currentThemeMode, false);
 
   // 1. 3-Card Security Mode Grid
   const securityCards = document.querySelectorAll('.security-mode-card');
@@ -614,7 +694,8 @@
         privacy_filter: privacyCheck ? privacyCheck.checked : true,
         exclusion_patterns: privacyPatterns ? privacyPatterns.value.trim() : '.env, *.pem, credentials.json, id_rsa, *.key',
         security_mode: currentSecurityMode,
-        allow_network: currentAllowNetwork
+        allow_network: currentAllowNetwork,
+        theme_mode: currentThemeMode
       };
 
       // Persist to local storage immediately
@@ -632,6 +713,7 @@
       if (payload.host) localStorage.setItem('clay_host', payload.host);
       if (payload.connection_type) localStorage.setItem('clay_connection_type', payload.connection_type);
       if (payload.api_key !== undefined) localStorage.setItem('clay_api_key', payload.api_key);
+      localStorage.setItem('clay_theme_mode', currentThemeMode);
 
       btnSaveSettings.textContent = 'Settings Saved!';
       setTimeout(() => (btnSaveSettings.textContent = 'Save All Settings'), 2000);
@@ -743,6 +825,19 @@
   const btnChatJumpDown = document.getElementById('btn-chat-jump-down');
   const btnClearChat = document.getElementById('btn-clear-chat');
   let currentAssistantTextEl = null;
+  let chatSessionHistory = [];
+  try {
+    const savedChat = sessionStorage.getItem('clay_chat_session_history');
+    if (savedChat) {
+      chatSessionHistory = JSON.parse(savedChat);
+    }
+  } catch {}
+
+  function saveChatSessionHistory() {
+    try {
+      sessionStorage.setItem('clay_chat_session_history', JSON.stringify(chatSessionHistory));
+    } catch {}
+  }
 
   function updateAssistantCursorStates(activeCard = null, isProcessing = false) {
     if (!messageList) return;
@@ -892,10 +987,13 @@
       localStorage.setItem('codebase_copilot_repo_path', currentRepoPath);
     }
 
+    const historyPayload = chatSessionHistory.slice(-10);
+
     if (isVsCode) {
       vscode.postMessage({
         command: 'userQuery',
         text,
+        history: historyPayload,
         workspace_path: currentRepoPath,
         security_mode: currentSecurityMode,
         temperature: currentTemperature,
@@ -911,6 +1009,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             query: text,
+            history: historyPayload,
             workspace_path: currentRepoPath,
             security_mode: currentSecurityMode,
             temperature: currentTemperature,
@@ -1006,7 +1105,7 @@
       const dynamicItems = messageList.querySelectorAll('.user-bubble, .assistant-card, .chat-agent-action');
       dynamicItems.forEach((el) => el.remove());
 
-      // Restore holder screen ("CLAY Intelligence Engine" empty state card)
+      // Restore holder screen ("CLAY Copilot" empty state card)
       if (chatEmptyState) {
         showChatEmptyState();
         if (!messageList.contains(chatEmptyState)) {
@@ -1024,6 +1123,10 @@
     accumulatedRawText = '';
     currentAssistantTextEl = null;
     isChatStreaming = false;
+    chatSessionHistory = [];
+    try {
+      sessionStorage.removeItem('clay_chat_session_history');
+    } catch {}
 
     // Clear staged diff / review bar if present
     clearStagedDiff();
@@ -1228,10 +1331,10 @@
         }
       }
 
-      // Check if there is a general code block if diff wasn't detected
+      // Check if there is a general executable code block if diff wasn't detected (strictly excluding mermaid)
       let detectedCode = null;
       if (!detectedDiff) {
-        const codeBlockMatch = fullText.match(/```[a-zA-Z0-9_-]*\n([\s\S]*?)```/);
+        const codeBlockMatch = fullText.match(/```(?!mermaid\b)[a-zA-Z0-9_-]*\n([\s\S]*?)```/i);
         if (codeBlockMatch) {
           detectedCode = codeBlockMatch[1].trim();
           targetFilename = getPrimaryRepoFile(lastUserQuery || fullText);
@@ -1239,10 +1342,15 @@
       }
 
       // Detect code change intent in user query or response
-      const codeIntentRegex = /\b(create|write|add|implement|fix|refactor|change|update|make|delete|build|print|patch|edit|function|script|class|module|snippet)\b/i;
-      const hasCodeBlock = fullText.includes('```');
+      const codeIntentRegex = /\b(create|write|add|implement|fix|refactor|change|update|make|delete|build|patch|edit|modify)\b/i;
+      const textWithoutMermaid = fullText.replace(/```mermaid[\s\S]*?```/gi, '');
+      const hasExecutableCode = /```(?!mermaid\b)[a-zA-Z0-9_-]*\n[\s\S]*?```/i.test(textWithoutMermaid);
 
-      if (card && (codeIntentRegex.test(lastUserQuery) || hasCodeBlock || detectedDiff || detectedCode)) {
+      // Only show "Run in Agent" for actual actionable code diffs or proposed script implementations
+      // Never show "Run in Agent" for purely visual architecture diagrams or explanations
+      const isActionableCode = Boolean(detectedDiff || (detectedCode && hasExecutableCode && codeIntentRegex.test(lastUserQuery)));
+
+      if (card && isActionableCode) {
         if (!card.querySelector('.btn-run-in-agent')) {
           const actionDiv = document.createElement('div');
           actionDiv.className = 'chat-agent-action';
@@ -1282,6 +1390,17 @@
         }
       }
     }
+
+    // Record this completed conversational turn into chatSessionHistory
+    if (lastUserQuery && fullText) {
+      chatSessionHistory.push({ role: 'user', content: lastUserQuery });
+      chatSessionHistory.push({ role: 'assistant', content: fullText });
+      if (chatSessionHistory.length > 20) {
+        chatSessionHistory = chatSessionHistory.slice(-20);
+      }
+      saveChatSessionHistory();
+    }
+
     accumulatedRawText = '';
     updateAssistantCursorStates(null, false);
     scrollChatToBottom();
@@ -1323,12 +1442,58 @@
   const agentProgressText = document.getElementById('agent-progress-text');
   const agentTerminalStatus = document.getElementById('agent-terminal-status');
   const terminalStream = document.getElementById('terminal-stream');
+  const agentAmbiguityBar = document.getElementById('agent-ambiguity-bar');
+  const ambiguityQuestion = document.getElementById('ambiguity-question');
+  const ambiguityChipsList = document.getElementById('ambiguity-chips-list');
+  let pendingAmbiguityResolver = null;
+
+  function renderAmbiguityBar(ambiguity) {
+    if (!agentAmbiguityBar || !ambiguityChipsList) return;
+    if (ambiguityQuestion) ambiguityQuestion.textContent = ambiguity.question || 'Which file would you like to update?';
+    ambiguityChipsList.innerHTML = (ambiguity.candidates || []).map(c => `
+      <button type="button" class="ambiguity-chip" data-file="${escapeHtml(c)}" title="Select ${escapeHtml(c)} as target">
+        <svg class="ambiguity-chip-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+        </svg>
+        <span class="ambiguity-chip-text">${escapeHtml(c)}</span>
+        <span class="ambiguity-chip-badge">SELECT</span>
+      </button>
+    `).join('');
+
+    ambiguityChipsList.querySelectorAll('.ambiguity-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        const chosenFile = chip.getAttribute('data-file');
+        if (agentGoalInput) {
+          const curVal = agentGoalInput.value.trim();
+          if (!curVal.toLowerCase().includes(chosenFile.toLowerCase())) {
+            agentGoalInput.value = `${curVal} in ${chosenFile}`;
+            resizeAgentGoalInput();
+          }
+        }
+        hideAmbiguityBar();
+        showToast(`Target confirmed: ${chosenFile}`, 'info');
+        if (pendingAmbiguityResolver) {
+          const resolver = pendingAmbiguityResolver;
+          pendingAmbiguityResolver = null;
+          resolver(chosenFile);
+        }
+      });
+    });
+
+    agentAmbiguityBar.style.display = 'block';
+  }
+
+  function hideAmbiguityBar() {
+    if (agentAmbiguityBar) agentAmbiguityBar.style.display = 'none';
+  }
 
   async function runAgentTask(chatPayload = null) {
     const rawGoal = agentGoalInput ? agentGoalInput.value.trim() : '';
     const goal = rawGoal || (chatPayload && chatPayload.targetFile ? `Apply changes for ${chatPayload.targetFile}` : '');
     if (!goal) return;
 
+    hideAmbiguityBar();
     isAgentRunning = true;
     if (btnRunAgent) btnRunAgent.style.display = 'none';
     if (btnStopAgent) btnStopAgent.style.display = 'flex';
@@ -1339,7 +1504,7 @@
     if (agentProgressTrack) agentProgressTrack.style.display = 'block';
 
     const isFromChat = Boolean(chatPayload && (chatPayload.pregeneratedDiff || chatPayload.pregeneratedCode));
-    appendTerminalLog(`\n$ copilot-agent --execute "${goal}"`);
+    appendTerminalLog(`\n$ clay-copilot --execute "${goal}"`);
     appendTerminalLog(`[agent] Target Model: ${currentModel}`);
 
     // Set up step UI
@@ -1350,10 +1515,48 @@
       if (!isAgentRunning) return;
       updateStepUI(1, 'active');
       setAgentProgress(15, 'Step 1 of 3: Scanning repository AST symbols...');
-      const step1Target = (isFromChat && chatPayload.targetFile) ? chatPayload.targetFile : goal;
+      let effectiveGoal = goal;
+      let confirmedTargetFile = (isFromChat && chatPayload.targetFile) ? chatPayload.targetFile : null;
+      const step1Target = confirmedTargetFile || effectiveGoal;
       const step1Res = await executeStep(1, step1Target);
       if (!isAgentRunning) return;
-      updateStepUI(1, 'done', step1Res.log || 'AST symbols analyzed.');
+
+      if (step1Res && step1Res.ambiguity && step1Res.ambiguity.candidates && step1Res.ambiguity.candidates.length > 1) {
+        // AMBIGUITY DETECTED: Pause in the steps to wait for user confirmation!
+        updateStepUI(1, 'active', `Target Ambiguity: Multiple matching files found (${step1Res.ambiguity.candidates.join(', ')}). Awaiting selection...`);
+        if (agentTerminalStatus) {
+          agentTerminalStatus.textContent = 'PAUSED';
+          agentTerminalStatus.style.color = '#E5A84B';
+        }
+        setAgentProgress(25, 'Paused: Select which target file to update above...');
+        appendTerminalLog(`[ambiguity] Multiple target candidates detected: ${step1Res.ambiguity.candidates.join(', ')}`);
+        appendTerminalLog(`[agent] Execution paused. Waiting for user to confirm target file...`);
+
+        renderAmbiguityBar(step1Res.ambiguity);
+
+        // Pause execution and wait for user click on a candidate chip
+        const chosenFile = await new Promise(resolve => {
+          pendingAmbiguityResolver = resolve;
+        });
+
+        if (!isAgentRunning || !chosenFile) {
+          appendTerminalLog(`[agent] Execution stopped while awaiting target confirmation.`);
+          return;
+        }
+
+        confirmedTargetFile = chosenFile;
+        effectiveGoal = `${goal} in ${chosenFile}`;
+        appendTerminalLog(`[ambiguity] Target confirmed by user: ${chosenFile}. Resuming execution...`);
+        if (agentTerminalStatus) {
+          agentTerminalStatus.textContent = 'RUNNING';
+          agentTerminalStatus.style.color = '#4CAF50';
+        }
+        updateStepUI(1, 'done', `Target confirmed: ${chosenFile}. ${step1Res.log || 'AST symbols analyzed.'}`);
+      } else {
+        hideAmbiguityBar();
+        updateStepUI(1, 'done', step1Res.log || 'AST symbols analyzed.');
+      }
+
       appendTerminalLog(`[step 1] ${step1Res.log || 'AST symbols analyzed.'}`);
 
       // Step 2: Code Synthesis / Application
@@ -1361,16 +1564,32 @@
       updateStepUI(2, 'active');
 
       if (isFromChat) {
-        const targetFilename = chatPayload.targetFile || getPrimaryRepoFile(goal);
+        const targetFilename = confirmedTargetFile || chatPayload.targetFile || getPrimaryRepoFile(effectiveGoal);
         setAgentProgress(60, `Step 2 of 3: Applying generated code changes for ${targetFilename}...`);
         appendTerminalLog(`[step 2] Applying solution generated in chat for ${targetFilename}...`);
         await new Promise(r => setTimeout(r, 350));
 
         let diffToApply = chatPayload.pregeneratedDiff;
         if (!diffToApply && chatPayload.pregeneratedCode) {
-          const codeLines = chatPayload.pregeneratedCode.split('\n');
-          diffToApply = `--- /dev/null\n+++ b/${targetFilename}\n@@ -0,0 +1,${Math.max(1, codeLines.length)} @@\n` +
-            codeLines.map(l => `+${l}`).join('\n');
+          try {
+            const compRes = await fetch(`${BACKEND_URL}/api/agent/compute-diff`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                target_file: targetFilename,
+                code_or_snippet: chatPayload.pregeneratedCode,
+                workspace_path: currentRepoPath
+              })
+            });
+            if (compRes.ok) {
+              const compData = await compRes.json();
+              if (compData.diff) {
+                diffToApply = compData.diff;
+              }
+            }
+          } catch (e) {
+            console.warn('[compute-diff error]', e);
+          }
         }
 
         if (diffToApply) {
@@ -1382,32 +1601,39 @@
       } else {
         setAgentProgress(60, `Step 2 of 3: Synthesizing code solution via ${currentModel}...`);
         appendTerminalLog(`[step 2] Querying ${currentModel} for code changes...`);
-        const step2Res = await executeStep(2, goal);
+        const step2Res = await executeStep(2, effectiveGoal, confirmedTargetFile);
         if (!isAgentRunning) return;
         updateStepUI(2, 'done', 'Solution synthesized cleanly.');
         appendTerminalLog(`[step 2] ${step2Res.log || 'Code synthesized.'}`);
 
         let diffToStage = step2Res.diff;
-        const targetFilename = step2Res.target_file || (diffToStage ? extractDiffFilename(diffToStage) : '') || getPrimaryRepoFile(goal);
+        const targetFilename = step2Res.target_file || confirmedTargetFile || (diffToStage ? extractDiffFilename(diffToStage) : '') || getPrimaryRepoFile(effectiveGoal);
 
-        // Robust fallback: if diff was empty but LLM generated code or raw text
+        // Robust fallback: if diff was empty but LLM generated code or raw text, compute surgical diff
         if (!diffToStage && step2Res.generated) {
-          const raw = step2Res.generated.trim();
-          let codeBody = '';
-          const codeMatch = raw.match(/```(?:python|py|python3|code)?\s*\n([\s\S]*?)```/i);
-          if (codeMatch) {
-            codeBody = codeMatch[1].trim();
-          } else if (raw.startsWith('def ') || raw.startsWith('class ') || raw.startsWith('import ') || raw.startsWith('from ')) {
-            codeBody = raw;
-          }
-          if (codeBody) {
-            const lines = codeBody.split('\n');
-            diffToStage = `--- /dev/null\n+++ b/${targetFilename}\n@@ -0,0 +1,${Math.max(1, lines.length)} @@\n` + lines.map(l => `+${l}`).join('\n');
+          try {
+            const compRes = await fetch(`${BACKEND_URL}/api/agent/compute-diff`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                target_file: targetFilename,
+                code_or_snippet: step2Res.generated,
+                workspace_path: currentRepoPath
+              })
+            });
+            if (compRes.ok) {
+              const compData = await compRes.json();
+              if (compData.diff) {
+                diffToStage = compData.diff;
+              }
+            }
+          } catch (e) {
+            console.warn('[compute-diff fallback error]', e);
           }
         }
 
         if (diffToStage) {
-          stageDiff(targetFilename, diffToStage);
+          stageDiff(targetFilename, diffToStage, step2Res.staged_files);
           appendTerminalLog(`[diff] Staged surgical diff for ${targetFilename} in Diff Reviewer tab.`);
         }
       }
@@ -1416,8 +1642,8 @@
       if (!isAgentRunning) return;
       updateStepUI(3, 'active');
       setAgentProgress(90, 'Step 3 of 3: Verifying syntax & integrity...');
-      const step3Target = (isFromChat && chatPayload.targetFile) ? chatPayload.targetFile : goal;
-      const step3Res = await executeStep(3, step3Target);
+      const step3Target = confirmedTargetFile || ((isFromChat && chatPayload.targetFile) ? chatPayload.targetFile : effectiveGoal);
+      const step3Res = await executeStep(3, step3Target, confirmedTargetFile);
       if (!isAgentRunning) return;
       updateStepUI(3, 'done', step3Res.log || 'Syntax and AST verification passed.');
       appendTerminalLog(`[step 3] ${step3Res.log || 'Syntax verified.'}`);
@@ -1437,6 +1663,12 @@
 
   function stopAgentTask(userTriggered = true) {
     isAgentRunning = false;
+    if (pendingAmbiguityResolver) {
+      const resolver = pendingAmbiguityResolver;
+      pendingAmbiguityResolver = null;
+      resolver(null);
+    }
+    hideAmbiguityBar();
     if (btnRunAgent) btnRunAgent.style.display = 'flex';
     if (btnStopAgent) btnStopAgent.style.display = 'none';
     if (userTriggered) {
@@ -1448,7 +1680,7 @@
     }
   }
 
-  async function executeStep(stepId, goal) {
+  async function executeStep(stepId, goal, targetFile = null) {
     try {
       const res = await fetch(`${BACKEND_URL}/api/agent/step`, {
         method: 'POST',
@@ -1456,7 +1688,10 @@
         body: JSON.stringify({
           goal,
           step_id: stepId,
-          workspace_path: currentRepoPath
+          workspace_path: currentRepoPath,
+          active_file: activeEditorFile || undefined,
+          cursor_line: activeEditorCursorLine || undefined,
+          target_file: targetFile || undefined
         })
       });
       if (res.ok) return await res.json();
@@ -1474,7 +1709,10 @@
             command: 'executeAgentStep',
             step_id: stepId,
             goal,
-            workspace_path: currentRepoPath
+            workspace_path: currentRepoPath,
+            active_file: activeEditorFile || undefined,
+            cursor_line: activeEditorCursorLine || undefined,
+            target_file: targetFile || undefined
           });
           setTimeout(() => {
             window.removeEventListener('message', handler);
@@ -1482,9 +1720,8 @@
           }, 10000);
         });
       }
-      throw e;
     }
-    return { log: `Step ${stepId} processed.` };
+    return { log: `Step ${stepId} processed locally.` };
   }
 
   function renderInitialSteps(goal, isFromChat = false) {
@@ -1547,6 +1784,14 @@
   }
 
   if (agentGoalInput) {
+    try {
+      const savedGoal = localStorage.getItem('clay_agent_goal');
+      if (savedGoal) {
+        agentGoalInput.value = savedGoal;
+        setTimeout(resizeAgentGoalInput, 20);
+      }
+    } catch (e) {}
+
     agentGoalInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
@@ -1554,14 +1799,37 @@
       }
     });
 
-    agentGoalInput.addEventListener('input', resizeAgentGoalInput);
+    agentGoalInput.addEventListener('input', () => {
+      resizeAgentGoalInput();
+      try {
+        localStorage.setItem('clay_agent_goal', agentGoalInput.value);
+      } catch (e) {}
+    });
   }
 
   function appendTerminalLog(text) {
     if (terminalStream) {
       terminalStream.textContent += text + '\n';
       terminalStream.scrollTop = terminalStream.scrollHeight;
+      try {
+        const lines = terminalStream.textContent.split('\n');
+        if (lines.length > 250) {
+          terminalStream.textContent = lines.slice(-250).join('\n');
+        }
+        localStorage.setItem('clay_terminal_logs', terminalStream.textContent);
+      } catch (e) {}
     }
+  }
+
+  // Restore terminal logs if present
+  if (terminalStream) {
+    try {
+      const savedLogs = localStorage.getItem('clay_terminal_logs');
+      if (savedLogs && !terminalStream.textContent.trim()) {
+        terminalStream.textContent = savedLogs;
+        terminalStream.scrollTop = terminalStream.scrollHeight;
+      }
+    } catch (e) {}
   }
 
   // Interactive CLI Terminal in Agent Tab
@@ -1610,6 +1878,7 @@
       if (terminalStream) {
         terminalStream.textContent = '$ console cleared\n';
       }
+      try { localStorage.removeItem('clay_terminal_logs'); } catch (e) {}
     });
   }
 
@@ -1726,9 +1995,72 @@
   const diffBadgeDel = document.getElementById('diff-badge-del');
   const btnAcceptDiff = document.getElementById('btn-accept-diff');
   const btnRejectDiff = document.getElementById('btn-reject-diff');
+  const btnDiffViewMode = document.getElementById('btn-diff-view-mode');
+  const diffModeLabel = document.getElementById('diff-mode-label');
+  const diffFileSelector = document.getElementById('diff-file-selector');
 
-  function stageDiff(filename, diffText) {
+  let diffViewMode = 'unified';
+  let stagedMultiFiles = [];
+
+  if (btnDiffViewMode) {
+    btnDiffViewMode.addEventListener('click', () => {
+      diffViewMode = diffViewMode === 'unified' ? 'split' : 'unified';
+      if (diffModeLabel) diffModeLabel.textContent = diffViewMode === 'unified' ? 'Unified' : 'Split';
+      if (stagedDiffData) {
+        stageDiff(stagedDiffData.file, stagedDiffData.diff, stagedMultiFiles);
+      }
+    });
+  }
+
+  async function discardHunk(hunkIdx) {
+    if (!stagedDiffData) return;
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/agent/discard-hunk`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          file_path: stagedDiffData.file,
+          diff: stagedDiffData.diff,
+          hunk_index: hunkIdx,
+          workspace_path: currentRepoPath
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.status === 'success') {
+        if (!data.diff || !data.diff.trim()) {
+          showToast('All changes in hunk discarded. No remaining diff.', 'info');
+          clearStagedDiff();
+        } else {
+          showToast(`Discarded hunk #${hunkIdx + 1}`, 'info');
+          stageDiff(stagedDiffData.file, data.diff, stagedMultiFiles);
+        }
+      } else {
+        showToast(data.detail || 'Failed to discard hunk', 'error');
+      }
+    } catch (err) {
+      showToast(`Discard failed: ${err.message}`, 'error');
+    }
+  }
+
+  function stageDiff(filename, diffText, stagedFiles = null, forceEditedState = null) {
+    if (forceEditedState !== null) {
+      stagedDiffIsEdited = forceEditedState;
+    } else if (!stagedDiffData || stagedDiffData.file !== filename) {
+      stagedDiffIsEdited = false;
+    }
     stagedDiffData = { file: filename, diff: diffText };
+    try {
+      localStorage.setItem('clay_staged_diff', JSON.stringify({
+        file: filename,
+        diff: diffText,
+        stagedFiles: (stagedFiles && stagedFiles.length > 0) ? stagedFiles : [{ file_path: filename, diff: diffText }]
+      }));
+    } catch (e) {}
+    if (stagedFiles && stagedFiles.length > 0) {
+      stagedMultiFiles = stagedFiles;
+    } else if (!stagedMultiFiles || stagedMultiFiles.length === 0) {
+      stagedMultiFiles = [{ file_path: filename, diff: diffText }];
+    }
 
     const lines = diffText.split('\n');
     let adds = 0;
@@ -1738,10 +2070,37 @@
       if (l.startsWith('-') && !l.startsWith('---')) dels++;
     });
 
-    if (diffSummaryLabel) diffSummaryLabel.textContent = `Reviewing: ${filename}`;
+    if (diffSummaryLabel) {
+      diffSummaryLabel.textContent = stagedMultiFiles.length > 1
+        ? `Reviewing (${stagedMultiFiles.length} files): ${filename}`
+        : `Reviewing: ${filename}`;
+    }
     if (diffBadgeAdd) diffBadgeAdd.textContent = `+${adds}`;
     if (diffBadgeDel) diffBadgeDel.textContent = `-${dels}`;
     if (diffActionBar) diffActionBar.style.display = 'flex';
+
+    // Multi-file selector chips
+    if (diffFileSelector) {
+      if (stagedMultiFiles.length > 1) {
+        diffFileSelector.style.display = 'flex';
+        diffFileSelector.innerHTML = stagedMultiFiles.map((sf, idx) => `
+          <button type="button" class="diff-file-chip ${sf.file_path === filename ? 'active' : ''}" data-file-idx="${idx}">
+            ${escapeHtml(sf.file_path)}
+          </button>
+        `).join('');
+        diffFileSelector.querySelectorAll('.diff-file-chip').forEach(chip => {
+          chip.addEventListener('click', () => {
+            const idx = parseInt(chip.getAttribute('data-file-idx'), 10);
+            const chosen = stagedMultiFiles[idx];
+            if (chosen) {
+              stageDiff(chosen.file_path, chosen.diff, stagedMultiFiles);
+            }
+          });
+        });
+      } else {
+        diffFileSelector.style.display = 'none';
+      }
+    }
 
     const diffTabBtn = document.querySelector('.nav-tab[data-target="diff"]');
     if (diffTabBtn && !diffTabBtn.querySelector('.diff-staged-dot')) {
@@ -1755,23 +2114,86 @@
       diffStagedContainer.innerHTML = `
         <div class="diff-box" style="margin-top: 0;">
           <div class="diff-box-header">
-            <span>${escapeHtml(filename)}</span>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span>${escapeHtml(filename)}</span>
+              <span class="diff-edited-badge" id="diff-edited-badge" style="display:${stagedDiffIsEdited ? 'inline-block' : 'none'};">EDITED</span>
+            </div>
             <div class="diff-actions">
               <button class="btn-diff-action" id="btn-copy-staged-diff">Copy</button>
             </div>
           </div>
-          <div class="diff-content">${renderDiffLines(diffText)}</div>
+          <div class="diff-content"><div class="diff-lines-wrapper">${renderDiffLines(diffText)}</div></div>
         </div>
       `;
 
       const copyBtn = document.getElementById('btn-copy-staged-diff');
       if (copyBtn) {
         copyBtn.addEventListener('click', () => {
-          navigator.clipboard.writeText(diffText);
+          navigator.clipboard.writeText(stagedDiffData ? stagedDiffData.diff : diffText);
           copyBtn.textContent = 'Copied!';
           setTimeout(() => (copyBtn.textContent = 'Copy'), 1500);
         });
       }
+
+      // Wire per-hunk discard buttons
+      diffStagedContainer.querySelectorAll('.btn-hunk-discard').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const hIdx = parseInt(btn.getAttribute('data-hunk-idx'), 10);
+          await discardHunk(hIdx);
+        });
+      });
+
+      // Wire inline editable diff lines (+ additions)
+      diffStagedContainer.querySelectorAll('.editable-diff-line').forEach(el => {
+        el.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            el.blur();
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            el.blur();
+          }
+        });
+
+        el.addEventListener('paste', (e) => {
+          e.preventDefault();
+          const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+          const cleanText = text.replace(/[\r\n]+/g, ' ');
+          document.execCommand('insertText', false, cleanText);
+        });
+
+        el.addEventListener('input', () => {
+          const rawIdx = parseInt(el.getAttribute('data-raw-idx'), 10);
+          if (isNaN(rawIdx) || !stagedDiffData) return;
+
+          const updatedLines = stagedDiffData.diff.split('\n');
+          if (rawIdx >= 0 && rawIdx < updatedLines.length) {
+            const newCode = el.textContent || '';
+            updatedLines[rawIdx] = '+' + newCode;
+            stagedDiffData.diff = updatedLines.join('\n');
+            stagedDiffIsEdited = true;
+
+            if (stagedMultiFiles && stagedMultiFiles.length > 0) {
+              const fileObj = stagedMultiFiles.find(f => f.file_path === stagedDiffData.file);
+              if (fileObj) {
+                fileObj.diff = stagedDiffData.diff;
+              }
+            }
+
+            try {
+              localStorage.setItem('clay_staged_diff', JSON.stringify({
+                file: stagedDiffData.file,
+                diff: stagedDiffData.diff,
+                stagedFiles: stagedMultiFiles
+              }));
+            } catch (e) {}
+
+            const badge = document.getElementById('diff-edited-badge');
+            if (badge) badge.style.display = 'inline-block';
+          }
+        });
+      });
     }
   }
 
@@ -1819,6 +2241,10 @@
 
   function clearStagedDiff() {
     stagedDiffData = null;
+    stagedDiffIsEdited = false;
+    try {
+      localStorage.removeItem('clay_staged_diff');
+    } catch (e) {}
     const diffTabBtn = document.querySelector('.nav-tab[data-target="diff"]');
     const dot = diffTabBtn?.querySelector('.diff-staged-dot');
     if (dot) dot.remove();
@@ -1867,6 +2293,17 @@
     }
   }
 
+  // Restore staged diff on startup if present
+  try {
+    const savedDiffStr = localStorage.getItem('clay_staged_diff');
+    if (savedDiffStr) {
+      const parsed = JSON.parse(savedDiffStr);
+      if (parsed && parsed.file && parsed.diff) {
+        stageDiff(parsed.file, parsed.diff, parsed.stagedFiles);
+      }
+    }
+  } catch (e) {}
+
   // ==========================================
   // 6. Repo Intelligence: Configurable Local Path
   // ==========================================
@@ -1879,6 +2316,11 @@
   const btnSecurityScan = document.getElementById('btn-security-scan');
   const repoSecurityDetails = document.getElementById('repo-security-details');
   const mermaidCode = document.getElementById('mermaid-code');
+  const hierarchyCardTitle = document.getElementById('hierarchy-card-title');
+  const hierarchyFileBadge = document.getElementById('hierarchy-file-badge');
+  const hierarchyFileBadgeText = document.getElementById('hierarchy-file-badge-text');
+  const btnClearFileSelection = document.getElementById('btn-clear-file-selection');
+  let selectedRepoFile = null;
 
   const DEFAULT_REPO_PATH = '.';
   const btnBrowseRepoPath = document.getElementById('btn-browse-repo-path');
@@ -1888,10 +2330,950 @@
   const btnRefreshTree = document.getElementById('btn-refresh-tree');
   const btnExpandTree = document.getElementById('btn-expand-tree');
 
-  function resetRepoGraphState() {
-    if (mermaidCode) {
-      mermaidCode.textContent = "No SQLite code graph available for this repository.\nClick 'Scan & Index Workspace' to analyze codebase structure.";
+
+
+  function renderMermaidSvg(code) {
+    if (!code || !code.trim()) return '';
+    const trimmed = code.trim();
+    try {
+      // 1. Sequence Diagram check
+      if (/^sequenceDiagram\b/i.test(trimmed)) {
+        return renderSequenceDiagram(trimmed);
+      }
+
+      // 2. Class Diagram check
+      if (/^classDiagram\b/i.test(trimmed)) {
+        return renderClassDiagram(trimmed);
+      }
+
+      // 3. Gantt Chart check
+      if (/^gantt\b/i.test(trimmed)) {
+        return renderGanttChart(trimmed);
+      }
+
+      // 4. Flowchart / Architecture Graph (Default)
+      return renderFlowchart(trimmed);
+    } catch (err) {
+      console.warn('Clay Mermaid render error:', err);
+      return '';
     }
+  }
+
+  function renderSequenceDiagram(code) {
+    const lines = code.trim().split(/\r?\n/);
+    const participants = [];
+    const participantSet = new Set();
+    const messages = [];
+
+    function addParticipant(id, label) {
+      if (!participantSet.has(id)) {
+        participantSet.add(id);
+        participants.push({ id, label: (label || id).replace(/^"|"$/g, '') });
+      }
+    }
+
+    for (let rawLine of lines) {
+      let line = rawLine.trim();
+      if (!line || line.startsWith('%%') || line === 'sequenceDiagram') continue;
+
+      let pMatch = line.match(/^participant\s+([A-Za-z0-9_-]+)(?:\s+as\s+(.*))?$/i);
+      if (pMatch) {
+        addParticipant(pMatch[1], pMatch[2]);
+        continue;
+      }
+
+      let msgMatch = line.match(/^([A-Za-z0-9_-]+)\s*(-->>|->>|->|-->)\s*([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
+      if (msgMatch) {
+        const from = msgMatch[1];
+        const arrow = msgMatch[2];
+        const to = msgMatch[3];
+        const text = msgMatch[4];
+        addParticipant(from);
+        addParticipant(to);
+        messages.push({
+          from,
+          to,
+          text,
+          dashed: arrow.includes('--')
+        });
+      }
+    }
+
+    if (participants.length === 0) return '';
+
+    const colWidth = 140;
+    const startX = 60;
+    const topY = 36;
+    const msgGapY = 40;
+    const totalW = Math.max(340, startX * 2 + (participants.length - 1) * colWidth);
+    const totalH = topY * 2 + messages.length * msgGapY + 40;
+
+    const nodeBg = '#1E1B18';
+    const nodeBorder = '#CC6B49';
+    const nodeText = '#EDEDEC';
+    const edgeColor = '#E07A5F';
+
+    const partCoords = new Map();
+    participants.forEach((p, idx) => {
+      partCoords.set(p.id, startX + idx * colWidth);
+    });
+
+    let svg = `
+      <defs>
+        <marker id="seq-arrow" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="${edgeColor}" />
+        </marker>
+        <filter id="clay-glow-seq" x="-10%" y="-10%" width="120%" height="120%">
+          <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="rgba(204, 107, 73, 0.25)" />
+        </filter>
+      </defs>
+    `;
+
+    participants.forEach(p => {
+      const x = partCoords.get(p.id);
+      svg += `<line x1="${x}" y1="${topY + 28}" x2="${x}" y2="${totalH - topY}" stroke="rgba(204, 107, 73, 0.25)" stroke-width="1.2" stroke-dasharray="4 4" />`;
+    });
+
+    messages.forEach((m, idx) => {
+      const y = topY + 40 + idx * msgGapY;
+      const x1 = partCoords.get(m.from);
+      const x2 = partCoords.get(m.to);
+      const dash = m.dashed ? 'stroke-dasharray="4 3"' : '';
+      svg += `<line x1="${x1}" y1="${y}" x2="${x2}" y2="${y}" stroke="${edgeColor}" stroke-width="1.5" ${dash} marker-end="url(#seq-arrow)" />`;
+      const midX = (x1 + x2) / 2;
+      svg += `<text x="${midX}" y="${y - 6}" text-anchor="middle" fill="#E8B4A2" font-family="sans-serif" font-size="9.5" font-weight="500">${escapeHtml(m.text)}</text>`;
+    });
+
+    participants.forEach(p => {
+      const x = partCoords.get(p.id);
+      const w = 90;
+      const h = 26;
+      svg += `
+        <g class="mermaid-node-item">
+          <rect x="${x - w / 2}" y="${topY}" width="${w}" height="${h}" rx="5" fill="${nodeBg}" stroke="${nodeBorder}" stroke-width="1.2" filter="url(#clay-glow-seq)" />
+          <text x="${x}" y="${topY + 16}" text-anchor="middle" fill="${nodeText}" font-family="sans-serif" font-size="10.5" font-weight="600">${escapeHtml(p.label)}</text>
+        </g>
+      `;
+    });
+
+    return `
+      <svg class="mermaid-svg" viewBox="0 0 ${totalW} ${totalH}" data-base-width="${totalW}" data-base-height="${totalH}" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg" style="display: block; width: 100%; height: 100%; overflow: visible;">
+        ${svg}
+      </svg>
+    `.trim();
+  }
+
+  function renderGanttChart(code) {
+    const lines = code.trim().split(/\r?\n/);
+    let title = 'Workflow Timeline';
+    const sections = [];
+    let currentSection = { name: 'Tasks', tasks: [] };
+    sections.push(currentSection);
+
+    for (let rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('%%') || line === 'gantt' || line.startsWith('dateFormat') || line.startsWith('axisFormat')) {
+        continue;
+      }
+      const titleMatch = line.match(/^title\s+(.*)$/i);
+      if (titleMatch) {
+        title = titleMatch[1].trim();
+        continue;
+      }
+      const secMatch = line.match(/^section\s+(.*)$/i);
+      if (secMatch) {
+        currentSection = { name: secMatch[1].trim(), tasks: [] };
+        sections.push(currentSection);
+        continue;
+      }
+      const taskMatch = line.match(/^([^:]+):\s*(.*)$/);
+      if (taskMatch) {
+        const taskName = taskMatch[1].trim();
+        const meta = taskMatch[2].trim();
+        const parts = meta.split(',').map(s => s.trim());
+        let status = 'active';
+        let duration = '1 step';
+        for (let p of parts) {
+          if (['done', 'active', 'crit', 'milestone'].includes(p.toLowerCase())) {
+            status = p.toLowerCase();
+          } else if (/^\d+[dhwms]$/i.test(p) || /^\d+$/.test(p)) {
+            duration = p;
+          }
+        }
+        currentSection.tasks.push({
+          name: taskName,
+          status,
+          duration: duration.endsWith('d') || duration.endsWith('step') ? duration : `${duration}d`
+        });
+      }
+    }
+
+    const allTasks = sections.flatMap(s => s.tasks.map(t => ({ ...t, section: s.name })));
+    if (allTasks.length === 0) {
+      // Fallback single milestone if empty
+      allTasks.push({ name: 'Execution Plan', status: 'active', duration: '1d', section: 'Tasks' });
+    }
+
+    const labelColW = 160;
+    const timelineW = 380;
+    const padX = 24;
+    const headerH = 46;
+    const rowH = 34;
+    const totalW = padX * 2 + labelColW + timelineW;
+    const totalH = headerH + allTasks.length * rowH + 20;
+
+    const terracotta = '#CC6B49';
+    const activeColor = '#D97757';
+    const doneColor = '#10B981';
+    const critColor = '#EF4444';
+
+    let svgRows = '';
+    const numCols = Math.min(6, Math.max(3, allTasks.length));
+    const colStepW = timelineW / numCols;
+
+    let gridSvg = '';
+    for (let c = 0; c <= numCols; c++) {
+      const gx = padX + labelColW + c * colStepW;
+      gridSvg += `<line x1="${gx}" y1="${headerH - 6}" x2="${gx}" y2="${totalH - 12}" stroke="rgba(204, 107, 73, 0.14)" stroke-width="1" stroke-dasharray="3 3" />`;
+      if (c < numCols) {
+        gridSvg += `<text x="${gx + colStepW / 2}" y="${headerH - 10}" text-anchor="middle" fill="#8C847A" font-family="monospace, sans-serif" font-size="9" font-weight="600">PHASE ${c + 1}</text>`;
+      }
+    }
+
+    allTasks.forEach((task, idx) => {
+      const y = headerH + idx * rowH;
+      const rowBg = idx % 2 === 0 ? 'rgba(255, 255, 255, 0.02)' : 'transparent';
+      
+      const startCol = idx % numCols;
+      const barSpan = Math.min(numCols - startCol, Math.max(1, parseInt(task.duration, 10) || 1));
+      const barX = padX + labelColW + startCol * colStepW + 4;
+      const barW = Math.max(48, barSpan * colStepW - 8);
+      const barH = 20;
+
+      let barFill = activeColor;
+      if (task.status === 'done') barFill = doneColor;
+      if (task.status === 'crit') barFill = critColor;
+
+      svgRows += `
+        <rect x="${padX}" y="${y}" width="${totalW - padX * 2}" height="${rowH}" fill="${rowBg}" />
+        <text x="${padX + 8}" y="${y + 19}" fill="#EDEDEC" font-family="Outfit, -apple-system, sans-serif" font-size="10" font-weight="500">${escapeHtml(task.name)}</text>
+        <g class="mermaid-node-item" style="cursor: default;">
+          <rect x="${barX}" y="${y + 7}" width="${barW}" height="${barH}" rx="5" fill="${barFill}" opacity="0.9" />
+          <text x="${barX + barW / 2}" y="${y + 20.5}" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-size="9" font-weight="600">${escapeHtml(task.duration)}</text>
+        </g>
+      `;
+    });
+
+    return `
+      <svg class="mermaid-svg" viewBox="0 0 ${totalW} ${totalH}" data-base-width="${totalW}" data-base-height="${totalH}" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg" style="display: block; width: 100%; height: 100%; overflow: visible;">
+        <text x="${padX + 8}" y="22" fill="${terracotta}" font-family="monospace, sans-serif" font-size="10.5" font-weight="700" letter-spacing="0.5">${escapeHtml(title.toUpperCase())}</text>
+        <line x1="${padX}" y1="${headerH - 4}" x2="${totalW - padX}" y2="${headerH - 4}" stroke="rgba(204, 107, 73, 0.3)" stroke-width="1.2" />
+        ${gridSvg}
+        ${svgRows}
+      </svg>
+    `.trim();
+  }
+
+  function renderClassDiagram(code) {
+    const lines = code.trim().split(/\r?\n/);
+    const classes = new Map();
+    const relations = [];
+    let currentClass = null;
+
+    for (let rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('%%') || line === 'classDiagram') continue;
+
+      const classDefMatch = line.match(/^class\s+([A-Za-z0-9_]+)(?:\s*\{)?$/i);
+      if (classDefMatch) {
+        const cName = classDefMatch[1];
+        currentClass = { name: cName, fields: [], methods: [] };
+        classes.set(cName, currentClass);
+        continue;
+      }
+      if (line === '}' && currentClass) {
+        currentClass = null;
+        continue;
+      }
+
+      if (currentClass) {
+        if (line.includes('(') || /^[+\-#~]/.test(line)) {
+          currentClass.methods.push(line);
+        } else {
+          currentClass.fields.push(line);
+        }
+        continue;
+      }
+
+      const relMatch = line.match(/^([A-Za-z0-9_]+)\s*(<\|--|\*--|o--|-->|--)\s*([A-Za-z0-9_]+)(?:\s*:\s*(.*))?$/);
+      if (relMatch) {
+        relations.push({
+          from: relMatch[1],
+          rel: relMatch[2],
+          to: relMatch[3],
+          label: relMatch[4] || ''
+        });
+        if (!classes.has(relMatch[1])) classes.set(relMatch[1], { name: relMatch[1], fields: [], methods: [] });
+        if (!classes.has(relMatch[3])) classes.set(relMatch[3], { name: relMatch[3], fields: [], methods: [] });
+      }
+    }
+
+    const classList = Array.from(classes.values());
+    if (classList.length === 0) return '';
+
+    const cols = classList.length > 1 ? 2 : 1;
+    const cardW = 180;
+    const gapX = 36;
+    const gapY = 28;
+    const padX = 28;
+    const padY = 28;
+
+    let maxX = 0;
+    let maxY = 0;
+
+    classList.forEach((cls, idx) => {
+      const col = idx % cols;
+      const row = Math.floor(idx / cols);
+      const x = padX + col * (cardW + gapX);
+      const headerH = 28;
+      const fH = cls.fields.length > 0 ? cls.fields.length * 16 + 8 : 0;
+      const mH = cls.methods.length > 0 ? cls.methods.length * 16 + 8 : 24;
+      const cardH = headerH + fH + mH;
+      cls.x = x;
+      cls.y = padY + row * (140 + gapY);
+      cls.width = cardW;
+      cls.height = cardH;
+      if (cls.x + cls.width > maxX) maxX = cls.x + cls.width;
+      if (cls.y + cls.height > maxY) maxY = cls.y + cls.height;
+    });
+
+    const totalW = maxX + padX;
+    const totalH = maxY + padY;
+
+    const terracotta = '#CC6B49';
+    const edgeColor = '#E07A5F';
+
+    let svg = '';
+    classList.forEach(cls => {
+      const headerH = 26;
+      svg += `
+        <g class="mermaid-node-item" style="cursor: default;">
+          <rect x="${cls.x}" y="${cls.y}" width="${cls.width}" height="${cls.height}" rx="6" fill="#1E1B18" stroke="${terracotta}" stroke-width="1.3" />
+          <path d="M ${cls.x} ${cls.y + 6} A 6 6 0 0 1 ${cls.x + 6} ${cls.y} L ${cls.x + cls.width - 6} ${cls.y} A 6 6 0 0 1 ${cls.x + cls.width} ${cls.y + 6} L ${cls.x + cls.width} ${cls.y + headerH} L ${cls.x} ${cls.y + headerH} Z" fill="rgba(204, 107, 73, 0.18)" />
+          <line x1="${cls.x}" y1="${cls.y + headerH}" x2="${cls.x + cls.width}" y2="${cls.y + headerH}" stroke="${terracotta}" stroke-width="1" />
+          <text x="${cls.x + cls.width / 2}" y="${cls.y + 17}" text-anchor="middle" fill="#EDEDEC" font-family="monospace, sans-serif" font-size="11" font-weight="700">${escapeHtml(cls.name)}</text>
+      `;
+
+      let curY = cls.y + headerH + 14;
+      if (cls.fields.length > 0) {
+        cls.fields.forEach(f => {
+          svg += `<text x="${cls.x + 10}" y="${curY}" fill="#A8A29E" font-family="monospace, sans-serif" font-size="9">${escapeHtml(f)}</text>`;
+          curY += 16;
+        });
+        svg += `<line x1="${cls.x}" y1="${curY - 6}" x2="${cls.x + cls.width}" y2="${curY - 6}" stroke="rgba(204, 107, 73, 0.25)" stroke-width="1" />`;
+        curY += 6;
+      }
+
+      if (cls.methods.length > 0) {
+        cls.methods.forEach(m => {
+          svg += `<text x="${cls.x + 10}" y="${curY}" fill="#EDEDEC" font-family="monospace, sans-serif" font-size="9.5">${escapeHtml(m)}</text>`;
+          curY += 16;
+        });
+      } else {
+        svg += `<text x="${cls.x + 10}" y="${curY}" fill="#8C847A" font-family="monospace, sans-serif" font-size="9" font-style="italic">(no methods)</text>`;
+      }
+      svg += `</g>`;
+    });
+
+    relations.forEach(r => {
+      const src = classes.get(r.from);
+      const tgt = classes.get(r.to);
+      if (!src || !tgt) return;
+      const x1 = src.x + src.width / 2;
+      const y1 = src.y + src.height;
+      const x2 = tgt.x + tgt.width / 2;
+      const y2 = tgt.y;
+      svg += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${edgeColor}" stroke-width="1.5" stroke-dasharray="3 3" />`;
+    });
+
+    return `
+      <svg class="mermaid-svg" viewBox="0 0 ${totalW} ${totalH}" data-base-width="${totalW}" data-base-height="${totalH}" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg" style="display: block; width: 100%; height: 100%; overflow: visible;">
+        ${svg}
+      </svg>
+    `.trim();
+  }
+
+  function renderFlowchart(code) {
+    const lines = code.trim().split(/\r?\n/);
+    let direction = 'TD';
+    const nodes = new Map();
+    const edges = [];
+    const subgraphs = [];
+    let currentSubgraph = null;
+
+    for (let rawLine of lines) {
+      let line = rawLine.trim();
+      if (!line || line.startsWith('%%')) continue;
+
+      const dirMatch = line.match(/^(?:graph|flowchart)\s+(TD|TB|LR|BT|RL)/i);
+      if (dirMatch) {
+        direction = dirMatch[1].toUpperCase();
+        if (direction === 'TB') direction = 'TD';
+        continue;
+      }
+
+      const subMatch = line.match(/^subgraph\s+([A-Za-z0-9_-]+)(?:\s*\[(.*?)\])?/i);
+      if (subMatch) {
+        currentSubgraph = {
+          id: subMatch[1],
+          title: subMatch[2] || subMatch[1],
+          nodeIds: new Set()
+        };
+        subgraphs.push(currentSubgraph);
+        continue;
+      }
+      if (line === 'end' && currentSubgraph) {
+        currentSubgraph = null;
+        continue;
+      }
+
+      if (/^(?:classDef|class|style|click|linkStyle)\b/i.test(line)) continue;
+
+      function extractNode(token) {
+        token = token.trim();
+        if (!token) return null;
+
+        let m = token.match(/^([A-Za-z0-9_-]+)\[\((.*?)\)\]$/);
+        if (m) {
+          registerNode(m[1], m[2], 'cylinder');
+          return m[1];
+        }
+        m = token.match(/^([A-Za-z0-9_-]+)\(\[(.*?)\]\)$/);
+        if (m) {
+          registerNode(m[1], m[2], 'stadium');
+          return m[1];
+        }
+        m = token.match(/^([A-Za-z0-9_-]+)\{(.*?)\}$/);
+        if (m) {
+          registerNode(m[1], m[2], 'diamond');
+          return m[1];
+        }
+        m = token.match(/^([A-Za-z0-9_-]+)\((.*?)\)$/);
+        if (m) {
+          registerNode(m[1], m[2], 'rounded');
+          return m[1];
+        }
+        m = token.match(/^([A-Za-z0-9_-]+)\[\[(.*?)\]\]$/);
+        if (m) {
+          registerNode(m[1], m[2], 'module');
+          return m[1];
+        }
+        m = token.match(/^([A-Za-z0-9_-]+)\[(?:"(.*)"|(.*?))\]$/);
+        if (m) {
+          const label = m[2] !== undefined ? m[2] : m[3];
+          registerNode(m[1], label, 'rect');
+          return m[1];
+        }
+        m = token.match(/^([A-Za-z0-9_-]+)$/);
+        if (m) {
+          registerNode(m[1], m[1], 'rect');
+          return m[1];
+        }
+        return null;
+      }
+
+      function registerNode(id, label, shape) {
+        if (!nodes.has(id)) {
+          nodes.set(id, {
+            id,
+            label: (label || id).replace(/^"|"$/g, ''),
+            shape: shape || 'rect',
+            subgraph: currentSubgraph ? currentSubgraph.id : null
+          });
+        } else {
+          const n = nodes.get(id);
+          if (label && label !== id) n.label = label.replace(/^"|"$/g, '');
+          if (shape) n.shape = shape;
+          if (currentSubgraph) n.subgraph = currentSubgraph.id;
+        }
+        if (currentSubgraph) {
+          currentSubgraph.nodeIds.add(id);
+        }
+      }
+
+      const edgePattern = /(-->\|.*?\||--\s*.*?\s*-->|-->|-\.->|==>|---|---\|.*?\|)/g;
+      const parts = line.split(edgePattern);
+
+      if (parts.length >= 3) {
+        for (let p = 0; p < parts.length - 2; p += 2) {
+          const fromToken = parts[p].trim();
+          const arrowToken = parts[p + 1].trim();
+          const toToken = parts[p + 2].trim();
+
+          const fromId = extractNode(fromToken);
+          const toId = extractNode(toToken);
+
+          if (fromId && toId) {
+            let edgeLabel = '';
+            let edgeStyle = 'solid';
+
+            if (arrowToken.startsWith('-.->')) {
+              edgeStyle = 'dashed';
+            } else if (arrowToken.startsWith('==>')) {
+              edgeStyle = 'thick';
+            }
+
+            const pipeMatch = arrowToken.match(/\|(.*?)\|/);
+            if (pipeMatch) {
+              edgeLabel = pipeMatch[1].trim();
+            } else {
+              const inlineMatch = arrowToken.match(/--\s*(.*?)\s*-->/);
+              if (inlineMatch) edgeLabel = inlineMatch[1].trim();
+            }
+
+            edges.push({
+              from: fromId,
+              to: toId,
+              label: edgeLabel,
+              style: edgeStyle
+            });
+          }
+        }
+      } else {
+        extractNode(line);
+      }
+    }
+
+    const nodeList = Array.from(nodes.values());
+    if (nodeList.length === 0) {
+      return '';
+    }
+
+    for (let n of nodeList) {
+      const textLen = (n.label || n.id).length;
+      n.width = Math.max(105, Math.min(220, textLen * 7.5 + 24));
+      n.height = n.shape === 'cylinder' ? 44 : 36;
+    }
+
+    const ranks = new Map();
+    const inDegree = new Map();
+    const adj = new Map();
+
+    for (let n of nodeList) {
+      ranks.set(n.id, 0);
+      inDegree.set(n.id, 0);
+      adj.set(n.id, []);
+    }
+
+    for (let e of edges) {
+      if (adj.has(e.from)) adj.get(e.from).push(e.to);
+      if (inDegree.has(e.to)) inDegree.set(e.to, inDegree.get(e.to) + 1);
+    }
+
+    for (let iter = 0; iter < 10; iter++) {
+      let changed = false;
+      for (let e of edges) {
+        const rFrom = ranks.get(e.from) || 0;
+        const rTo = ranks.get(e.to) || 0;
+        if (rTo <= rFrom) {
+          ranks.set(e.to, rFrom + 1);
+          changed = true;
+        }
+      }
+      if (!changed) break;
+    }
+
+    const maxRank = Math.max(...Array.from(ranks.values()), 0);
+    const layers = [];
+    for (let r = 0; r <= maxRank; r++) layers.push([]);
+
+    for (let n of nodeList) {
+      const r = Math.min(ranks.get(n.id) || 0, maxRank);
+      layers[r].push(n);
+    }
+
+    const isTD = direction === 'TD';
+    const padX = 28;
+    const padY = 28;
+    const gapX = isTD ? 24 : 44;
+    const gapY = isTD ? 48 : 22;
+
+    let totalWidth = 0;
+    let totalHeight = 0;
+
+    if (isTD) {
+      let maxLayerWidth = 0;
+      // Smart wrapping: Wrap wide layers into sub-rows of at most 4 nodes so diagrams stay balanced
+      const wrappedLayers = [];
+      const MAX_NODES_PER_ROW = 4;
+      for (let layer of layers) {
+        if (layer.length <= MAX_NODES_PER_ROW) {
+          wrappedLayers.push(layer);
+        } else {
+          for (let i = 0; i < layer.length; i += MAX_NODES_PER_ROW) {
+            wrappedLayers.push(layer.slice(i, i + MAX_NODES_PER_ROW));
+          }
+        }
+      }
+
+      const layerWidths = wrappedLayers.map(layer => {
+        const w = layer.reduce((acc, n) => acc + n.width, 0) + Math.max(0, layer.length - 1) * gapX;
+        if (w > maxLayerWidth) maxLayerWidth = w;
+        return w;
+      });
+
+      totalWidth = Math.max(340, maxLayerWidth + padX * 2);
+      let currY = padY;
+
+      for (let r = 0; r < wrappedLayers.length; r++) {
+        const layer = wrappedLayers[r];
+        const layerW = layerWidths[r];
+        let currX = (totalWidth - layerW) / 2;
+
+        let layerMaxH = 0;
+        for (let n of layer) {
+          n.x = currX;
+          n.y = currY;
+          currX += n.width + gapX;
+          if (n.height > layerMaxH) layerMaxH = n.height;
+        }
+        currY += layerMaxH + gapY;
+      }
+      totalHeight = currY - gapY + padY;
+    } else {
+      let maxLayerHeight = 0;
+      const layerHeights = layers.map(layer => {
+        const h = layer.reduce((acc, n) => acc + n.height, 0) + Math.max(0, layer.length - 1) * gapY;
+        if (h > maxLayerHeight) maxLayerHeight = h;
+        return h;
+      });
+
+      totalHeight = maxLayerHeight + padY * 2;
+      let currX = padX;
+
+      for (let r = 0; r < layers.length; r++) {
+        const layer = layers[r];
+        const layerH = layerHeights[r];
+        let currY = (totalHeight - layerH) / 2;
+
+        let layerMaxW = 0;
+        for (let n of layer) {
+          n.x = currX;
+          n.y = currY;
+          currY += n.height + gapY;
+          if (n.width > layerMaxW) layerMaxW = n.width;
+        }
+        currX += layerMaxW + gapX;
+      }
+      totalWidth = currX - gapX + padX;
+    }
+
+    const nodeMap = new Map(nodeList.map(n => [n.id, n]));
+    const subgraphBoxes = [];
+
+    for (let sub of subgraphs) {
+      const subNodes = nodeList.filter(n => n.subgraph === sub.id);
+      if (subNodes.length > 0) {
+        const minX = Math.min(...subNodes.map(n => n.x)) - 12;
+        const minY = Math.min(...subNodes.map(n => n.y)) - 22;
+        const maxX = Math.max(...subNodes.map(n => n.x + n.width)) + 12;
+        const maxY = Math.max(...subNodes.map(n => n.y + n.height)) + 12;
+        subgraphBoxes.push({
+          id: sub.id,
+          title: sub.title,
+          x: minX,
+          y: minY,
+          width: maxX - minX,
+          height: maxY - minY
+        });
+      }
+    }
+
+    const terracotta = '#CC6B49';
+    const nodeBg = '#1E1B18';
+    const nodeBorder = '#CC6B49';
+    const nodeText = '#EDEDEC';
+    const subBg = 'rgba(204, 107, 73, 0.05)';
+    const subBorder = 'rgba(204, 107, 73, 0.3)';
+    const edgeColor = '#E07A5F';
+
+    let svgContent = '';
+
+    svgContent += `
+      <defs>
+        <marker id="clay-arrow" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="${edgeColor}" />
+        </marker>
+        <filter id="clay-glow" x="-10%" y="-10%" width="120%" height="120%">
+          <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="rgba(204, 107, 73, 0.25)" />
+        </filter>
+      </defs>
+    `;
+
+    for (let s of subgraphBoxes) {
+      svgContent += `
+        <g class="mermaid-subgraph">
+          <rect x="${s.x}" y="${s.y}" width="${s.width}" height="${s.height}" rx="10" fill="${subBg}" stroke="${subBorder}" stroke-width="1.2" stroke-dasharray="4 3" />
+          <rect x="${s.x + 10}" y="${s.y - 10}" width="${Math.min(s.width - 20, s.title.length * 7 + 16)}" height="18" rx="4" fill="#24201D" stroke="${subBorder}" stroke-width="1" />
+          <text x="${s.x + 18}" y="${s.y + 3}" fill="${terracotta}" font-family="monospace, sans-serif" font-size="9.5" font-weight="600" letter-spacing="0.5">${escapeHtml(s.title.toUpperCase())}</text>
+        </g>
+      `;
+    }
+
+    for (let e of edges) {
+      const src = nodeMap.get(e.from);
+      const tgt = nodeMap.get(e.to);
+      if (!src || !tgt) continue;
+
+      let x1, y1, x2, y2, cx1, cy1, cx2, cy2;
+
+      if (isTD) {
+        x1 = src.x + src.width / 2;
+        y1 = src.y + src.height;
+        x2 = tgt.x + tgt.width / 2;
+        y2 = tgt.y;
+
+        const dy = Math.max(16, (y2 - y1) * 0.5);
+        cx1 = x1;
+        cy1 = y1 + dy;
+        cx2 = x2;
+        cy2 = y2 - dy;
+      } else {
+        x1 = src.x + src.width;
+        y1 = src.y + src.height / 2;
+        x2 = tgt.x;
+        y2 = tgt.y + tgt.height / 2;
+
+        const dx = Math.max(16, (x2 - x1) * 0.5);
+        cx1 = x1 + dx;
+        cy1 = y1;
+        cx2 = x2 - dx;
+        cy2 = y2;
+      }
+
+      const strokeDash = e.style === 'dashed' ? 'stroke-dasharray="4 3"' : '';
+      const strokeWidth = e.style === 'thick' ? '2.4' : '1.5';
+      const pathD = `M ${x1} ${y1} C ${cx1} ${cy1}, ${cx2} ${cy2}, ${x2} ${y2}`;
+
+      svgContent += `
+        <g class="mermaid-edge-group">
+          <path d="${pathD}" fill="none" stroke="${edgeColor}" stroke-width="${strokeWidth}" ${strokeDash} marker-end="url(#clay-arrow)" opacity="0.85" />
+      `;
+
+      if (e.label) {
+        const midX = (x1 + x2) / 2;
+        const midY = (y1 + y2) / 2;
+        const lblW = Math.max(38, e.label.length * 6.5 + 12);
+        svgContent += `
+          <rect x="${midX - lblW / 2}" y="${midY - 9}" width="${lblW}" height="17" rx="4" fill="#1C1917" stroke="rgba(204, 107, 73, 0.4)" stroke-width="1" />
+          <text x="${midX}" y="${midY + 3}" text-anchor="middle" fill="#E8B4A2" font-family="sans-serif" font-size="9" font-weight="500">${escapeHtml(e.label)}</text>
+        `;
+      }
+      svgContent += `</g>`;
+    }
+
+    for (let n of nodeList) {
+      let shapeSvg = '';
+      const rx = n.shape === 'rounded' ? 16 : n.shape === 'stadium' ? 20 : 6;
+
+      if (n.shape === 'cylinder') {
+        shapeSvg = `
+          <path d="M ${n.x} ${n.y + 10} C ${n.x} ${n.y}, ${n.x + n.width} ${n.y}, ${n.x + n.width} ${n.y + 10} L ${n.x + n.width} ${n.y + n.height - 8} C ${n.x + n.width} ${n.y + n.height + 2}, ${n.x} ${n.y + n.height + 2}, ${n.x} ${n.y + n.height - 8} Z" fill="${nodeBg}" stroke="${nodeBorder}" stroke-width="1.3" filter="url(#clay-glow)" />
+          <path d="M ${n.x} ${n.y + 10} C ${n.x} ${n.y + 18}, ${n.x + n.width} ${n.y + 18}, ${n.x + n.width} ${n.y + 10}" fill="none" stroke="${nodeBorder}" stroke-width="1.1" />
+        `;
+      } else if (n.shape === 'diamond') {
+        const cx = n.x + n.width / 2;
+        const cy = n.y + n.height / 2;
+        shapeSvg = `<polygon points="${cx},${n.y} ${n.x + n.width},${cy} ${cx},${n.y + n.height} ${n.x},${cy}" fill="${nodeBg}" stroke="${nodeBorder}" stroke-width="1.3" filter="url(#clay-glow)" />`;
+      } else {
+        shapeSvg = `<rect x="${n.x}" y="${n.y}" width="${n.width}" height="${n.height}" rx="${rx}" fill="${nodeBg}" stroke="${nodeBorder}" stroke-width="1.3" filter="url(#clay-glow)" />`;
+      }
+
+      const textY = n.y + n.height / 2 + 3.5;
+      svgContent += `
+        <g class="mermaid-node-item" data-node-id="${escapeHtml(n.id)}" style="cursor: default;">
+          ${shapeSvg}
+          <text x="${n.x + n.width / 2}" y="${textY}" text-anchor="middle" fill="${nodeText}" font-family="Outfit, -apple-system, sans-serif" font-size="10.5" font-weight="500">${escapeHtml(n.label)}</text>
+        </g>
+      `;
+    }
+
+    const finalWidth = Math.max(300, totalWidth);
+    const finalHeight = Math.max(140, totalHeight);
+
+    return `
+      <svg class="mermaid-svg" viewBox="0 0 ${finalWidth} ${finalHeight}" data-base-width="${finalWidth}" data-base-height="${finalHeight}" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg" style="display: block; width: 100%; height: 100%; overflow: visible;">
+        ${svgContent}
+      </svg>
+    `.trim();
+  }
+
+  function createMermaidDiagramHtml(code) {
+    const rawCode = code.trim();
+    const svg = renderMermaidSvg(rawCode);
+    if (!svg) {
+      return `
+        <div class="code-block-wrapper">
+          <div class="code-block-header">
+            <span class="code-block-lang">mermaid</span>
+            <button class="btn-copy-code" type="button" title="Copy code">
+              <svg class="icon-code-copy" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              <span class="btn-copy-code-text">Copy</span>
+            </button>
+          </div>
+          <pre class="code-block-pre"><code>${escapeHtml(rawCode)}</code></pre>
+        </div>
+      `;
+    }
+
+    const wMatch = svg.match(/data-base-width="(\d+)"/);
+    const hMatch = svg.match(/data-base-height="(\d+)"/);
+    const baseW = wMatch ? parseInt(wMatch[1], 10) : 600;
+    const baseH = hMatch ? parseInt(hMatch[1], 10) : 380;
+
+    let titleText = 'Architecture Diagram';
+    if (/^sequenceDiagram\b/i.test(rawCode)) titleText = 'Sequence Diagram';
+    else if (/^classDiagram\b/i.test(rawCode)) titleText = 'Class Architecture';
+    else if (/^gantt\b/i.test(rawCode)) titleText = 'Workflow Timeline';
+
+    return `
+      <div class="mermaid-diagram-card" data-raw-mermaid="${escapeHtml(rawCode)}">
+        <div class="mermaid-diagram-header">
+          <div class="mermaid-diagram-title">
+            <svg class="icon-mermaid-diagram" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="7" height="7"></rect>
+              <rect x="14" y="3" width="7" height="7"></rect>
+              <rect x="14" y="14" width="7" height="7"></rect>
+              <rect x="3" y="14" width="7" height="7"></rect>
+              <line x1="10" y1="6.5" x2="14" y2="6.5"></line>
+              <line x1="6.5" y1="10" x2="6.5" y2="14"></line>
+              <line x1="14" y1="17.5" x2="10" y2="17.5"></line>
+            </svg>
+            <span>${escapeHtml(titleText)}</span>
+          </div>
+          <div class="mermaid-diagram-actions">
+            <div class="mermaid-zoom-pill" title="Zoom diagram (30% - 500%)">
+              <button type="button" class="btn-mermaid-zoom btn-mermaid-zoom-out" title="Zoom out">−</button>
+              <button type="button" class="btn-mermaid-zoom btn-mermaid-zoom-fit" title="Fit to window">Fit</button>
+              <button type="button" class="btn-mermaid-zoom btn-mermaid-zoom-reset" title="Reset zoom (100%)">100%</button>
+              <button type="button" class="btn-mermaid-zoom btn-mermaid-zoom-in" title="Zoom in">+</button>
+            </div>
+            <div class="mermaid-view-pill">
+              <button type="button" class="btn-mermaid-view-toggle btn-mermaid-active" data-view="diagram" title="Visual architecture graph">Diagram</button>
+              <button type="button" class="btn-mermaid-view-toggle" data-view="code" title="Mermaid syntax source">Code</button>
+            </div>
+            <button type="button" class="btn-mermaid-action btn-mermaid-copy-svg" title="Copy rendered SVG markup">Copy SVG</button>
+            <button type="button" class="btn-mermaid-action btn-mermaid-copy-code" title="Copy Mermaid text">Copy</button>
+          </div>
+        </div>
+        <div class="mermaid-diagram-viewport" tabindex="0" title="Click and drag to pan, or use scrollbars">
+          <div class="mermaid-viewport-inner">
+            <div class="mermaid-diagram-canvas" data-zoom="1.0" data-base-width="${baseW}" data-base-height="${baseH}" style="width: ${baseW}px; height: ${baseH}px; min-width: ${baseW}px;">
+              ${svg}
+            </div>
+          </div>
+        </div>
+        <div class="mermaid-code-fallback" style="display: none;">
+          <pre class="code-block-pre"><code>${escapeHtml(rawCode)}</code></pre>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderMermaidGraph(mermaid, targetFile = null) {
+    if (!mermaidCode) return;
+    const activeTarget = targetFile !== undefined ? targetFile : selectedRepoFile;
+    if (mermaid && mermaid.trim() && mermaid.trim() !== 'graph TD') {
+      mermaidCode.textContent = mermaid;
+      mermaidCode.style.display = 'block';
+    } else {
+      mermaidCode.style.display = 'block';
+      if (activeTarget) {
+        const shortName = activeTarget.split(/[\\/]/).pop() || activeTarget;
+        mermaidCode.textContent = `No call relationships or symbols found for '${shortName}'.\nClick 'Scan & Index Workspace' to analyze this file or select another file.`;
+      } else {
+        mermaidCode.textContent = "No SQLite code graph available for this repository.\nClick 'Scan & Index Workspace' to analyze codebase structure.";
+      }
+    }
+  }
+
+  async function fetchMermaidGraph(targetFile = null) {
+    const path = inputRepoPath ? inputRepoPath.value.trim() : currentRepoPath;
+    if (!path) return;
+    const activeTarget = targetFile !== undefined ? targetFile : selectedRepoFile;
+    if (isVsCode) {
+      vscode.postMessage({ command: 'getMermaidGraph', path, file: activeTarget });
+    } else {
+      try {
+        const fileQuery = activeTarget ? `&file=${encodeURIComponent(activeTarget)}` : '';
+        const graphRes = await fetch(`${BACKEND_URL}/api/graph/mermaid?path=${encodeURIComponent(path)}${fileQuery}`);
+        if (graphRes.ok) {
+          const graphData = await graphRes.json();
+          renderMermaidGraph(graphData.mermaid, activeTarget);
+        }
+      } catch (err) {}
+    }
+  }
+
+  function setSelectedRepoFile(filePath, fileName = null) {
+    if (!filePath || selectedRepoFile === filePath) {
+      selectedRepoFile = null;
+      if (repoFileTree) {
+        repoFileTree.querySelectorAll('.tree-file.selected-file').forEach(el => el.classList.remove('selected-file'));
+      }
+      if (hierarchyFileBadge) hierarchyFileBadge.style.display = 'none';
+      if (btnClearFileSelection) btnClearFileSelection.style.display = 'none';
+      if (hierarchyCardTitle) hierarchyCardTitle.textContent = 'Call Hierarchy & Relationships';
+      fetchMermaidGraph(null);
+      showToast('Cleared file filter // Showing entire repository hierarchy', 'info');
+      return;
+    }
+
+    selectedRepoFile = filePath;
+    const displayName = fileName || filePath.split(/[\\/]/).pop() || filePath;
+
+    if (repoFileTree) {
+      repoFileTree.querySelectorAll('.tree-file').forEach(el => {
+        const itemRel = el.getAttribute('data-file-path');
+        const itemFull = el.getAttribute('data-full-path');
+        if (itemRel === filePath || itemFull === filePath || (itemRel && itemRel.endsWith(displayName))) {
+          el.classList.add('selected-file');
+        } else {
+          el.classList.remove('selected-file');
+        }
+      });
+    }
+
+    if (hierarchyFileBadge) {
+      hierarchyFileBadge.style.display = 'inline-flex';
+      if (hierarchyFileBadgeText) hierarchyFileBadgeText.textContent = displayName;
+    }
+    if (btnClearFileSelection) {
+      btnClearFileSelection.style.display = 'inline-block';
+    }
+    if (hierarchyCardTitle) {
+      hierarchyCardTitle.textContent = `Call Hierarchy & Relationships // ${displayName}`;
+    }
+
+    showToast(`Selected: ${displayName} // Hierarchy filtered`, 'success');
+    fetchMermaidGraph(selectedRepoFile);
+  }
+
+  if (hierarchyFileBadge) {
+    hierarchyFileBadge.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setSelectedRepoFile(null);
+    });
+  }
+
+  if (btnClearFileSelection) {
+    btnClearFileSelection.addEventListener('click', () => {
+      setSelectedRepoFile(null);
+    });
+  }
+
+  function resetRepoGraphState() {
+    renderMermaidGraph(null, selectedRepoFile);
     if (repoStatusLabel) {
       repoStatusLabel.textContent = currentRepoPath ? "Ready to scan (Path updated)" : "No repository selected";
     }
@@ -1946,6 +3328,10 @@
   if (btnResetRepoPath) {
     btnResetRepoPath.addEventListener('click', () => {
       currentRepoPath = '';
+      selectedRepoFile = null;
+      if (hierarchyFileBadge) hierarchyFileBadge.style.display = 'none';
+      if (btnClearFileSelection) btnClearFileSelection.style.display = 'none';
+      if (hierarchyCardTitle) hierarchyCardTitle.textContent = 'Call Hierarchy & Relationships';
       if (inputRepoPath) inputRepoPath.value = '';
       localStorage.removeItem('codebase_copilot_repo_path');
       resetRepoGraphState();
@@ -2335,8 +3721,15 @@
           }
         }
 
+        const isSelected = selectedRepoFile && (
+          node.path === selectedRepoFile ||
+          fullPath === selectedRepoFile ||
+          node.name === selectedRepoFile ||
+          selectedRepoFile.endsWith(node.name)
+        );
+
         return `
-          <div class="tree-node tree-file" style="padding-left: ${indent + 22}px;" data-file-path="${escapeHtml(node.path)}" data-full-path="${escapeHtml(fullPath)}" title="${escapeHtml(fullPath)}&#10;Single-click: Copy full path&#10;Double-click: Open file in IDE">
+          <div class="tree-node tree-file ${isSelected ? 'selected-file' : ''}" style="padding-left: ${indent + 22}px;" data-file-path="${escapeHtml(node.path)}" data-full-path="${escapeHtml(fullPath)}" title="${escapeHtml(fullPath)}&#10;Single-click: Select file to view call hierarchy&#10;Double-click: Open file in IDE">
             ${badge}
             <span class="tree-file-name">${escapeHtml(node.name)}</span>
             ${metaStr ? `<span class="tree-file-meta">${metaStr}</span>` : ''}
@@ -2362,17 +3755,14 @@
       });
     });
 
-    // Single-click copies full path, Double-click opens file in IDE / OS
+    // Single-click selects file to focus Call Hierarchy, Double-click opens file in IDE / OS
     let fileClickTimer = null;
     repoFileTree.querySelectorAll('.tree-file').forEach(fileItem => {
       fileItem.addEventListener('click', (e) => {
         e.stopPropagation();
-        let fullPath = fileItem.getAttribute('data-full-path') || fileItem.getAttribute('data-file-path');
-        const currentRoot = (inputRepoPath ? inputRepoPath.value.trim() : '') || currentRepoPath || '';
-        if (fullPath && !/^[a-zA-Z]:[\\\/]/.test(fullPath) && !fullPath.startsWith('/') && currentRoot) {
-          const sep = currentRoot.includes('/') && !currentRoot.includes('\\') ? '/' : '\\';
-          fullPath = `${currentRoot.replace(/[\\\/]+$/, '')}${sep}${fullPath.replace(/^[\\\/]+/, '')}`;
-        }
+        const filePath = fileItem.getAttribute('data-file-path') || '';
+        const fullPath = fileItem.getAttribute('data-full-path') || filePath;
+        const fileName = fileItem.querySelector('.tree-file-name')?.textContent || filePath;
 
         if (fileClickTimer) {
           clearTimeout(fileClickTimer);
@@ -2380,34 +3770,12 @@
         }
         fileClickTimer = setTimeout(() => {
           fileClickTimer = null;
-          if (fullPath) {
-            const copyPromise = (navigator.clipboard && navigator.clipboard.writeText)
-              ? navigator.clipboard.writeText(fullPath)
-              : new Promise((resolve, reject) => {
-                  try {
-                    const ta = document.createElement('textarea');
-                    ta.value = fullPath;
-                    ta.style.position = 'fixed';
-                    ta.style.opacity = '0';
-                    document.body.appendChild(ta);
-                    ta.focus();
-                    ta.select();
-                    const success = document.execCommand('copy');
-                    document.body.removeChild(ta);
-                    if (success) resolve();
-                    else reject(new Error('Copy failed'));
-                  } catch (err) {
-                    reject(err);
-                  }
-                });
-
-            copyPromise.then(() => {
-              showToast(`Copied full path: ${fullPath}`, 'success');
-            }).catch(() => {
-              showToast(`Full path: ${fullPath}`, 'info');
-            });
+          if (selectedRepoFile === filePath || selectedRepoFile === fullPath) {
+            setSelectedRepoFile(null); // Toggle deselect
+          } else {
+            setSelectedRepoFile(filePath, fileName);
           }
-        }, 220);
+        }, 180);
       });
 
       fileItem.addEventListener('dblclick', (e) => {
@@ -2542,11 +3910,16 @@
       currentRepoPath = path;
       localStorage.setItem('codebase_copilot_repo_path', currentRepoPath);
     }
-    if (repoStatusLabel) repoStatusLabel.textContent = 'Scanning AST & Call Graph...';
+    if (repoStatusLabel) {
+      const activeFileShort = selectedRepoFile ? (selectedRepoFile.split(/[\\/]/).pop() || selectedRepoFile) : null;
+      repoStatusLabel.textContent = activeFileShort
+        ? `Scanning AST & Call Graph (${activeFileShort})...`
+        : 'Scanning AST & Call Graph...';
+    }
     if (btnScanRepo) btnScanRepo.disabled = true;
 
     if (isVsCode) {
-      vscode.postMessage({ command: 'scanWorkspace', path });
+      vscode.postMessage({ command: 'scanWorkspace', path, file: selectedRepoFile });
       setTimeout(() => {
         if (btnScanRepo) btnScanRepo.disabled = false;
       }, 15000);
@@ -2557,14 +3930,15 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ workspace_path: path })
         });
-        const graphRes = await fetch(`${BACKEND_URL}/api/graph/mermaid?path=${encodeURIComponent(path)}`);
+        const fileQuery = selectedRepoFile ? `&file=${encodeURIComponent(selectedRepoFile)}` : '';
+        const graphRes = await fetch(`${BACKEND_URL}/api/graph/mermaid?path=${encodeURIComponent(path)}${fileQuery}`);
         const secRes = await fetch(`${BACKEND_URL}/api/repo/security-audit?path=${encodeURIComponent(path)}`);
 
         if (scanRes.ok) {
           const scanData = await scanRes.json();
           const graphData = graphRes.ok ? await graphRes.json() : { mermaid: '', available: false };
           const secData = secRes.ok ? await secRes.json() : null;
-          applyScanResults(scanData, graphData.mermaid, secData);
+          applyScanResults(scanData, graphData.mermaid, secData, selectedRepoFile);
         }
       } catch (err) {
         if (repoStatusLabel) repoStatusLabel.textContent = `Scan failed: ${err.message}`;
@@ -2574,7 +3948,7 @@
     }
   }
 
-  function applyScanResults(scanData, mermaid, security) {
+  function applyScanResults(scanData, mermaid, security, focusedFile = null) {
     if (btnScanRepo) btnScanRepo.disabled = false;
     if (repoStatsText && scanData) {
       repoStatsText.textContent = `Indexed: ${scanData.filesCount ?? 0} Files // ${scanData.symbolsCount ?? 0} Functions & Classes // ${scanData.chunksCount ?? 0} Vector Chunks`;
@@ -2582,13 +3956,7 @@
     if (repoStatusLabel) {
       repoStatusLabel.textContent = 'Indexed & Synced (SQLite Graph Active)';
     }
-    if (mermaidCode) {
-      if (mermaid && mermaid.trim() && mermaid.trim() !== 'graph TD') {
-        mermaidCode.textContent = mermaid;
-      } else {
-        mermaidCode.textContent = "No SQLite code graph available for this repository.\nClick 'Scan & Index Workspace' to analyze codebase structure.";
-      }
-    }
+    renderMermaidGraph(mermaid, focusedFile !== undefined ? focusedFile : selectedRepoFile);
     if (security) {
       applySecurityResults(security);
     }
@@ -2665,8 +4033,12 @@
 
       case 'scanResult':
         if (btnScanRepo) btnScanRepo.disabled = false;
-        applyScanResults(msg.status, msg.mermaid, msg.security);
+        applyScanResults(msg.status, msg.mermaid, msg.security, msg.file);
         loadRepoTree(currentRepoPath);
+        break;
+
+      case 'mermaidResult':
+        renderMermaidGraph(msg.mermaid, msg.file);
         break;
 
       case 'scanError':
@@ -2681,7 +4053,19 @@
       case 'activeFileChanged':
         if (msg.file) {
           activeEditorFile = msg.file;
+          if (msg.line !== undefined) {
+            activeEditorCursorLine = msg.line;
+          }
           if (detectedSystem) applySystemInfo(detectedSystem);
+        }
+        break;
+
+      case 'cursorPositionChanged':
+        if (msg.line !== undefined) {
+          activeEditorCursorLine = msg.line;
+        }
+        if (msg.file) {
+          activeEditorFile = msg.file;
         }
         break;
 
@@ -2709,15 +4093,18 @@
 
       case 'repoPathSelected':
         if (msg.path) {
+          const isSameRepo = currentRepoPath === msg.path;
           currentRepoPath = msg.path;
           if (inputRepoPath) inputRepoPath.value = currentRepoPath;
           localStorage.setItem('codebase_copilot_repo_path', currentRepoPath);
-          resetRepoGraphState();
-          loadSecurityAudit(currentRepoPath);
-          if (msg.tree) {
-            renderRepoTree(msg.tree, msg.stats, msg.path);
-          } else {
-            loadRepoTree(currentRepoPath);
+          if (!isSameRepo) {
+            resetRepoGraphState();
+            loadSecurityAudit(currentRepoPath);
+            if (msg.tree) {
+              renderRepoTree(msg.tree, msg.stats, msg.path);
+            } else {
+              loadRepoTree(currentRepoPath);
+            }
           }
         }
         break;
@@ -2748,31 +4135,310 @@
   // ==========================================
   // Helper Utilities
   // ==========================================
+  function computeTokenLCS(tokensA, tokensB) {
+    const m = tokensA.length;
+    const n = tokensB.length;
+    const dp = Array.from({ length: m + 1 }, () => new Uint16Array(n + 1));
+    for (let i = 0; i < m; i++) {
+      for (let j = 0; j < n; j++) {
+        if (tokensA[i] === tokensB[j]) {
+          dp[i + 1][j + 1] = dp[i][j] + 1;
+        } else {
+          dp[i + 1][j + 1] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+        }
+      }
+    }
+
+    let i = m, j = n;
+    const spansA = [];
+    const spansB = [];
+    while (i > 0 || j > 0) {
+      if (i > 0 && j > 0 && tokensA[i - 1] === tokensB[j - 1]) {
+        spansA.unshift({ text: tokensA[i - 1], type: 'same' });
+        spansB.unshift({ text: tokensB[j - 1], type: 'same' });
+        i--; j--;
+      } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+        spansB.unshift({ text: tokensB[j - 1], type: 'add' });
+        j--;
+      } else if (i > 0 && (j === 0 || dp[i][j - 1] < dp[i - 1][j])) {
+        spansA.unshift({ text: tokensA[i - 1], type: 'del' });
+        i--;
+      }
+    }
+    return { spansA, spansB };
+  }
+
+  function renderWordDiffSpans(spans) {
+    return spans.map(s => {
+      if (s.type === 'del') {
+        return `<span class="diff-word-del">${escapeHtml(s.text)}</span>`;
+      } else if (s.type === 'add') {
+        return `<span class="diff-word-add">${escapeHtml(s.text)}</span>`;
+      }
+      return escapeHtml(s.text);
+    }).join('');
+  }
+
   function renderDiffLines(diffText) {
-    let lineNum = 1;
-    return diffText
-      .split('\n')
-      .map((line) => {
-        let cls = '';
-        if (line.startsWith('+')) cls = 'diff-add';
-        else if (line.startsWith('-')) cls = 'diff-del';
-        return `<div class="diff-line ${cls}"><span class="diff-line-num">${lineNum++}</span><span>${escapeHtml(line)}</span></div>`;
-      })
-      .join('');
+    if (!diffText) return '';
+    const rawLines = diffText.split('\n');
+    const hunkHeaderRe = /^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/;
+
+    let oldLine = 1;
+    let newLine = 1;
+    let insideHunk = false;
+    let hunkIdx = 0;
+
+    const parsedItems = [];
+    let idx = 0;
+
+    while (idx < rawLines.length) {
+      const line = rawLines[idx];
+      const hunkMatch = line.match(hunkHeaderRe);
+      if (hunkMatch) {
+        oldLine = parseInt(hunkMatch[1], 10);
+        newLine = parseInt(hunkMatch[2], 10);
+        insideHunk = true;
+        parsedItems.push({
+          type: 'hunk_header',
+          text: line,
+          hunkIdx: hunkIdx++
+        });
+        idx++;
+        continue;
+      }
+
+      if (line.startsWith('---') || line.startsWith('+++')) {
+        parsedItems.push({ type: 'meta', text: line, rawIdx: idx });
+        idx++;
+        continue;
+      }
+
+      if (line.startsWith('-')) {
+        // Collect all consecutive deletion lines in this block
+        const delLines = [];
+        let dIdx = idx;
+        while (dIdx < rawLines.length && rawLines[dIdx].startsWith('-') && !rawLines[dIdx].startsWith('---')) {
+          delLines.push({
+            type: 'del',
+            text: rawLines[dIdx],
+            rawIdx: dIdx
+          });
+          dIdx++;
+        }
+
+        // Collect all consecutive addition lines immediately following
+        const addLines = [];
+        let aIdx = dIdx;
+        while (aIdx < rawLines.length && rawLines[aIdx].startsWith('+') && !rawLines[aIdx].startsWith('+++')) {
+          addLines.push({
+            type: 'add',
+            text: rawLines[aIdx],
+            rawIdx: aIdx
+          });
+          aIdx++;
+        }
+
+        const pairCount = Math.min(delLines.length, addLines.length);
+        const tokenRe = /\w+|[^\w\s]|\s+/g;
+
+        // Pair up index-by-index for intra-line word diffs
+        for (let k = 0; k < pairCount; k++) {
+          const oldContent = delLines[k].text.slice(1);
+          const newContent = addLines[k].text.slice(1);
+          const tokensOld = oldContent.match(tokenRe) || [oldContent];
+          const tokensNew = newContent.match(tokenRe) || [newContent];
+          const { spansA, spansB } = computeTokenLCS(tokensOld, tokensNew);
+          delLines[k].spans = spansA;
+          addLines[k].spans = spansB;
+          delLines[k].pairedAdd = addLines[k];
+          addLines[k].pairedDel = delLines[k];
+        }
+
+        // Assign line numbers and append deletions
+        for (let k = 0; k < delLines.length; k++) {
+          delLines[k].oldNum = insideHunk ? oldLine++ : '';
+          delLines[k].newNum = '';
+          parsedItems.push(delLines[k]);
+        }
+
+        // Assign line numbers and append additions
+        for (let k = 0; k < addLines.length; k++) {
+          addLines[k].oldNum = '';
+          addLines[k].newNum = insideHunk ? newLine++ : '';
+          parsedItems.push(addLines[k]);
+        }
+
+        idx = aIdx;
+        continue;
+      }
+
+      if (line.startsWith('+')) {
+        parsedItems.push({
+          type: 'add',
+          text: line,
+          rawIdx: idx,
+          oldNum: '',
+          newNum: insideHunk ? newLine++ : ''
+        });
+        idx++;
+        continue;
+      }
+
+      // Context line
+      parsedItems.push({
+        type: 'context',
+        text: line,
+        rawIdx: idx,
+        oldNum: insideHunk ? oldLine++ : '',
+        newNum: insideHunk ? newLine++ : ''
+      });
+      idx++;
+    }
+
+    // Split Mode Rendering (Side-by-Side 2 columns)
+    if (diffViewMode === 'split') {
+      let splitHtml = '<table class="diff-split-table"><tbody>';
+      for (let i = 0; i < parsedItems.length; i++) {
+        const item = parsedItems[i];
+        if (item.type === 'hunk_header') {
+          splitHtml += `
+            <tr class="diff-hunk-header">
+              <td colspan="2" style="padding: 2px 8px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; width: 100%;">
+                  <span class="diff-hunk-title">... ${escapeHtml(item.text)}</span>
+                  <div class="diff-hunk-actions">
+                    <button type="button" class="btn-hunk-action btn-hunk-discard" data-hunk-idx="${item.hunkIdx}" title="Discard this hunk">✗ Discard</button>
+                  </div>
+                </div>
+              </td>
+            </tr>
+          `;
+        } else if (item.type === 'meta') {
+          splitHtml += `
+            <tr class="diff-meta">
+              <td colspan="2" style="padding: 1px 8px;">${escapeHtml(item.text)}</td>
+            </tr>
+          `;
+        } else if (item.type === 'del') {
+          const leftContent = item.spans ? renderWordDiffSpans(item.spans) : escapeHtml(item.text.slice(1));
+          const leftGutter = `<span class="diff-split-gutter">${item.oldNum}</span>`;
+
+          if (item.pairedAdd) {
+            const paired = item.pairedAdd;
+            paired._splitRendered = true;
+            const rightContent = paired.spans ? renderWordDiffSpans(paired.spans) : escapeHtml(paired.text.slice(1));
+            const rightGutter = `<span class="diff-split-gutter">${paired.newNum}</span>`;
+            splitHtml += `
+              <tr class="diff-split-row">
+                <td class="diff-split-col diff-split-col-left diff-del">${leftGutter}<span class="diff-marker">-</span><span class="diff-line-code">${leftContent}</span></td>
+                <td class="diff-split-col diff-add">${rightGutter}<span class="diff-marker">+</span><span class="diff-line-code editable-diff-line" contenteditable="true" spellcheck="false" data-raw-idx="${paired.rawIdx}" title="Click to edit line before accepting">${rightContent}</span></td>
+              </tr>
+            `;
+          } else {
+            splitHtml += `
+              <tr class="diff-split-row">
+                <td class="diff-split-col diff-split-col-left diff-del">${leftGutter}<span class="diff-marker">-</span><span class="diff-line-code">${leftContent}</span></td>
+                <td class="diff-split-col" style="background: rgba(0,0,0,0.06);"><span class="diff-split-gutter"></span></td>
+              </tr>
+            `;
+          }
+        } else if (item.type === 'add') {
+          if (item._splitRendered) {
+            continue; // Already rendered side-by-side with paired deletion
+          }
+          const rightContent = item.spans ? renderWordDiffSpans(item.spans) : escapeHtml(item.text.slice(1));
+          const rightGutter = `<span class="diff-split-gutter">${item.newNum}</span>`;
+          splitHtml += `
+            <tr class="diff-split-row">
+              <td class="diff-split-col diff-split-col-left" style="background: rgba(0,0,0,0.06);"><span class="diff-split-gutter"></span></td>
+              <td class="diff-split-col diff-add">${rightGutter}<span class="diff-marker">+</span><span class="diff-line-code editable-diff-line" contenteditable="true" spellcheck="false" data-raw-idx="${item.rawIdx}" title="Click to edit line before accepting">${rightContent}</span></td>
+            </tr>
+          `;
+        } else {
+          const content = escapeHtml(item.text.startsWith(' ') ? item.text.slice(1) : item.text);
+          const leftGutter = `<span class="diff-split-gutter">${item.oldNum}</span>`;
+          const rightGutter = `<span class="diff-split-gutter">${item.newNum}</span>`;
+          splitHtml += `
+            <tr class="diff-split-row diff-context">
+              <td class="diff-split-col diff-split-col-left">${leftGutter}<span class="diff-marker">&nbsp;</span><span class="diff-line-code">${content}</span></td>
+              <td class="diff-split-col">${rightGutter}<span class="diff-marker">&nbsp;</span><span class="diff-line-code">${content}</span></td>
+            </tr>
+          `;
+        }
+      }
+      splitHtml += '</tbody></table>';
+      return splitHtml;
+    }
+
+    // Unified Mode Rendering
+    return parsedItems.map(item => {
+      if (item.type === 'hunk_header') {
+        return `
+          <div class="diff-line diff-hunk-header">
+            <div class="diff-hunk-title-wrap">
+              <span class="diff-line-gutter"><span>...</span><span>...</span></span>
+              <span>${escapeHtml(item.text)}</span>
+            </div>
+            <div class="diff-hunk-actions">
+              <button type="button" class="btn-hunk-action btn-hunk-discard" data-hunk-idx="${item.hunkIdx}" title="Discard this hunk">✗ Discard</button>
+            </div>
+          </div>
+        `;
+      }
+      if (item.type === 'meta') {
+        return `<div class="diff-line diff-meta"><span class="diff-line-gutter"><span></span><span></span></span><span>${escapeHtml(item.text)}</span></div>`;
+      }
+
+      if (item.type === 'del') {
+        const innerContent = item.spans ? renderWordDiffSpans(item.spans) : escapeHtml(item.text.slice(1));
+        return `<div class="diff-line diff-del"><span class="diff-line-gutter"><span>${item.oldNum}</span><span></span></span><span class="diff-line-content"><span class="diff-marker">-</span><span class="diff-line-code">${innerContent}</span></span></div>`;
+      }
+
+      if (item.type === 'add') {
+        const innerContent = item.spans ? renderWordDiffSpans(item.spans) : escapeHtml(item.text.slice(1));
+        return `<div class="diff-line diff-add"><span class="diff-line-gutter"><span></span><span>${item.newNum}</span></span><span class="diff-line-content"><span class="diff-marker">+</span><span class="diff-line-code editable-diff-line" contenteditable="true" spellcheck="false" data-raw-idx="${item.rawIdx}" title="Click to edit line before accepting">${innerContent}</span></span></div>`;
+      }
+
+      const content = escapeHtml(item.text.startsWith(' ') ? item.text.slice(1) : item.text);
+      return `<div class="diff-line diff-context"><span class="diff-line-gutter"><span>${item.oldNum}</span><span>${item.newNum}</span></span><span class="diff-line-content"><span class="diff-marker">&nbsp;</span><span class="diff-line-code">${content}</span></span></div>`;
+    }).join('');
   }
 
   function formatMarkdown(text) {
     if (!text) return '';
 
-    // 1. Stash and protect complete code blocks
+    // 1. Stash and protect complete or streaming code blocks
     const codeBlocks = [];
-    let out = text.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, function (_, lang, code) {
-      const displayLang = lang ? lang.toLowerCase() : 'code';
-      const index = codeBlocks.length;
-      codeBlocks.push(
-        `<div class="code-block-wrapper">` +
+
+    function createCodeBlockHtml(displayLang, code) {
+      const isMermaid = displayLang === 'mermaid' ||
+                        displayLang === 'flowchart' ||
+                        displayLang === 'diagram' ||
+                        displayLang === 'architecture' ||
+                        (/^\s*(?:graph|flowchart)\s+(?:TD|TB|LR|BT|RL)\b/i.test(code)) ||
+                        (/^\s*(?:sequenceDiagram|classDiagram)\b/i.test(code));
+      if (isMermaid) {
+        return createMermaidDiagramHtml(code.trim());
+      }
+
+      const isDiff = displayLang === 'diff' ||
+                     displayLang === 'patch' ||
+                     code.includes('<<<<<<< SEARCH') ||
+                     (code.includes('--- ') && code.includes('+++ ') && code.includes('@@'));
+
+      const diffBtnHtml = isDiff ? (
+        `<button class="btn-chat-apply-diff" type="button" title="View & apply in Diff tab">` +
+        `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>` +
+        `<span>Diff Tab</span>` +
+        `</button>`
+      ) : '';
+
+      return (
+        `<div class="code-block-wrapper" data-is-diff="${isDiff ? 'true' : 'false'}">` +
         `<div class="code-block-header">` +
         `<span class="code-block-lang">${escapeHtml(displayLang)}</span>` +
+        diffBtnHtml +
         `<button class="btn-copy-code" type="button" title="Copy code">` +
         `<svg class="icon-code-copy" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>` +
         `<span class="btn-copy-code-text">Copy</span>` +
@@ -2781,6 +4447,29 @@
         `<pre class="code-block-pre"><code>${escapeHtml(code)}</code></pre>` +
         `</div>`
       );
+    }
+
+    // Match code blocks (handles: CRLF, 3 or more backticks, trailing spaces after language, and unclosed streaming blocks at end of text)
+    let out = text.replace(/(?:^|\n)[ \t]*(`{3,})([a-zA-Z0-9_-]*)[^\S\r\n]*\r?\n([\s\S]*?)(?:\r?\n[ \t]*\1[^\S\r\n]*(?:\r?\n|$)|$)/g, function (match, fence, lang, code) {
+      if (!code && !match.endsWith(fence)) return match;
+      const displayLang = (lang ? lang.trim().toLowerCase() : '') || 'code';
+      const index = codeBlocks.length;
+      codeBlocks.push(createCodeBlockHtml(displayLang, code.trimEnd()));
+      return `\n__CODE_BLOCK_${index}__\n`;
+    });
+
+    // Also protect raw unfenced SEARCH/REPLACE blocks if emitted outside triple backticks
+    out = out.replace(/(?:^|\n)(<{5,7}\s*SEARCH[\s\S]*?={5,7}[\s\S]*?>{5,7}\s*REPLACE)/g, function (m, block) {
+      const index = codeBlocks.length;
+      codeBlocks.push(createCodeBlockHtml('diff', block.trim()));
+      return `\n__CODE_BLOCK_${index}__\n`;
+    });
+
+    // Also protect raw unfenced unified diff blocks if emitted outside triple backticks
+    out = out.replace(/(?:^|\n)(--- (?:a\/)?[^\n\r]+\r?\n\+\+\+ (?:b\/)?[^\n\r]+\r?\n@@\s+-\d+[\s\S]*?)(?=(?:\r?\n\r?\n[^\s+-@])|(?:\r?\n(?=[A-Z][a-z]+:))|$)/g, function (m, diffText) {
+      if (diffText.includes('__CODE_BLOCK_')) return m;
+      const index = codeBlocks.length;
+      codeBlocks.push(createCodeBlockHtml('diff', diffText.trim()));
       return `\n__CODE_BLOCK_${index}__\n`;
     });
 
@@ -3001,6 +4690,242 @@
       });
     } else {
       fallbackCopyText(textToCopy, resetBtn);
+    }
+  });
+
+  // Delegated dynamic diff apply button listener for chat code blocks
+  document.addEventListener('click', async (e) => {
+    const diffBtn = e.target.closest('.btn-chat-apply-diff');
+    if (!diffBtn) return;
+    e.stopPropagation();
+
+    const wrapper = diffBtn.closest('.code-block-wrapper');
+    if (!wrapper) return;
+    const codeEl = wrapper.querySelector('code');
+    if (!codeEl) return;
+
+    const rawText = codeEl.innerText || codeEl.textContent || '';
+    let target = extractDiffFilename(rawText);
+    if (!target && activeEditorFile) {
+      const parts = activeEditorFile.split(/[\\/]/);
+      target = parts[parts.length - 1];
+    }
+    if (!target) {
+      target = getPrimaryRepoFile(lastUserQuery || rawText);
+    }
+
+    let finalDiff = rawText;
+    if (rawText.includes('<<<<<<< SEARCH')) {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/agent/compute-diff`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            workspace_path: currentRepoPath,
+            target_file: target,
+            code_or_snippet: rawText,
+            preferred_line: activeEditorCursorLine || undefined
+          })
+        });
+        if (res.ok) {
+          const cData = await res.json();
+          if (cData.diff) {
+            finalDiff = cData.diff;
+          }
+        }
+      } catch (err) {
+        // fallback to rawText
+      }
+    }
+
+    stageDiff(target, finalDiff);
+    switchTab('diff');
+    showToast(`Staged changes for ${target} in Diff tab`, 'info');
+  });
+
+  // Delegated view toggle listener for mermaid architecture diagram cards
+  document.addEventListener('click', (e) => {
+    const toggleBtn = e.target.closest('.btn-mermaid-view-toggle');
+    if (!toggleBtn) return;
+    const card = toggleBtn.closest('.mermaid-diagram-card');
+    if (!card) return;
+    e.stopPropagation();
+
+    const view = toggleBtn.getAttribute('data-view');
+    const viewport = card.querySelector('.mermaid-diagram-viewport');
+    const fallback = card.querySelector('.mermaid-code-fallback');
+    const zoomPill = card.querySelector('.mermaid-zoom-pill');
+    const allToggles = card.querySelectorAll('.btn-mermaid-view-toggle');
+
+    allToggles.forEach(b => b.classList.remove('btn-mermaid-active'));
+    toggleBtn.classList.add('btn-mermaid-active');
+
+    if (view === 'code') {
+      if (viewport) viewport.style.display = 'none';
+      if (fallback) fallback.style.display = 'block';
+      if (zoomPill) zoomPill.style.display = 'none';
+    } else {
+      if (viewport) viewport.style.display = 'block';
+      if (fallback) fallback.style.display = 'none';
+      if (zoomPill) zoomPill.style.display = 'inline-flex';
+    }
+  });
+
+  // Delegated copy code button listener for mermaid architecture diagram cards
+  document.addEventListener('click', (e) => {
+    const copyBtn = e.target.closest('.btn-mermaid-copy-code');
+    if (!copyBtn) return;
+    const card = copyBtn.closest('.mermaid-diagram-card');
+    if (!card) return;
+    e.stopPropagation();
+
+    const rawCode = card.getAttribute('data-raw-mermaid') || '';
+    if (!rawCode) return;
+
+    copyBtn.classList.add('copied');
+    const origText = copyBtn.textContent;
+    copyBtn.textContent = 'Copied!';
+    const reset = () => {
+      setTimeout(() => {
+        copyBtn.classList.remove('copied');
+        copyBtn.textContent = origText || 'Copy';
+      }, 2000);
+    };
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(rawCode).then(reset).catch(() => fallbackCopyText(rawCode, reset));
+    } else {
+      fallbackCopyText(rawCode, reset);
+    }
+  });
+
+  // Delegated copy SVG markup button listener for mermaid architecture diagram cards
+  document.addEventListener('click', (e) => {
+    const copySvgBtn = e.target.closest('.btn-mermaid-copy-svg');
+    if (!copySvgBtn) return;
+    const card = copySvgBtn.closest('.mermaid-diagram-card');
+    if (!card) return;
+    e.stopPropagation();
+
+    const svgEl = card.querySelector('.mermaid-diagram-canvas svg');
+    if (!svgEl) return;
+    const svgMarkup = svgEl.outerHTML;
+
+    copySvgBtn.classList.add('copied');
+    const origText = copySvgBtn.textContent;
+    copySvgBtn.textContent = 'Copied!';
+    const reset = () => {
+      setTimeout(() => {
+        copySvgBtn.classList.remove('copied');
+        copySvgBtn.textContent = origText || 'Copy SVG';
+      }, 2000);
+    };
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(svgMarkup).then(reset).catch(() => fallbackCopyText(svgMarkup, reset));
+    } else {
+      fallbackCopyText(svgMarkup, reset);
+    }
+  });
+
+  // Delegated zoom buttons (+ / 100% / -) for mermaid architecture diagram cards (50% to 500%)
+  document.addEventListener('click', (e) => {
+    const zoomBtn = e.target.closest('.btn-mermaid-zoom');
+    if (!zoomBtn) return;
+    const card = zoomBtn.closest('.mermaid-diagram-card');
+    if (!card) return;
+    e.stopPropagation();
+
+    const canvas = card.querySelector('.mermaid-diagram-canvas');
+    const viewport = card.querySelector('.mermaid-diagram-viewport');
+    if (!canvas) return;
+
+    let currentZoom = parseFloat(canvas.dataset.zoom || '1.0');
+    const baseW = parseFloat(canvas.dataset.baseWidth || '600');
+    const baseH = parseFloat(canvas.dataset.baseHeight || '380');
+    let isFitAction = false;
+
+    if (zoomBtn.classList.contains('btn-mermaid-zoom-in')) {
+      currentZoom = Math.min(5.0, Math.round((currentZoom + 0.25) * 100) / 100);
+    } else if (zoomBtn.classList.contains('btn-mermaid-zoom-out')) {
+      currentZoom = Math.max(0.3, Math.round((currentZoom - 0.25) * 100) / 100);
+    } else if (zoomBtn.classList.contains('btn-mermaid-zoom-reset')) {
+      currentZoom = 1.0;
+    } else if (zoomBtn.classList.contains('btn-mermaid-zoom-fit')) {
+      isFitAction = true;
+      if (viewport && baseW > 0 && baseH > 0) {
+        const availW = Math.max(100, viewport.clientWidth - 28);
+        const availH = Math.max(100, viewport.clientHeight - 28);
+        const fitScale = Math.min(availW / baseW, availH / baseH);
+        currentZoom = Math.max(0.3, Math.min(5.0, Math.round(fitScale * 100) / 100));
+      } else {
+        currentZoom = 1.0;
+      }
+    }
+
+    const targetW = Math.round(baseW * currentZoom);
+    const targetH = Math.round(baseH * currentZoom);
+
+    // Save previous scroll center ratio unless fitting to window
+    let ratioX = 0.5;
+    let ratioY = 0.5;
+    if (!isFitAction && viewport && viewport.scrollWidth > 0 && viewport.scrollHeight > 0) {
+      ratioX = (viewport.scrollLeft + viewport.clientWidth / 2) / viewport.scrollWidth;
+      ratioY = (viewport.scrollTop + viewport.clientHeight / 2) / viewport.scrollHeight;
+    }
+
+    canvas.dataset.zoom = currentZoom.toString();
+    canvas.style.width = targetW + 'px';
+    canvas.style.minWidth = targetW + 'px';
+    canvas.style.height = targetH + 'px';
+
+    if (viewport) {
+      if (isFitAction) {
+        viewport.scrollLeft = 0;
+        viewport.scrollTop = 0;
+      } else {
+        viewport.scrollLeft = ratioX * viewport.scrollWidth - viewport.clientWidth / 2;
+        viewport.scrollTop = ratioY * viewport.scrollHeight - viewport.clientHeight / 2;
+      }
+    }
+
+    const resetLabel = card.querySelector('.btn-mermaid-zoom-reset');
+    if (resetLabel) {
+      resetLabel.textContent = `${Math.round(currentZoom * 100)}%`;
+    }
+  });
+
+  // Delegated pan-and-drag navigation for mermaid diagram viewports
+  let activePanViewport = null;
+  let panStartX = 0;
+  let panStartY = 0;
+  let panStartScrollLeft = 0;
+  let panStartScrollTop = 0;
+
+  document.addEventListener('mousedown', (e) => {
+    const viewport = e.target.closest('.mermaid-diagram-viewport');
+    if (!viewport) return;
+    if (e.target.closest('button') || e.target.closest('a') || e.target.closest('input')) return;
+    activePanViewport = viewport;
+    panStartX = e.pageX;
+    panStartY = e.pageY;
+    panStartScrollLeft = viewport.scrollLeft;
+    panStartScrollTop = viewport.scrollTop;
+    viewport.classList.add('is-panning');
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!activePanViewport) return;
+    const dx = e.pageX - panStartX;
+    const dy = e.pageY - panStartY;
+    activePanViewport.scrollLeft = panStartScrollLeft - dx;
+    activePanViewport.scrollTop = panStartScrollTop - dy;
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (activePanViewport) {
+      activePanViewport.classList.remove('is-panning');
+      activePanViewport = null;
     }
   });
 

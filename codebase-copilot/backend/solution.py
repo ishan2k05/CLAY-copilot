@@ -25,13 +25,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-if __name__ == "__main__":
-    main()
-def get_input():
-    user_input = input("Enter value for x: ")
-    return user_input
-
-if __name__ == "__main__":
-    x = get_input()
-    print(f"Input x is: {x}")

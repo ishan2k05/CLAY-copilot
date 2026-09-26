@@ -64,6 +64,7 @@ class SQLiteGraphStore:
             db.commit()
 
     def _sync_clear_all(self):
+        self._sync_init_db()
         with sqlite3.connect(self.db_path) as db:
             db.execute("DELETE FROM relationships;")
             db.execute("DELETE FROM symbols;")
@@ -78,6 +79,7 @@ class SQLiteGraphStore:
         await asyncio.to_thread(self._sync_clear_all)
 
     def _sync_delete_file_symbols(self, file_path: str):
+        self._sync_init_db()
         with sqlite3.connect(self.db_path) as db:
             norm = str(Path(file_path).resolve())
             fname = Path(file_path).name

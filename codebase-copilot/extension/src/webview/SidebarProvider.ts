@@ -29,10 +29,37 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         vscode.window.onDidChangeActiveTextEditor((editor) => {
             if (editor?.document && editor.document.uri.scheme === 'file') {
                 this._lastActiveDocument = editor.document;
+                const cursorLine = editor.selection ? editor.selection.active.line + 1 : undefined;
                 this._view?.webview.postMessage({
                     command: 'activeFileChanged',
-                    file: editor.document.uri.fsPath
+                    file: editor.document.uri.fsPath,
+                    line: cursorLine
                 });
+            }
+        });
+
+        vscode.window.onDidChangeTextEditorSelection((event) => {
+            if (event.textEditor?.document && event.textEditor.document.uri.scheme === 'file') {
+                const cursorLine = event.selections[0] ? event.selections[0].active.line + 1 : undefined;
+                this._view?.webview.postMessage({
+                    command: 'cursorPositionChanged',
+                    file: event.textEditor.document.uri.fsPath,
+                    line: cursorLine
+                });
+            }
+        });
+
+        webviewView.onDidChangeVisibility(() => {
+            if (webviewView.visible) {
+                // When un-minimized / restored to visibility, update active file context if needed
+                if (this._lastActiveDocument?.uri.fsPath) {
+                    const cursorLine = vscode.window.activeTextEditor?.selection ? vscode.window.activeTextEditor.selection.active.line + 1 : undefined;
+                    this._view?.webview.postMessage({
+                        command: 'activeFileChanged',
+                        file: this._lastActiveDocument.uri.fsPath,
+                        line: cursorLine
+                    });
+                }
             }
         });
 
@@ -65,9 +92,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 });
             }
             if (this._lastActiveDocument?.uri.fsPath) {
+                const cursorLine = vscode.window.activeTextEditor?.selection ? vscode.window.activeTextEditor.selection.active.line + 1 : undefined;
                 this._view?.webview.postMessage({
                     command: 'activeFileChanged',
-                    file: this._lastActiveDocument.uri.fsPath
+                    file: this._lastActiveDocument.uri.fsPath,
+                    line: cursorLine
                 });
             }
         }, 300);
@@ -84,7 +113,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             temperature: data.temperature,
                             num_ctx: data.num_ctx,
                             num_predict: data.num_predict
-                        } : undefined
+                        } : undefined,
+                        data.history
                     );
                     break;
                 }
@@ -109,16 +139,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 case 'scanWorkspace': {
                     const workspaceFolder = data.path || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+                    const selectedFile = data.file || data.filePath;
                     try {
                         await vscode.workspace.saveAll(false);
                         const status = await this._backendClient.triggerIndexing(workspaceFolder);
-                        const mermaid = await this._backendClient.getMermaidGraph(workspaceFolder);
+                        const mermaid = await this._backendClient.getMermaidGraph(workspaceFolder, selectedFile);
                         const security = await this._backendClient.getSecurityAudit(workspaceFolder);
-                        this._view?.webview.postMessage({ command: 'scanResult', status, mermaid, security });
+                        this._view?.webview.postMessage({ command: 'scanResult', status, mermaid, security, file: selectedFile });
                         vscode.window.showInformationMessage(`Indexed ${status.filesCount} files and ${status.symbolsCount} symbols.`);
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`Scanning failed: ${err.message}`);
                         this._view?.webview.postMessage({ command: 'scanError', error: err.message });
+                    }
+                    break;
+                }
+                case 'getMermaidGraph': {
+                    const workspaceFolder = data.path || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+                    try {
+                        const mermaid = await this._backendClient.getMermaidGraph(workspaceFolder, data.file);
+                        this._view?.webview.postMessage({ command: 'mermaidResult', mermaid, file: data.file });
+                    } catch (err: any) {
+                        this._view?.webview.postMessage({ command: 'mermaidResult', mermaid: '', file: data.file, error: err.message });
                     }
                     break;
                 }
@@ -146,7 +187,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         command: 'settingsSaved',
                         result: res
                     });
-                    vscode.window.showInformationMessage(`Codebase Copilot: Active model set to ${data.settings.model || 'default'}`);
+                    vscode.window.showInformationMessage(`CLAY Copilot: Active model set to ${data.settings.model || 'default'}`);
                     break;
                 }
                 case 'applyPatch': {
@@ -154,7 +195,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         const targetWorkspace = data.workspacePath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
                         const res = await this._backendClient.applyPatch(data.file, data.diff, targetWorkspace);
                         const finalName = res?.filename || data.file;
-                        vscode.window.showInformationMessage(`Codebase Copilot: Patch applied cleanly to ${finalName}`);
+                        vscode.window.showInformationMessage(`CLAY Copilot: Patch applied cleanly to ${finalName}`);
                         this._view?.webview.postMessage({ command: 'patchApplied', file: finalName });
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`Failed to apply patch: ${err.message}`);
@@ -168,12 +209,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 case 'acceptChanges': {
                     await this._backendClient.reviewChanges('TASK #0428', 'accept');
-                    vscode.window.showInformationMessage('Codebase Copilot: Staged changes accepted.');
+                    vscode.window.showInformationMessage('CLAY Copilot: Staged changes accepted.');
                     break;
                 }
                 case 'rejectChanges': {
                     await this._backendClient.reviewChanges('TASK #0428', 'reject');
-                    vscode.window.showWarningMessage('Codebase Copilot: Staged changes rejected.');
+                    vscode.window.showWarningMessage('CLAY Copilot: Staged changes rejected.');
                     break;
                 }
                 case 'browseRepoFolder': {
@@ -196,7 +237,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             tree: treeData.tree,
                             stats: treeData.stats
                         });
-                        vscode.window.showInformationMessage(`Codebase Copilot: Repository set to ${selectedPath}`);
+                        vscode.window.showInformationMessage(`CLAY Copilot: Repository set to ${selectedPath}`);
                     }
                     break;
                 }
@@ -244,7 +285,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this._view?.webview.postMessage({
                         command: 'repoPathCleared'
                     });
-                    vscode.window.showInformationMessage('Codebase Copilot: Repository path cleared');
+                    vscode.window.showInformationMessage('CLAY Copilot: Repository path cleared');
                     break;
                 }
                 case 'getRepoTree': {
@@ -378,7 +419,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 case 'executeAgentStep': {
                     const workspace = data.workspace_path || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-                    const res = await this._backendClient.executeAgentStep(data.step_id, data.goal, workspace);
+                    const activeEditor = vscode.window.activeTextEditor;
+                    const activeFile = data.active_file || (activeEditor?.document?.uri?.scheme === 'file' ? activeEditor.document.uri.fsPath : undefined);
+                    const cursorLine = data.cursor_line !== undefined ? data.cursor_line : (activeEditor?.selection?.active?.line !== undefined ? activeEditor.selection.active.line + 1 : undefined);
+                    const res = await this._backendClient.executeAgentStep(data.step_id, data.goal, workspace, activeFile, cursorLine, data.target_file);
                     this._view?.webview.postMessage({
                         command: 'agentStepResult',
                         step_id: data.step_id,
@@ -507,7 +551,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         query: string,
         workspacePath?: string,
         securityMode?: string,
-        inferenceOptions?: { temperature?: number; num_ctx?: number; num_predict?: number }
+        inferenceOptions?: { temperature?: number; num_ctx?: number; num_predict?: number },
+        history?: Array<{ role: string; content: string }>
     ) {
         let activeDoc = vscode.window.activeTextEditor?.document;
         if ((!activeDoc || activeDoc.uri.scheme !== 'file') && this._lastActiveDocument && !this._lastActiveDocument.isClosed) {
@@ -533,6 +578,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
         }
 
+        const cursorLine = vscode.window.activeTextEditor?.selection ? vscode.window.activeTextEditor.selection.active.line + 1 : undefined;
+
         await this._backendClient.streamChat(
             query,
             activeFileContext,
@@ -552,7 +599,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             securityMode,
             activeFileContent,
             openFiles,
-            inferenceOptions
+            inferenceOptions,
+            cursorLine,
+            history
         );
     }
 
@@ -569,7 +618,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src http://127.0.0.1:8765 http://localhost:8765 https://ollama.com; style-src ${webview.cspSource} 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'nonce-${nonce}';">
     <link href="${styleUri}" rel="stylesheet">
-    <title>Codebase Copilot</title>
+    <title>CLAY Copilot</title>
 </head>
 <body>
     <div class="app-frame">
@@ -634,7 +683,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         </g>
                     </svg>
                 </div>
-                <div class="empty-state-title">CLAY Intelligence Engine</div>
+                <div class="empty-state-title">CLAY Copilot</div>
                 <div class="empty-state-desc">Autonomous repository agent & surgical engineering copilot. Running on <strong id="welcome-model-text">gemma4:31b-cloud</strong>.</div>
             </div>
         </div>
@@ -679,6 +728,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 <span class="console-title user-console-title">user-console</span>
             </div>
 
+            <!-- Ambiguity Clarification Bar -->
+            <div class="agent-ambiguity-bar" id="agent-ambiguity-bar" style="display: none;">
+                <div class="ambiguity-header">
+                    <span class="ambiguity-title">Target Ambiguity:</span>
+                    <span class="ambiguity-question" id="ambiguity-question">Which file would you like to update?</span>
+                </div>
+                <div class="ambiguity-chips-list" id="ambiguity-chips-list"></div>
+            </div>
+
             <!-- CLI Style Task Planner Input -->
             <div class="user-console-cli-bar">
                 <span class="user-console-prompt">&gt;</span>
@@ -708,10 +766,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     <!-- 3. Diff Reviewer View -->
     <div id="view-diff" class="view-container">
         <div class="diff-summary-bar">
-            <span id="diff-summary-label">Staged Changes // 0 files</span>
-            <div>
-                <span class="diff-badge-add" id="diff-badge-add">+0</span>
-                <span class="diff-badge-del" id="diff-badge-del">-0</span>
+            <div class="diff-summary-left">
+                <span id="diff-summary-label">Staged Changes // 0 files</span>
+                <div class="diff-file-selector" id="diff-file-selector" style="display: none;"></div>
+            </div>
+            <div class="diff-summary-controls">
+                <button type="button" class="btn-diff-view-toggle" id="btn-diff-view-mode" title="Toggle Split / Unified Diff View">
+                    <span id="diff-mode-label">Unified</span>
+                </button>
+                <div class="diff-badges-wrap">
+                    <span class="diff-badge-add" id="diff-badge-add">+0</span>
+                    <span class="diff-badge-del" id="diff-badge-del">-0</span>
+                </div>
             </div>
         </div>
 
@@ -795,7 +861,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             </div>
         </div>
         <div class="task-card" style="margin-top: 10px;">
-            <div class="task-title">Call Hierarchy & Relationships</div>
+            <div class="task-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <div class="task-title" style="margin-bottom: 0;" id="hierarchy-card-title">Call Hierarchy & Relationships</div>
+                <div class="pixel-badge active-file-badge" id="hierarchy-file-badge" style="display: none;" title="Filtered by selected file. Click to clear filter.">
+                    <span id="hierarchy-file-badge-text">All Files</span>
+                    <span class="badge-close">✕</span>
+                </div>
+            </div>
             <pre style="font-family: var(--font-mono); font-size: 10.5px; line-height: 1.4; color: var(--text-secondary); background: var(--surface-subtle); padding: 8px; border-radius: 10px; overflow-x: auto; white-space: pre;" id="mermaid-code">No SQLite code graph available for this repository.
 Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
         </div>
@@ -809,6 +881,7 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
             <div class="repo-tree-actions" style="display: flex; gap: 6px; margin-bottom: 8px;">
                 <button class="pixel-mini-btn" id="btn-refresh-tree" title="Refresh file tree">↻ Refresh</button>
                 <button class="pixel-mini-btn" id="btn-expand-tree" title="Toggle expand/collapse all">± Toggle All</button>
+                <button class="pixel-mini-btn" id="btn-clear-file-selection" style="display: none;" title="Deselect active file">✕ Clear Selection</button>
             </div>
             <div class="repo-file-tree" id="repo-file-tree">
                 <div class="tree-empty-state">
@@ -820,6 +893,48 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
 
     <!-- 5. Settings View (Reference Styled: Execution, Security Mode, Terminal) -->
     <div id="view-settings" class="view-container">
+        <!-- Section 0: Theme & IDE Bindings -->
+        <div class="settings-section">
+            <div class="settings-section-title">Theme &amp; IDE Bindings</div>
+            <div class="settings-section-desc">Choose between the signature CLAY warm palette or adopt native VS Code editor tokens (var(--vscode-editor-background)).</div>
+            <div class="theme-binding-grid" id="theme-mode-selector">
+                <div class="theme-binding-card active" data-theme="claude" id="card-theme-claude">
+                    <div class="theme-binding-badge">DEFAULT</div>
+                    <div class="theme-binding-title">
+                        <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
+                            <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 1.5v11A5.5 5.5 0 0 1 8 2.5z"/>
+                        </svg>
+                        CLAY Palette
+                    </div>
+                    <div class="theme-binding-desc">Signature warm minimalist canvas with custom Claude Light &amp; Dark tones.</div>
+                </div>
+                <div class="theme-binding-card" data-theme="vscode" id="card-theme-vscode">
+                    <div class="theme-binding-badge">IDE BINDING</div>
+                    <div class="theme-binding-title">
+                        <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
+                            <path d="M14.5 1.5l-5 4.5v4l5 4.5v-13zM1.5 5.2L7 1.5v13L1.5 10.8V5.2z"/>
+                        </svg>
+                        VS Code Native
+                    </div>
+                    <div class="theme-binding-desc">Binds live to IDE editor tokens (var(--vscode-editor-background), foreground, diffs &amp; borders).</div>
+                </div>
+            </div>
+            <div class="settings-card" style="margin-top: 10px;">
+                <div class="settings-row">
+                    <div class="settings-row-info">
+                        <div class="settings-row-title">Adopt VS Code Editor Tokens</div>
+                        <div class="settings-row-desc">Automatically synchronize background, text, and diffs with your current active VS Code color theme</div>
+                    </div>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="chk-vscode-native-theme">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+        </div>
+
+        <div class="settings-divider"></div>
+
         <!-- Section 1: Agent Security Mode -->
         <div class="settings-section">
             <div class="settings-section-title">Agent security mode</div>
@@ -982,7 +1097,7 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
             </svg>
         </button>
         <div class="input-container">
-            <textarea class="chat-textarea" id="chat-input" placeholder="Ask CLAY (Enter to send, Shift+Enter for newline)..."></textarea>
+            <textarea class="chat-textarea" id="chat-input" placeholder="Start typing to mold CLAY"></textarea>
             <div class="input-toolbar">
                 <div class="input-meta-hint">
                     <span class="pill-dot"></span> <span id="input-model-hint">CLAY // gemma4:31b-cloud</span>

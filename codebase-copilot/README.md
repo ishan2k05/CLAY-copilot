@@ -1,4 +1,4 @@
-# Codebase Copilot
+# CLAY Copilot
 
 > **AI Repository Intelligence & Autonomous Coding Agent Platform**
 > 

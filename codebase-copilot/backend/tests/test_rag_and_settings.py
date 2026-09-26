@@ -224,6 +224,14 @@ class TestRAGAndSettings(unittest.TestCase):
         self.assertNotIn("AuthRoute", data.get("mermaid", ""))
         self.assertIn("No SQLite code graph available", data.get("message", ""))
 
+    def test_mermaid_graph_with_file_filtering(self):
+        # Querying with a specific file filter parameter
+        res = self.client.get("/api/graph/mermaid?path=/tmp/empty_test_repo&file=test2.py")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertFalse(data.get("available", True))
+        self.assertIn("test2.py", data.get("message", ""))
+
     def test_silent_sync_and_symbol_purging(self):
         from app.main import reindex_file, graph_store, vector_store, silent_sync_workspace
         import tempfile
