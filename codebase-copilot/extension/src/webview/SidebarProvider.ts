@@ -127,10 +127,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     vscode.window.setStatusBarMessage('CLAY: Chat context cleared', 2500);
                     break;
                 }
-                case 'createAgentPlan': {
-                    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                case 'createAgentPlan':
+                case 'planAgentExecution': {
+                    const workspaceFolder = data.workspace_path || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
                     try {
-                        const plan = await this._backendClient.createPlan(data.goal, workspaceFolder);
+                        const plan = await this._backendClient.createPlan(data.goal, workspaceFolder, data.target_file, data.model_name);
                         this._view?.webview.postMessage({ command: 'agentPlanResult', plan });
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`Planning failed: ${err.message}`);
@@ -422,7 +423,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const activeEditor = vscode.window.activeTextEditor;
                     const activeFile = data.active_file || (activeEditor?.document?.uri?.scheme === 'file' ? activeEditor.document.uri.fsPath : undefined);
                     const cursorLine = data.cursor_line !== undefined ? data.cursor_line : (activeEditor?.selection?.active?.line !== undefined ? activeEditor.selection.active.line + 1 : undefined);
-                    const res = await this._backendClient.executeAgentStep(data.step_id, data.goal, workspace, activeFile, cursorLine, data.target_file);
+                    const res = await this._backendClient.executeAgentStep(
+                        data.step_id,
+                        data.goal,
+                        workspace,
+                        activeFile,
+                        cursorLine,
+                        data.target_file,
+                        data.step_action,
+                        data.total_steps
+                    );
                     this._view?.webview.postMessage({
                         command: 'agentStepResult',
                         step_id: data.step_id,
@@ -863,10 +873,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         <div class="task-card" style="margin-top: 10px;">
             <div class="task-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                 <div class="task-title" style="margin-bottom: 0;" id="hierarchy-card-title">Call Hierarchy & Relationships</div>
-                <div class="pixel-badge active-file-badge" id="hierarchy-file-badge" style="display: none;" title="Filtered by selected file. Click to clear filter.">
-                    <span id="hierarchy-file-badge-text">All Files</span>
-                    <span class="badge-close">✕</span>
-                </div>
             </div>
             <pre style="font-family: var(--font-mono); font-size: 10.5px; line-height: 1.4; color: var(--text-secondary); background: var(--surface-subtle); padding: 8px; border-radius: 10px; overflow-x: auto; white-space: pre;" id="mermaid-code">No SQLite code graph available for this repository.
 Click 'Scan & Index Workspace' to analyze codebase structure.</pre>

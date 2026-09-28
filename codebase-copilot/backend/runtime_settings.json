@@ -5,7 +5,7 @@
   "exclusion_patterns": ".env, *.pem, credentials.json, id_rsa, *.key",
   "connection_type": "local",
   "api_key": "",
-  "repo_path": "/home/ishan/Desktop/bim-ai-client",
+  "repo_path": "C:\\Users\\igautam\\Desktop\\q_path",
   "model": "gpt-oss:120b-cloud",
   "host": "http://localhost:11434",
   "temperature": 0.2,

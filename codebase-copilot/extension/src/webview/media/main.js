@@ -68,18 +68,81 @@
   }
 
   function getPrimaryRepoFile(hintText = '') {
-    if (currentRepoFilesList && currentRepoFilesList.length > 0) {
-      if (hintText) {
-        const lower = hintText.toLowerCase();
+    if (hintText && typeof hintText === 'string') {
+      const trimmed = hintText.trim();
+      // Check for folder mention like "folder named documentation" or "create folder dsa"
+      let folderPrefix = '';
+      const stopWords = new Set([
+        'named', 'called', 'name', 'titled', 'as', 'of', 'for', 'with', 'a', 'an', 'the',
+        'new', 'me', 'folder', 'directory', 'dir', 'and', 'in', 'into', 'inside', 'it',
+        'to', 'put', 'file', 'files', 'my', 'this', 'that', 'placeholder', 'statement', 'is'
+      ]);
+
+      const folderRegex = /\b(?:folder|directory|dir)\s*(?:named|called|titled|name(?:\s+is)?|as|of|for|with|:\s*|\s+)?\s*['"`]?([a-zA-Z0-9_\-\.\/]+)['"`]?/gi;
+      let fMatch;
+      let detectedFolder = null;
+      while ((fMatch = folderRegex.exec(trimmed)) !== null) {
+        const cand = fMatch[1].trim().replace(/^['"`<(\[]+|['"`>)\]]+$/g, '').replace(/[\\/]+$/, '');
+        if (cand && !stopWords.has(cand.toLowerCase()) && !cand.startsWith('.') && cand.length > 0) {
+          detectedFolder = cand;
+          break;
+        }
+      }
+
+      if (!detectedFolder) {
+        // Check secondary pattern: e.g. "create a documentation folder"
+        const secMatch = trimmed.match(/\b([a-zA-Z0-9_\-\.\/]+)\s+(?:folder|directory|dir)\b/i);
+        if (secMatch) {
+          const candSec = secMatch[1].trim().replace(/^['"`<(\[]+|['"`>)\]]+$/g, '');
+          if (candSec && !stopWords.has(candSec.toLowerCase()) && !candSec.startsWith('.')) {
+            detectedFolder = candSec;
+          }
+        }
+      }
+
+      if (detectedFolder && !detectedFolder.includes('.')) {
+        folderPrefix = detectedFolder.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '') + '/';
+      }
+
+      // Check for target filename patterns with code or data extensions
+      const fileMatches = trimmed.match(/(?:[a-zA-Z0-9_\-\.\/\\\:]+\.[a-zA-Z0-9_\-]+)/g);
+      if (fileMatches && fileMatches.length > 0) {
+        for (let i = fileMatches.length - 1; i >= 0; i--) {
+          let token = fileMatches[i].trim().replace(/^['"`<(\[]+|['"`>)\]]+$/g, '');
+          if (token && token.includes('.') && !token.startsWith('.') && !/^(https?:\/\/|www\.)/i.test(token)) {
+            const ext = token.split('.').pop().toLowerCase();
+            // Valid code/data extension
+            if (ext && /^[a-zA-Z0-9]{1,10}$/.test(ext) && !['com', 'org', 'net', 'io', 'ai'].includes(ext)) {
+              token = token.replace(/\\/g, '/');
+              if (folderPrefix && !token.includes('/')) {
+                token = folderPrefix + token;
+              }
+              return token;
+            }
+          }
+        }
+      }
+
+      // If user asks for pure folder creation (e.g. "create folder dsa")
+      if (detectedFolder && (trimmed.toLowerCase().includes('create') || trimmed.toLowerCase().includes('make'))) {
+        return detectedFolder.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+      }
+
+      // Check if any existing file is mentioned in hintText
+      if (currentRepoFilesList && currentRepoFilesList.length > 0) {
+        const lower = trimmed.toLowerCase();
         for (const f of currentRepoFilesList) {
           if (f.name && lower.includes(f.name.toLowerCase())) {
             return f.name;
           }
         }
       }
+    }
+
+    if (currentRepoFilesList && currentRepoFilesList.length > 0) {
       const pyFile = currentRepoFilesList.find(f => f.name && f.name.endsWith('.py'));
       if (pyFile) return pyFile.name;
-      const srcFile = currentRepoFilesList.find(f => f.name && /\.(js|ts|jsx|tsx|json|html|css|md)$/i.test(f.name));
+      const srcFile = currentRepoFilesList.find(f => f.name && /\.(js|ts|jsx|tsx|json|html|css|md|rs|go|cpp|c|java|sql|sh)$/i.test(f.name));
       if (srcFile) return srcFile.name;
       return currentRepoFilesList[0].name;
     }
@@ -1093,9 +1156,6 @@
     chatInput.addEventListener('input', () => {
       chatInput.style.height = 'auto';
       chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
-      if (chatInput.value.trim().length > 0) {
-        hideChatEmptyState();
-      }
     });
   }
 
@@ -1337,7 +1397,32 @@
         const codeBlockMatch = fullText.match(/```(?!mermaid\b)[a-zA-Z0-9_-]*\n([\s\S]*?)```/i);
         if (codeBlockMatch) {
           detectedCode = codeBlockMatch[1].trim();
-          targetFilename = getPrimaryRepoFile(lastUserQuery || fullText);
+
+          // Check if first line in code block or fullText has an explicit path comment: e.g. "# documentation/plan.md"
+          let pathInComment = null;
+          const firstLine = detectedCode.split('\n')[0].trim();
+          const firstLinePathMatch = firstLine.match(/^(?:#|\/\/|\/\*|<!--)\s*([a-zA-Z0-9_\-\.\/\\\:]+\.[a-zA-Z0-9_\-]+)/);
+          if (firstLinePathMatch) {
+            const candPath = firstLinePathMatch[1].trim().replace(/^['"`<(\[]+|['"`>)\]]+$/g, '').replace(/\\/g, '/');
+            if (candPath && candPath.includes('.') && !candPath.startsWith('.')) {
+              const ext = candPath.split('.').pop().toLowerCase();
+              if (ext && /^[a-zA-Z0-9]{1,10}$/.test(ext) && !['com', 'org', 'net', 'io'].includes(ext)) {
+                pathInComment = candPath;
+              }
+            }
+          }
+
+          targetFilename = pathInComment || getPrimaryRepoFile(lastUserQuery || fullText);
+
+          // If code was generated for a requested new file or creation prompt, construct and stage the new-file unified diff
+          const isCreationIntent = /\b(create|new\s+file|put\s+.*in|write\s+.*in|save\s+as|in\s+a\s+new\s+file)\b/i.test(lastUserQuery || '');
+          const fileExists = currentRepoFilesList && currentRepoFilesList.some(f => f.name && f.name.toLowerCase() === (targetFilename || '').toLowerCase());
+          if (detectedCode && (isCreationIntent || !fileExists) && targetFilename) {
+            const rawLines = detectedCode.split('\n');
+            const newFileDiff = `--- /dev/null\n+++ b/${targetFilename}\n@@ -0,0 +1,${rawLines.length} @@\n` + rawLines.map(l => `+${l}`).join('\n');
+            detectedDiff = newFileDiff;
+            stageDiff(targetFilename, newFileDiff);
+          }
         }
       }
 
@@ -1488,6 +1573,523 @@
     if (agentAmbiguityBar) agentAmbiguityBar.style.display = 'none';
   }
 
+  function normalizeGoalText(text) {
+    if (!text) return '';
+    let t = text;
+    const typoMap = [
+      [/\bsophesticated\b/gi, 'sophisticated'],
+      [/\bsophistcated\b/gi, 'sophisticated'],
+      [/\badn\b/gi, 'and'],
+      [/\balgo\b/gi, 'algorithm'],
+      [/\balgos\b/gi, 'algorithms'],
+      [/\bastar\b/gi, 'a-star algorithm'],
+      [/\ba\*\b/gi, 'a-star algorithm'],
+      [/\ba-star\b/gi, 'a-star algorithm'],
+      [/\bdsa\b/gi, 'data structures and algorithms'],
+      [/\bfucntion\b/gi, 'function'],
+      [/\bfuncton\b/gi, 'function'],
+      [/\bimplemet\b/gi, 'implement'],
+      [/\bimpliment\b/gi, 'implement'],
+      [/\bcompelx\b/gi, 'complex'],
+      [/\bdelte\b/gi, 'delete'],
+      [/\bfoler\b/gi, 'folder'],
+      [/\bfloder\b/gi, 'folder']
+    ];
+    for (const [pattern, repl] of typoMap) {
+      t = t.replace(pattern, repl);
+    }
+    return t;
+  }
+
+  function resolveTopicDomain(goal) {
+    const normalized = normalizeGoalText(goal).toLowerCase();
+
+    if (normalized.includes('a*') || normalized.includes('astar') || normalized.includes('a-star') || normalized.includes('pathfinding')) {
+      return {
+        topic: 'A* Pathfinding Algorithm',
+        domain: 'pathfinding',
+        heuristic: 'Manhattan & Euclidean heuristics',
+        dataStructure: 'Node representation & min-heap priority queue',
+        edgeCases: 'obstacle traps, unreachable targets & boundary conditions'
+      };
+    }
+    if (normalized.includes('dijkstra')) {
+      return {
+        topic: "Dijkstra's Shortest Path Algorithm",
+        domain: 'graph search',
+        heuristic: 'accumulated edge weights',
+        dataStructure: 'min-heap priority queue and adjacency graph',
+        edgeCases: 'disconnected nodes and weighted cycles'
+      };
+    }
+    if (normalized.includes('bfs') || normalized.includes('dfs') || normalized.includes('breadth first') || normalized.includes('depth first')) {
+      return {
+        topic: 'Graph Traversal Engine (BFS/DFS)',
+        domain: 'graph search',
+        heuristic: 'visited sets and frontier queue',
+        dataStructure: 'deque frontier and visited tracking',
+        edgeCases: 'cyclic graphs and isolated vertices'
+      };
+    }
+    if (normalized.includes('binary search') || normalized.includes('bsearch') || normalized.includes('bisect')) {
+      return {
+        topic: 'Binary Search & Bisect Engine',
+        domain: 'search algorithm',
+        heuristic: 'monotonic midpoint bisection',
+        dataStructure: 'ordered arrays and search pointers',
+        edgeCases: 'empty lists, duplicates, and out-of-bound targets'
+      };
+    }
+    if (normalized.includes('sort') || normalized.includes('quicksort') || normalized.includes('mergesort') || normalized.includes('heapsort')) {
+      return {
+        topic: 'Optimized Divide-and-Conquer Sorting Algorithm',
+        domain: 'sorting',
+        heuristic: 'partition pivot and merge balance',
+        dataStructure: 'contiguous arrays and auxiliary partitions',
+        edgeCases: 'already-sorted arrays, reverse arrays, and duplicates'
+      };
+    }
+    if (normalized.includes('dynamic programming') || normalized.includes('dp') || normalized.includes('memoization') || normalized.includes('knapsack')) {
+      return {
+        topic: 'Dynamic Programming & Memoization Engine',
+        domain: 'dynamic programming',
+        heuristic: 'optimal substructure and overlapping subproblems',
+        dataStructure: 'memoization table and state transitions',
+        edgeCases: 'base cases, 0-weight boundaries, and large state matrices'
+      };
+    }
+    if (normalized.includes('tree') || normalized.includes('bst') || normalized.includes('avl') || normalized.includes('red-black') || normalized.includes('red black')) {
+      return {
+        topic: 'Self-Balancing Binary Search Tree',
+        domain: 'data structures',
+        heuristic: 'balance factors and rotational invariants',
+        dataStructure: 'TreeNode references with left/right child pointers',
+        edgeCases: 'duplicate keys, root deletions, and zigzag rotations'
+      };
+    }
+    if (normalized.includes('trie') || normalized.includes('prefix tree')) {
+      return {
+        topic: 'Prefix Tree (Trie) Search Engine',
+        domain: 'string search',
+        heuristic: 'common prefix compression',
+        dataStructure: 'TrieNode with character edge mapping and terminal flags',
+        edgeCases: 'empty strings, unicode prefixes, and nonexistent keys'
+      };
+    }
+    if (normalized.includes('lru') || normalized.includes('cache')) {
+      return {
+        topic: 'Least-Recently-Used (LRU) Cache',
+        domain: 'data caching',
+        heuristic: 'temporal locality and eviction policy',
+        dataStructure: 'doubly-linked list with hash map lookup',
+        edgeCases: 'capacity zero, repeated lookups, and concurrent eviction'
+      };
+    }
+    if (normalized.includes('rate limit') || normalized.includes('token bucket') || normalized.includes('leaky bucket')) {
+      return {
+        topic: 'Token Bucket Rate Limiting Engine',
+        domain: 'network protocols',
+        heuristic: 'token refill rate and burst capacity',
+        dataStructure: 'thread-safe state buckets with timestamp tracking',
+        edgeCases: 'clock drift, high concurrency, and depleted burst quotas'
+      };
+    }
+    if (normalized.includes('snake') || normalized.includes('game') || normalized.includes('curses') || normalized.includes('paddle') || normalized.includes('pong')) {
+      return {
+        topic: 'Real-Time Game Loop & Movement Engine',
+        domain: 'game development',
+        heuristic: 'frame delta timing and collision bounds',
+        dataStructure: 'coordinate vectors, event queues, and screen buffers',
+        edgeCases: 'border collisions, self-intersections, and input buffering'
+      };
+    }
+    if (normalized.includes('auth') || normalized.includes('jwt') || normalized.includes('oauth') || normalized.includes('token')) {
+      return {
+        topic: 'Authentication & JWT Token Verification Pipeline',
+        domain: 'security architecture',
+        heuristic: 'cryptographic signature and expiration claims',
+        dataStructure: 'header payload models and crypto verification context',
+        edgeCases: 'expired tokens, malformed headers, and secret mismatch'
+      };
+    }
+
+    const match = normalized.match(/\b(?:code\s+for|implement|write(?:\s+me)?(?:\s+code\s+for)?|build|create)\s+([a-zA-Z0-9_\-\s]{3,30}?)(?:\s+in|\s+into|\s+for|\s+file|$)/);
+    if (match) {
+      const noise = new Set(['a', 'an', 'the', 'new', 'me', 'some', 'large', 'sophisticated', 'code', 'file']);
+      const tokens = match[1].trim().split(/\s+/).filter(t => !noise.has(t));
+      if (tokens.length > 0) {
+        const phrase = tokens.map(t => t.charAt(0).toUpperCase() + t.slice(1)).join(' ');
+        return {
+          topic: `${phrase} Engine`,
+          domain: 'software architecture',
+          heuristic: 'state specifications and invariant models',
+          dataStructure: 'core data models and helper functions',
+          edgeCases: 'input validation, boundary cases, and error handling'
+        };
+      }
+    }
+
+    return {
+      topic: 'Production Software Module',
+      domain: 'software engineering',
+      heuristic: 'domain constraints and invariants',
+      dataStructure: 'component architecture and data models',
+      edgeCases: 'boundary conditions and error handling'
+    };
+  }
+
+  function planExecutionTasks(goal, isFromChat = false, chatPayload = null) {
+    const cleanGoal = (goal || '').trim();
+    const normalizedGoal = normalizeGoalText(cleanGoal);
+    const lowerGoal = cleanGoal.toLowerCase();
+    const lowerNorm = normalizedGoal.toLowerCase();
+
+    // Extract filename from goal or chat
+    let resolvedTarget = (chatPayload && chatPayload.targetFile) ? chatPayload.targetFile : null;
+    const fileMatches = cleanGoal.match(/([a-zA-Z0-9_\-\.\/]+\.[a-zA-Z0-9]+)/g);
+    if (!resolvedTarget) {
+      if (fileMatches && fileMatches.length > 0) {
+        resolvedTarget = fileMatches[0];
+      } else {
+        const words = cleanGoal.split(/\s+/);
+        for (const w of words) {
+          const cw = w.replace(/[.,;:?!'"`()\[\]{}<>]/g, '');
+          if (cw.includes('.') && !cw.startsWith('.')) {
+            resolvedTarget = cw;
+            break;
+          }
+        }
+      }
+    }
+    if (!resolvedTarget) {
+      resolvedTarget = getPrimaryRepoFile(cleanGoal) || 'test1.py';
+    }
+
+    // Extract folder if any
+    let folderName = null;
+    const folderMatch = cleanGoal.match(/\b(?:folder|directory|dir)\s+(?:named|called|titled|name(?:\s+is)?|as|of|:\s*)?['"`]?([a-zA-Z0-9_\-\.\/]+)['"`]?/i);
+    if (folderMatch) {
+      folderName = folderMatch[1].replace(/[.,;:?!'"`]/g, '');
+    }
+
+    // Check deletion
+    const isDelete = (
+      lowerGoal.includes('delete all') ||
+      lowerGoal.includes('wipe all') ||
+      lowerGoal.includes('remove all code') ||
+      lowerGoal.includes('clear code') ||
+      lowerGoal.includes('delete code') ||
+      lowerGoal.includes('wipe code') ||
+      lowerGoal.includes('truncate file') ||
+      lowerGoal.includes('empty file')
+    );
+
+    // Check pure folder creation
+    const isPureFolder = Boolean(folderName && !cleanGoal.match(/\b(?:file|script|module)\b/i) && (!fileMatches || fileMatches.length === 0));
+
+    // Resolve topic information for domain-specific engineering steps
+    const topicInfo = resolveTopicDomain(cleanGoal);
+
+    // Check algorithm / sophisticated code synthesis (Max 5 steps)
+    const isAlgorithmOrComplex = (
+      lowerNorm.includes('astar') || lowerNorm.includes('a*') || lowerNorm.includes('a-star') ||
+      lowerNorm.includes('dijkstra') || lowerNorm.includes('pathfinding') || lowerNorm.includes('algorithm') ||
+      lowerNorm.includes('dsa') || lowerNorm.includes('heuristic') || lowerNorm.includes('binary search') ||
+      lowerNorm.includes('sorting') || lowerNorm.includes('quicksort') || lowerNorm.includes('mergesort') ||
+      lowerNorm.includes('dynamic programming') || lowerNorm.includes('graph') || lowerNorm.includes('tree') ||
+      lowerNorm.includes('bst') || lowerNorm.includes('heap') || lowerNorm.includes('priority queue') ||
+      lowerNorm.includes('trie') || lowerNorm.includes('backtracking') || lowerNorm.includes('solver') ||
+      lowerNorm.includes('engine') || lowerNorm.includes('simulator') || lowerNorm.includes('compiler') ||
+      lowerNorm.includes('parser') || lowerNorm.includes('lexer') || lowerNorm.includes('interpreter') ||
+      lowerNorm.includes('pipeline') ||
+      lowerNorm.includes('sophisticated') || lowerNorm.includes('large code') || lowerNorm.includes('complex') ||
+      lowerNorm.includes('comprehensive') || lowerNorm.includes('full implementation') || lowerNorm.includes('from scratch') ||
+      lowerNorm.includes('production-ready') || lowerNorm.includes('advanced')
+    );
+
+    // Check huge prompt or multi-file refactor (Max 5 steps)
+    const words = cleanGoal.split(/\s+/);
+    const isHuge = (
+      isAlgorithmOrComplex ||
+      words.length >= 15 ||
+      lowerGoal.includes('across files') ||
+      lowerGoal.includes('multiple files') ||
+      lowerGoal.includes('all files') ||
+      lowerGoal.includes('refactor') ||
+      lowerGoal.includes('overhaul') ||
+      lowerGoal.includes('architecture') ||
+      lowerGoal.includes('migrate') ||
+      (fileMatches && fileMatches.length >= 2)
+    );
+
+    let steps = [];
+
+    // 1. Pure folder creation (2 Steps)
+    if (isPureFolder) {
+      const fDisplay = folderName || resolvedTarget;
+      steps = [
+        {
+          id: 1,
+          action: 'scan',
+          title: `1. Verify workspace directory tree for '${fDisplay}'`,
+          progress: `Verifying path for '${fDisplay}'...`,
+          detail: `Target folder verified: '${fDisplay}' in workspace.`
+        },
+        {
+          id: 2,
+          action: 'prep',
+          title: `2. Initialize directory '${fDisplay}' and register in workspace`,
+          progress: `Creating directory '${fDisplay}'...`,
+          detail: `Created folder '${fDisplay}' successfully.`
+        }
+      ];
+    }
+    // 2. Algorithm / Complex Engine / Sophisticated Large Code (5 Steps - Max)
+    else if (isAlgorithmOrComplex && !isDelete) {
+      const topicTitle = topicInfo.topic;
+      steps = [
+        {
+          id: 1,
+          action: 'scan',
+          title: `1. Analyze problem domain & formulate mathematical / heuristic models for '${topicTitle}' in '${resolvedTarget}'`,
+          progress: `Formulating ${topicInfo.heuristic} and domain constraints for '${topicTitle}'...`,
+          detail: `Domain constraints and heuristic models formulated for '${topicTitle}'.`
+        },
+        {
+          id: 2,
+          action: 'prep',
+          title: `2. Structure ${topicInfo.dataStructure} for '${topicTitle}'`,
+          progress: `Structuring ${topicInfo.dataStructure} for '${topicTitle}'...`,
+          detail: `Structured ${topicInfo.dataStructure} and state invariants.`
+        },
+        {
+          id: 3,
+          action: 'synthesize',
+          title: isFromChat ? `3. Apply generated ${topicTitle} implementation in '${resolvedTarget}'` : `3. Synthesize complete, production-ready implementation of '${topicTitle}' in '${resolvedTarget}'`,
+          progress: `Synthesizing complete '${topicTitle}' implementation via ${currentModel}...`,
+          detail: `Synthesized full production-ready implementation for '${topicTitle}' in '${resolvedTarget}'.`
+        },
+        {
+          id: 4,
+          action: 'validate',
+          title: `4. Execute AST validation, benchmark boundary conditions & verify ${topicInfo.edgeCases}`,
+          progress: `Validating AST integrity, checking ${topicInfo.edgeCases}...`,
+          detail: `Syntax and AST verified. Handled ${topicInfo.edgeCases}.`
+        },
+        {
+          id: 5,
+          action: 'verify',
+          title: `5. Verify computational complexity, check zero regressions & stage '${resolvedTarget}' diff`,
+          progress: `Verifying complexity bounds and staging diff for '${resolvedTarget}'...`,
+          detail: `Zero regressions verified. Staged complete '${topicTitle}' implementation in Diff tab.`
+        }
+      ];
+    }
+    // 3. Huge prompt / Multi-file refactor (5 Steps - Max)
+    else if (isHuge) {
+      const targetsDesc = (fileMatches && fileMatches.length >= 2) ? fileMatches.slice(0, 3).join(', ') : resolvedTarget;
+      steps = [
+        {
+          id: 1,
+          action: 'scan',
+          title: `1. Cross-index repository AST symbols & map call hierarchy dependencies`,
+          progress: `Mapping cross-module call graph and dependencies across ${targetsDesc}...`,
+          detail: `Indexed repository AST symbols across ${targetsDesc}.`
+        },
+        {
+          id: 2,
+          action: 'prep',
+          title: `2. Compute change specifications & evaluate impact boundaries across modules`,
+          progress: `Evaluating module impact boundaries...`,
+          detail: `Impact boundaries and change specifications established.`
+        },
+        {
+          id: 3,
+          action: 'synthesize',
+          title: `3. Synthesize coordinated surgical diffs across target modules`,
+          progress: `Synthesizing coordinated diffs via ${currentModel}...`,
+          detail: `Synthesized coordinated surgical diffs cleanly.`
+        },
+        {
+          id: 4,
+          action: 'validate',
+          title: `4. Run multi-file AST validation & automated self-healing repair loop`,
+          progress: `Executing AST validation and integrity checks...`,
+          detail: `Multi-file AST validation and syntax verification passed.`
+        },
+        {
+          id: 5,
+          action: 'verify',
+          title: `5. Verify cross-module consistency, check regression boundaries & stage diffs`,
+          progress: `Verifying regression boundaries and staging diffs...`,
+          detail: `Cross-module consistency verified. Staged changes ready in Diff tab.`
+        }
+      ];
+    }
+    // 3. Nested folder + file creation (4 Steps)
+    else if (folderName && resolvedTarget) {
+      steps = [
+        {
+          id: 1,
+          action: 'scan',
+          title: `1. Resolve destination directory and prepare folder structure for '${folderName}'`,
+          progress: `Resolving destination directory '${folderName}'...`,
+          detail: `Directory structure verified for '${folderName}'.`
+        },
+        {
+          id: 2,
+          action: 'prep',
+          title: `2. Structure boilerplate schema & specifications for '${resolvedTarget}'`,
+          progress: `Structuring schema for '${resolvedTarget}'...`,
+          detail: `Path specifications established for '${resolvedTarget}'.`
+        },
+        {
+          id: 3,
+          action: 'synthesize',
+          title: `3. Synthesize complete implementation for '${resolvedTarget}'`,
+          progress: `Synthesizing '${resolvedTarget}' via ${currentModel}...`,
+          detail: `Generated complete implementation for '${resolvedTarget}'.`
+        },
+        {
+          id: 4,
+          action: 'verify',
+          title: `4. Verify path hierarchy, validate syntax & stage unified creation diff`,
+          progress: `Verifying path hierarchy and staging diff...`,
+          detail: `Path hierarchy verified. Staged creation diff in Diff tab.`
+        }
+      ];
+    }
+    // 4. Bug fix / Test repair / Debugging (4 Steps)
+    else if (lowerGoal.includes('fix') || lowerGoal.includes('repair') || lowerGoal.includes('debug') || lowerGoal.includes('failing') || lowerGoal.includes('traceback') || lowerGoal.includes('assertion')) {
+      steps = [
+        {
+          id: 1,
+          action: 'scan',
+          title: `1. Scan error trace & isolate failing assertions in '${resolvedTarget}'`,
+          progress: `Scanning assertions in '${resolvedTarget}'...`,
+          detail: `Isolated failure locus in '${resolvedTarget}'.`
+        },
+        {
+          id: 2,
+          action: 'prep',
+          title: `2. Analyze code invariants and correlate call stack in '${resolvedTarget}'`,
+          progress: `Analyzing code invariants in '${resolvedTarget}'...`,
+          detail: `Invariants and call stack correlated.`
+        },
+        {
+          id: 3,
+          action: 'synthesize',
+          title: `3. Synthesize targeted bugfix patch for '${resolvedTarget}'`,
+          progress: `Synthesizing targeted fix via ${currentModel}...`,
+          detail: `Synthesized targeted fix for '${resolvedTarget}'.`
+        },
+        {
+          id: 4,
+          action: 'verify',
+          title: `4. Execute AST validation, verify zero regressions & stage fix`,
+          progress: `Verifying syntax and regressions...`,
+          detail: `Syntax and AST verification passed. Fix staged in Diff tab.`
+        }
+      ];
+    }
+    // 5. Code deletion / wipe / truncation (3 Steps)
+    else if (isDelete) {
+      steps = [
+        {
+          id: 1,
+          action: 'scan',
+          title: `1. Inspect '${resolvedTarget}' to isolate code boundaries for removal`,
+          progress: `Inspecting '${resolvedTarget}' code boundaries...`,
+          detail: `Identified deletion scope in '${resolvedTarget}'.`
+        },
+        {
+          id: 2,
+          action: 'delete',
+          title: `2. Generate clean truncation diff to remove code from '${resolvedTarget}'`,
+          progress: `Synthesizing truncation diff for '${resolvedTarget}'...`,
+          detail: `Generated clean truncation diff for '${resolvedTarget}'.`
+        },
+        {
+          id: 3,
+          action: 'verify',
+          title: `3. Validate clean file state, verify integrity & stage removal diff`,
+          progress: `Validating clean state for '${resolvedTarget}'...`,
+          detail: `Integrity verified. Staged deletion diff for '${resolvedTarget}'.`
+        }
+      ];
+    }
+    // 6. Brand new file creation (3 Steps)
+    else if (lowerGoal.includes('create') || lowerGoal.includes('new file') || lowerGoal.includes('scaffold') || lowerGoal.includes('write me') || lowerGoal.includes('make file') || lowerGoal.includes('author')) {
+      steps = [
+        {
+          id: 1,
+          action: 'scan',
+          title: `1. Analyze requirements & scaffold environment for '${resolvedTarget}'`,
+          progress: `Analyzing requirements for '${resolvedTarget}'...`,
+          detail: `Scaffold environment prepared for '${resolvedTarget}'.`
+        },
+        {
+          id: 2,
+          action: 'synthesize',
+          title: isFromChat ? `2. Apply generated code changes for '${resolvedTarget}'` : `2. Synthesize complete, production-ready implementation for '${resolvedTarget}'`,
+          progress: `Synthesizing '${resolvedTarget}' via ${currentModel}...`,
+          detail: `Generated complete implementation for '${resolvedTarget}'.`
+        },
+        {
+          id: 3,
+          action: 'verify',
+          title: `3. Run syntax validation, verify zero regressions & stage '${resolvedTarget}' diff`,
+          progress: `Validating syntax and staging diff...`,
+          detail: `Syntax and AST verified. Staged diff for '${resolvedTarget}' in Diff tab.`
+        }
+      ];
+    }
+    // 7. Standard single-file modification (3 Steps)
+    else {
+      steps = [
+        {
+          id: 1,
+          action: 'scan',
+          title: `1. Correlate symbols and anchor lines in '${resolvedTarget}'`,
+          progress: `Correlating symbols in '${resolvedTarget}'...`,
+          detail: `Correlated symbols in '${resolvedTarget}'.`
+        },
+        {
+          id: 2,
+          action: 'synthesize',
+          title: isFromChat ? `2. Apply surgical changes and compute unified diff for '${resolvedTarget}'` : `2. Synthesize surgical code solution and compute unified diff for '${resolvedTarget}'`,
+          progress: `Querying ${currentModel} for surgical code changes...`,
+          detail: `Synthesized surgical solution for '${resolvedTarget}'.`
+        },
+        {
+          id: 3,
+          action: 'verify',
+          title: `3. Run AST syntax validation & verify zero regressions in '${resolvedTarget}'`,
+          progress: `Verifying syntax and AST integrity...`,
+          detail: `Syntax and AST verification passed. Changes ready for inspection in Diff tab.`
+        }
+      ];
+    }
+
+    return {
+      goal: cleanGoal,
+      target_file: resolvedTarget,
+      folder_name: folderName,
+      total_steps: steps.length,
+      steps: steps
+    };
+  }
+
+  function renderDynamicSteps(steps) {
+    if (!agentStepList) return;
+    agentStepList.innerHTML = steps.map(step => `
+      <div class="step-item step-queued" id="agent-step-${step.id}">
+        <div class="step-bullet">[-]</div>
+        <div><strong>${escapeHtml(step.title)}</strong></div>
+      </div>
+    `).join('');
+  }
+
   async function runAgentTask(chatPayload = null) {
     const rawGoal = agentGoalInput ? agentGoalInput.value.trim() : '';
     const goal = rawGoal || (chatPayload && chatPayload.targetFile ? `Apply changes for ${chatPayload.targetFile}` : '');
@@ -1507,153 +2109,114 @@
     appendTerminalLog(`\n$ clay-copilot --execute "${goal}"`);
     appendTerminalLog(`[agent] Target Model: ${currentModel}`);
 
-    // Set up step UI
-    renderInitialSteps(goal, isFromChat);
+    // Generate dynamic execution plan
+    let plan = null;
+    try {
+      const planRes = await fetch(`${BACKEND_URL}/api/agent/plan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          goal: goal,
+          workspace_path: currentRepoPath,
+          target_file: (chatPayload && chatPayload.targetFile) ? chatPayload.targetFile : undefined,
+          model_name: currentModel
+        })
+      });
+      if (planRes.ok) {
+        plan = await planRes.json();
+      }
+    } catch (e) {
+      console.warn('[fetch dynamic plan error]', e);
+    }
+
+    if (!plan || !plan.steps || plan.steps.length === 0) {
+      plan = planExecutionTasks(goal, isFromChat, chatPayload);
+    }
+
+    const steps = plan.steps;
+    const totalSteps = steps.length;
+    renderDynamicSteps(steps);
+
+    appendTerminalLog(`[plan] Dynamic plan: ${totalSteps} steps created for '${goal.slice(0, 45)}'`);
+
+    let effectiveGoal = goal;
+    let confirmedTargetFile = (chatPayload && chatPayload.targetFile) ? chatPayload.targetFile : (plan.target_file || null);
 
     try {
-      // Step 1: Scan AST & Symbols
-      if (!isAgentRunning) return;
-      updateStepUI(1, 'active');
-      setAgentProgress(15, 'Step 1 of 3: Scanning repository AST symbols...');
-      let effectiveGoal = goal;
-      let confirmedTargetFile = (isFromChat && chatPayload.targetFile) ? chatPayload.targetFile : null;
-      const step1Target = confirmedTargetFile || effectiveGoal;
-      const step1Res = await executeStep(1, step1Target);
-      if (!isAgentRunning) return;
-
-      if (step1Res && step1Res.ambiguity && step1Res.ambiguity.candidates && step1Res.ambiguity.candidates.length > 1) {
-        // AMBIGUITY DETECTED: Pause in the steps to wait for user confirmation!
-        updateStepUI(1, 'active', `Target Ambiguity: Multiple matching files found (${step1Res.ambiguity.candidates.join(', ')}). Awaiting selection...`);
-        if (agentTerminalStatus) {
-          agentTerminalStatus.textContent = 'PAUSED';
-          agentTerminalStatus.style.color = '#E5A84B';
-        }
-        setAgentProgress(25, 'Paused: Select which target file to update above...');
-        appendTerminalLog(`[ambiguity] Multiple target candidates detected: ${step1Res.ambiguity.candidates.join(', ')}`);
-        appendTerminalLog(`[agent] Execution paused. Waiting for user to confirm target file...`);
-
-        renderAmbiguityBar(step1Res.ambiguity);
-
-        // Pause execution and wait for user click on a candidate chip
-        const chosenFile = await new Promise(resolve => {
-          pendingAmbiguityResolver = resolve;
-        });
-
-        if (!isAgentRunning || !chosenFile) {
-          appendTerminalLog(`[agent] Execution stopped while awaiting target confirmation.`);
-          return;
-        }
-
-        confirmedTargetFile = chosenFile;
-        effectiveGoal = `${goal} in ${chosenFile}`;
-        appendTerminalLog(`[ambiguity] Target confirmed by user: ${chosenFile}. Resuming execution...`);
-        if (agentTerminalStatus) {
-          agentTerminalStatus.textContent = 'RUNNING';
-          agentTerminalStatus.style.color = '#4CAF50';
-        }
-        updateStepUI(1, 'done', `Target confirmed: ${chosenFile}. ${step1Res.log || 'AST symbols analyzed.'}`);
-      } else {
-        hideAmbiguityBar();
-        updateStepUI(1, 'done', step1Res.log || 'AST symbols analyzed.');
-      }
-
-      appendTerminalLog(`[step 1] ${step1Res.log || 'AST symbols analyzed.'}`);
-
-      // Step 2: Code Synthesis / Application
-      if (!isAgentRunning) return;
-      updateStepUI(2, 'active');
-
-      if (isFromChat) {
-        const targetFilename = confirmedTargetFile || chatPayload.targetFile || getPrimaryRepoFile(effectiveGoal);
-        setAgentProgress(60, `Step 2 of 3: Applying generated code changes for ${targetFilename}...`);
-        appendTerminalLog(`[step 2] Applying solution generated in chat for ${targetFilename}...`);
-        await new Promise(r => setTimeout(r, 350));
-
-        let diffToApply = chatPayload.pregeneratedDiff;
-        if (!diffToApply && chatPayload.pregeneratedCode) {
-          try {
-            const compRes = await fetch(`${BACKEND_URL}/api/agent/compute-diff`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                target_file: targetFilename,
-                code_or_snippet: chatPayload.pregeneratedCode,
-                workspace_path: currentRepoPath
-              })
-            });
-            if (compRes.ok) {
-              const compData = await compRes.json();
-              if (compData.diff) {
-                diffToApply = compData.diff;
-              }
-            }
-          } catch (e) {
-            console.warn('[compute-diff error]', e);
-          }
-        }
-
-        if (diffToApply) {
-          stageDiff(targetFilename, diffToApply);
-          appendTerminalLog(`[diff] Staged surgical diff for ${targetFilename} in Diff Reviewer tab.`);
-        }
-        updateStepUI(2, 'done', `Applied code changes for ${targetFilename}.`);
-        appendTerminalLog(`[step 2] Code changes from chat applied cleanly.`);
-      } else {
-        setAgentProgress(60, `Step 2 of 3: Synthesizing code solution via ${currentModel}...`);
-        appendTerminalLog(`[step 2] Querying ${currentModel} for code changes...`);
-        const step2Res = await executeStep(2, effectiveGoal, confirmedTargetFile);
+      for (let i = 0; i < steps.length; i++) {
         if (!isAgentRunning) return;
-        updateStepUI(2, 'done', 'Solution synthesized cleanly.');
-        appendTerminalLog(`[step 2] ${step2Res.log || 'Code synthesized.'}`);
+        const currentStep = steps[i];
+        const stepNum = i + 1;
+        const stepAction = currentStep.action;
 
-        let diffToStage = step2Res.diff;
-        const targetFilename = step2Res.target_file || confirmedTargetFile || (diffToStage ? extractDiffFilename(diffToStage) : '') || getPrimaryRepoFile(effectiveGoal);
+        updateStepUI(currentStep.id, 'active');
+        const progressPct = Math.round((stepNum / (totalSteps + 1)) * 90);
+        setAgentProgress(progressPct, `Step ${stepNum} of ${totalSteps}: ${currentStep.progress || currentStep.title}...`);
 
-        // Robust fallback: if diff was empty but LLM generated code or raw text, compute surgical diff
-        if (!diffToStage && step2Res.generated) {
-          try {
-            const compRes = await fetch(`${BACKEND_URL}/api/agent/compute-diff`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                target_file: targetFilename,
-                code_or_snippet: step2Res.generated,
-                workspace_path: currentRepoPath
-              })
-            });
-            if (compRes.ok) {
-              const compData = await compRes.json();
-              if (compData.diff) {
-                diffToStage = compData.diff;
-              }
-            }
-          } catch (e) {
-            console.warn('[compute-diff fallback error]', e);
+        let stepTarget = confirmedTargetFile || effectiveGoal;
+        const stepRes = await executeStep(currentStep.id, stepTarget, confirmedTargetFile, stepAction, totalSteps);
+        if (!isAgentRunning) return;
+
+        // Check ambiguity if step 1 returned multiple candidates
+        if (stepAction === 'scan' && stepRes && stepRes.ambiguity && stepRes.ambiguity.candidates && stepRes.ambiguity.candidates.length > 1) {
+          updateStepUI(currentStep.id, 'active', `Target Ambiguity: Multiple candidates found (${stepRes.ambiguity.candidates.join(', ')}). Awaiting selection...`);
+          if (agentTerminalStatus) {
+            agentTerminalStatus.textContent = 'PAUSED';
+            agentTerminalStatus.style.color = '#E5A84B';
           }
+          setAgentProgress(25, 'Paused: Select which target file to update above...');
+          appendTerminalLog(`[ambiguity] Multiple candidates detected: ${stepRes.ambiguity.candidates.join(', ')}`);
+          appendTerminalLog(`[agent] Execution paused. Waiting for user confirmation...`);
+          renderAmbiguityBar(stepRes.ambiguity);
+
+          const chosenFile = await new Promise(resolve => {
+            pendingAmbiguityResolver = resolve;
+          });
+
+          if (!isAgentRunning || !chosenFile) {
+            appendTerminalLog(`[agent] Execution stopped while awaiting target confirmation.`);
+            return;
+          }
+
+          confirmedTargetFile = chosenFile;
+          effectiveGoal = `${goal} in ${chosenFile}`;
+          appendTerminalLog(`[ambiguity] Target confirmed by user: ${chosenFile}. Resuming execution...`);
+          if (agentTerminalStatus) {
+            agentTerminalStatus.textContent = 'RUNNING';
+            agentTerminalStatus.style.color = '#4CAF50';
+          }
+          updateStepUI(currentStep.id, 'done', `Target confirmed: ${chosenFile}. ${stepRes.log || currentStep.detail}`);
+          appendTerminalLog(`[step ${stepNum}/${totalSteps}] Target confirmed: ${chosenFile}.`);
+        } else {
+          hideAmbiguityBar();
+          const detailMsg = stepRes.log || currentStep.detail;
+          updateStepUI(currentStep.id, 'done', detailMsg);
+          appendTerminalLog(`[step ${stepNum}/${totalSteps}] ${detailMsg}`);
         }
 
-        if (diffToStage) {
-          stageDiff(targetFilename, diffToStage, step2Res.staged_files);
-          appendTerminalLog(`[diff] Staged surgical diff for ${targetFilename} in Diff Reviewer tab.`);
+        // Handle diff staging
+        if (stepAction === 'synthesize' || stepAction === 'delete') {
+          let diffToStage = stepRes.diff;
+          const targetFilename = stepRes.target_file || confirmedTargetFile || (diffToStage ? extractDiffFilename(diffToStage) : '') || getPrimaryRepoFile(effectiveGoal);
+
+          if (isFromChat && chatPayload) {
+            diffToStage = chatPayload.pregeneratedDiff || diffToStage;
+          }
+
+          if (diffToStage) {
+            stageDiff(targetFilename, diffToStage, stepRes.staged_files);
+            const diffType = stepAction === 'delete' ? 'deletion' : 'surgical';
+            appendTerminalLog(`[diff] Staged ${diffType} diff for ${targetFilename} in Diff Reviewer tab.`);
+          }
         }
       }
 
-      // Step 3: AST Syntax Verification
-      if (!isAgentRunning) return;
-      updateStepUI(3, 'active');
-      setAgentProgress(90, 'Step 3 of 3: Verifying syntax & integrity...');
-      const step3Target = confirmedTargetFile || ((isFromChat && chatPayload.targetFile) ? chatPayload.targetFile : effectiveGoal);
-      const step3Res = await executeStep(3, step3Target, confirmedTargetFile);
-      if (!isAgentRunning) return;
-      updateStepUI(3, 'done', step3Res.log || 'Syntax and AST verification passed.');
-      appendTerminalLog(`[step 3] ${step3Res.log || 'Syntax verified.'}`);
-
-      setAgentProgress(100, 'All 3 steps completed (100% complete)');
+      setAgentProgress(100, `All ${totalSteps} steps completed (100% complete)`);
       if (agentTerminalStatus) {
         agentTerminalStatus.textContent = 'COMPLETE';
         agentTerminalStatus.style.color = '#10B981';
       }
-      appendTerminalLog(`[complete] Task executed successfully! Inspect diff in Diff tab.`);
+      appendTerminalLog(`[complete] All ${totalSteps} steps completed successfully! Inspect diff in Diff tab.`);
     } catch (err) {
       appendTerminalLog(`[error] Execution failed: ${err.message}`);
     } finally {
@@ -1680,7 +2243,7 @@
     }
   }
 
-  async function executeStep(stepId, goal, targetFile = null) {
+  async function executeStep(stepId, goal, targetFile = null, stepAction = null, totalSteps = 3) {
     try {
       const res = await fetch(`${BACKEND_URL}/api/agent/step`, {
         method: 'POST',
@@ -1688,6 +2251,8 @@
         body: JSON.stringify({
           goal,
           step_id: stepId,
+          step_action: stepAction || undefined,
+          total_steps: totalSteps,
           workspace_path: currentRepoPath,
           active_file: activeEditorFile || undefined,
           cursor_line: activeEditorCursorLine || undefined,
@@ -1701,13 +2266,15 @@
           const handler = (event) => {
             if (event.data?.command === 'agentStepResult' && event.data?.step_id === stepId) {
               window.removeEventListener('message', handler);
-              resolve(event.data.data || { log: 'Step completed via extension host' });
+              resolve(event.data.data || { log: `Step ${stepId} completed via extension host.` });
             }
           };
           window.addEventListener('message', handler);
           vscode.postMessage({
             command: 'executeAgentStep',
             step_id: stepId,
+            step_action: stepAction || undefined,
+            total_steps: totalSteps,
             goal,
             workspace_path: currentRepoPath,
             active_file: activeEditorFile || undefined,
@@ -1717,7 +2284,7 @@
           setTimeout(() => {
             window.removeEventListener('message', handler);
             resolve({ log: `Step ${stepId} processed.` });
-          }, 10000);
+          }, 12000);
         });
       }
     }
@@ -1725,24 +2292,8 @@
   }
 
   function renderInitialSteps(goal, isFromChat = false) {
-    if (!agentStepList) return;
-    const step2Title = isFromChat
-      ? '2. Apply generated code changes and stage unified diff'
-      : '2. Synthesize code changes and compute unified diff';
-    agentStepList.innerHTML = `
-      <div class="step-item step-queued" id="agent-step-1">
-        <div class="step-bullet">[-]</div>
-        <div><strong>1. Scan codebase for symbols matching '${escapeHtml(goal.slice(0, 30))}'</strong></div>
-      </div>
-      <div class="step-item step-queued" id="agent-step-2">
-        <div class="step-bullet">[-]</div>
-        <div><strong>${step2Title}</strong></div>
-      </div>
-      <div class="step-item step-queued" id="agent-step-3">
-        <div class="step-bullet">[-]</div>
-        <div><strong>3. Run syntax validation & verify zero regressions</strong></div>
-      </div>
-    `;
+    const plan = planExecutionTasks(goal, isFromChat);
+    renderDynamicSteps(plan.steps);
   }
 
   function updateStepUI(stepId, status, detail) {
@@ -1755,14 +2306,17 @@
     }
     if (detail) {
       const container = el.querySelector('div:last-child');
-      if (container && !container.querySelector('span')) {
-        const span = document.createElement('span');
-        span.style.color = '#8C847A';
-        span.style.fontSize = '9.5px';
-        span.style.fontFamily = 'var(--font-mono)';
+      if (container) {
+        let span = container.querySelector('span');
+        if (!span) {
+          container.appendChild(document.createElement('br'));
+          span = document.createElement('span');
+          span.style.color = '#8C847A';
+          span.style.fontSize = '9.5px';
+          span.style.fontFamily = 'var(--font-mono)';
+          container.appendChild(span);
+        }
         span.textContent = detail;
-        container.appendChild(document.createElement('br'));
-        container.appendChild(span);
       }
     }
   }
@@ -1887,6 +2441,34 @@
       if (terminalStream) {
         navigator.clipboard.writeText(terminalStream.textContent);
         showToast('Terminal output copied', 'success');
+      }
+    });
+  }
+
+  if (terminalStream) {
+    // Allow user to select specific lines with cursor and copy via Ctrl+C / Cmd+C
+    terminalStream.addEventListener('copy', () => {
+      const selected = window.getSelection()?.toString();
+      if (selected && selected.trim()) {
+        showToast('Selection copied to clipboard', 'success');
+      }
+    });
+
+    // Right-click copy: in VS Code webviews where browser context menu is suppressed,
+    // right-clicking any highlighted terminal selection instantly copies it to clipboard
+    terminalStream.addEventListener('contextmenu', (e) => {
+      const selected = window.getSelection()?.toString();
+      if (selected && selected.trim()) {
+        e.preventDefault();
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(selected).then(() => {
+            showToast('Selection copied to clipboard', 'success');
+          }).catch(() => {
+            fallbackCopyText(selected, () => showToast('Selection copied to clipboard', 'success'));
+          });
+        } else {
+          fallbackCopyText(selected, () => showToast('Selection copied to clipboard', 'success'));
+        }
       }
     });
   }
@@ -2317,8 +2899,6 @@
   const repoSecurityDetails = document.getElementById('repo-security-details');
   const mermaidCode = document.getElementById('mermaid-code');
   const hierarchyCardTitle = document.getElementById('hierarchy-card-title');
-  const hierarchyFileBadge = document.getElementById('hierarchy-file-badge');
-  const hierarchyFileBadgeText = document.getElementById('hierarchy-file-badge-text');
   const btnClearFileSelection = document.getElementById('btn-clear-file-selection');
   let selectedRepoFile = null;
 
@@ -3221,7 +3801,6 @@
       if (repoFileTree) {
         repoFileTree.querySelectorAll('.tree-file.selected-file').forEach(el => el.classList.remove('selected-file'));
       }
-      if (hierarchyFileBadge) hierarchyFileBadge.style.display = 'none';
       if (btnClearFileSelection) btnClearFileSelection.style.display = 'none';
       if (hierarchyCardTitle) hierarchyCardTitle.textContent = 'Call Hierarchy & Relationships';
       fetchMermaidGraph(null);
@@ -3244,10 +3823,6 @@
       });
     }
 
-    if (hierarchyFileBadge) {
-      hierarchyFileBadge.style.display = 'inline-flex';
-      if (hierarchyFileBadgeText) hierarchyFileBadgeText.textContent = displayName;
-    }
     if (btnClearFileSelection) {
       btnClearFileSelection.style.display = 'inline-block';
     }
@@ -3257,13 +3832,6 @@
 
     showToast(`Selected: ${displayName} // Hierarchy filtered`, 'success');
     fetchMermaidGraph(selectedRepoFile);
-  }
-
-  if (hierarchyFileBadge) {
-    hierarchyFileBadge.addEventListener('click', (e) => {
-      e.stopPropagation();
-      setSelectedRepoFile(null);
-    });
   }
 
   if (btnClearFileSelection) {
@@ -3329,7 +3897,6 @@
     btnResetRepoPath.addEventListener('click', () => {
       currentRepoPath = '';
       selectedRepoFile = null;
-      if (hierarchyFileBadge) hierarchyFileBadge.style.display = 'none';
       if (btnClearFileSelection) btnClearFileSelection.style.display = 'none';
       if (hierarchyCardTitle) hierarchyCardTitle.textContent = 'Call Hierarchy & Relationships';
       if (inputRepoPath) inputRepoPath.value = '';

@@ -5,7 +5,11 @@ from backend.app.agent.instruction_parser import (
     SymbolEntityResolver,
     AmbiguityDetector,
     ContextWindowBuilder,
+    DynamicTaskPlanner,
+    TopicDomainResolver,
+    normalize_prompt_text,
 )
+from backend.app.agent.algorithm_library import AlgorithmCodeLibrary
 from backend.app.agent.patch_engine import PatchEngine
 
 class TestInstructionParserAndSmarterContext(unittest.TestCase):
@@ -193,6 +197,244 @@ class TestInstructionParserAndSmarterContext(unittest.TestCase):
         specs2 = SymbolEntityResolver.extract_change_specs("change timeout from 3000 to 5000")
         self.assertTrue(any(s.get("from") == "3000" and s.get("to") == "5000" for s in specs2))
 
+    def test_create_new_nlp_intent_and_target_extraction(self):
+        # 1. User specific prompt: "write me code for DSA and put them in a new file , test2.py"
+        prompt1 = "write me code for DSA and put them in a new file , test2.py"
+        c1 = InstructionClassifier.classify(prompt1)
+        self.assertEqual(c1["intent"], "CREATE_NEW")
+        targets1 = SymbolEntityResolver.extract_target_filepaths(prompt1)
+        self.assertIn("test2.py", targets1)
+
+        # Target resolution should not discard test2.py even if accessible_files is empty or only has test.py
+        accessible_mock = {"test.py": Path("/tmp/test.py")}
+        resolved1 = SymbolEntityResolver.resolve_target_files(prompt1, "/tmp", accessible_mock)
+        self.assertIn("test2.py", resolved1)
+
+        # 2. Folder and file combination: "create a folder dsa and put test2.py inside it"
+        prompt2 = "create a folder dsa and put test2.py inside it"
+        c2 = InstructionClassifier.classify(prompt2)
+        self.assertIn(c2["intent"], ("CREATE_NEW", "CREATE_FOLDER"))
+        targets2 = SymbolEntityResolver.extract_target_filepaths(prompt2)
+        self.assertTrue(any("dsa/test2.py" in t or "test2.py" in t for t in targets2))
+
+        # 3. User specific bug reproduction: "create me a new folder named documentation , inside it put plan.md inside teh plan,md just put a plaeholder statement"
+        prompt3 = "create me a new folder named documentation , inside it put plan.md inside teh plan,md just put a plaeholder statement"
+        c3 = InstructionClassifier.classify(prompt3)
+        self.assertIn(c3["intent"], ("CREATE_NEW", "CREATE_FOLDER"))
+        targets3 = SymbolEntityResolver.extract_target_filepaths(prompt3)
+        self.assertIn("documentation/plan.md", targets3)
+        self.assertNotIn("named", targets3)
+        self.assertNotIn("named/plan.md", targets3)
+
+        # 4. Pure folder creation with connecting word: "create me a new folder named documentation"
+        prompt4 = "create me a new folder named documentation"
+        c4 = InstructionClassifier.classify(prompt4)
+        self.assertEqual(c4["intent"], "CREATE_FOLDER")
+        targets4 = SymbolEntityResolver.extract_target_filepaths(prompt4)
+        self.assertIn("documentation", targets4)
+        self.assertNotIn("named", targets4)
+
+    def test_arbitrary_extensions_and_folder_creation(self):
+        # TypeScript
+        targets_ts = SymbolEntityResolver.extract_target_filepaths("write user interface and save in src/types/user.ts")
+        self.assertTrue(any("user.ts" in t for t in targets_ts))
+
+        # Rust
+        targets_rs = SymbolEntityResolver.extract_target_filepaths("implement algorithm in solver.rs")
+        self.assertTrue(any("solver.rs" in t for t in targets_rs))
+
+        # Go
+        targets_go = SymbolEntityResolver.extract_target_filepaths("create a new file handlers.go with http endpoints")
+        self.assertTrue(any("handlers.go" in t for t in targets_go))
+
+        # HTML / CSS
+        targets_css = SymbolEntityResolver.extract_target_filepaths("put styles in static/css/main.css")
+        self.assertTrue(any("main.css" in t for t in targets_css))
+
+        # Pure folder creation
+        prompt_folder = "create folder algorithms"
+        c_folder = InstructionClassifier.classify(prompt_folder)
+        self.assertEqual(c_folder["intent"], "CREATE_FOLDER")
+        targets_folder = SymbolEntityResolver.extract_target_filepaths(prompt_folder)
+        self.assertIn("algorithms", targets_folder)
+
+    def test_patch_engine_new_file_and_subfolder_creation(self):
+        import tempfile
+        import shutil
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            # Test creating a new file in a nested folder via PatchEngine
+            diff_text = (
+                "--- /dev/null\n"
+                "+++ b/dsa/test2.py\n"
+                "@@ -0,0 +1,4 @@\n"
+                "+def binary_search(arr, target):\n"
+                "+    return -1\n"
+            )
+            result = PatchEngine.apply_patch_hunks("dsa/test2.py", diff_text, workspace_path=temp_dir)
+            self.assertEqual(result["status"], "success")
+            self.assertTrue(result["created"])
+
+            created_file = Path(temp_dir) / "dsa" / "test2.py"
+            self.assertTrue(created_file.exists())
+            content = created_file.read_text(encoding="utf-8")
+            self.assertIn("def binary_search", content)
+
+            # Test creating non-python file (.ts)
+            diff_ts = (
+                "--- /dev/null\n"
+                "+++ b/frontend/models.ts\n"
+                "@@ -0,0 +1,3 @@\n"
+                "+export interface Node {\n"
+                "+    value: number;\n"
+                "+}\n"
+            )
+            res_ts = PatchEngine.apply_patch_hunks("frontend/models.ts", diff_ts, workspace_path=temp_dir)
+            self.assertEqual(res_ts["status"], "success")
+            self.assertTrue((Path(temp_dir) / "frontend" / "models.ts").exists())
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_dynamic_task_planner_folder_creation(self):
+        plan = DynamicTaskPlanner.plan_tasks(
+            goal="create a folder named documentation",
+            target_files=["documentation"]
+        )
+        self.assertEqual(plan["total_steps"], 2)
+        self.assertEqual(plan["steps"][0]["action"], "scan")
+        self.assertEqual(plan["steps"][1]["action"], "prep")
+        self.assertIn("documentation", plan["steps"][0]["title"])
+        self.assertIn("documentation", plan["steps"][1]["title"])
+
+    def test_dynamic_task_planner_delete_code(self):
+        plan = DynamicTaskPlanner.plan_tasks(
+            goal="delete all code in test1.py",
+            target_files=["test1.py"]
+        )
+        self.assertEqual(plan["total_steps"], 3)
+        self.assertEqual(plan["steps"][0]["action"], "scan")
+        self.assertEqual(plan["steps"][1]["action"], "delete")
+        self.assertEqual(plan["steps"][2]["action"], "verify")
+        self.assertIn("test1.py", plan["steps"][0]["title"])
+        self.assertIn("truncation diff", plan["steps"][1]["title"].lower())
+        self.assertIn("test1.py", plan["steps"][1]["title"])
+
+    def test_dynamic_task_planner_new_file(self):
+        plan = DynamicTaskPlanner.plan_tasks(
+            goal="write me basic code in test1.py",
+            target_files=["test1.py"]
+        )
+        self.assertEqual(plan["total_steps"], 3)
+        self.assertEqual(plan["steps"][0]["action"], "scan")
+        self.assertEqual(plan["steps"][1]["action"], "synthesize")
+        self.assertEqual(plan["steps"][2]["action"], "verify")
+        self.assertIn("test1.py", plan["steps"][0]["title"])
+        self.assertIn("test1.py", plan["steps"][1]["title"])
+        self.assertIn("test1.py", plan["steps"][2]["title"])
+
+    def test_dynamic_task_planner_nested_folder_and_file(self):
+        plan = DynamicTaskPlanner.plan_tasks(
+            goal="create folder utils and file helper.py",
+            target_files=["helper.py"]
+        )
+        self.assertEqual(plan["total_steps"], 4)
+        self.assertEqual(plan["steps"][0]["action"], "scan")
+        self.assertEqual(plan["steps"][1]["action"], "prep")
+        self.assertEqual(plan["steps"][2]["action"], "synthesize")
+        self.assertEqual(plan["steps"][3]["action"], "verify")
+        self.assertIn("utils", plan["steps"][0]["title"])
+        self.assertIn("helper.py", plan["steps"][1]["title"])
+        self.assertIn("helper.py", plan["steps"][2]["title"])
+
+    def test_dynamic_task_planner_bug_fix(self):
+        plan = DynamicTaskPlanner.plan_tasks(
+            goal="fix failing test in test_auth.py",
+            target_files=["test_auth.py"]
+        )
+        self.assertEqual(plan["total_steps"], 4)
+        self.assertEqual(plan["steps"][0]["action"], "scan")
+        self.assertEqual(plan["steps"][1]["action"], "prep")
+        self.assertEqual(plan["steps"][2]["action"], "synthesize")
+        self.assertEqual(plan["steps"][3]["action"], "verify")
+        self.assertIn("test_auth.py", plan["steps"][0]["title"])
+        self.assertIn("test_auth.py", plan["steps"][2]["title"])
+
+    def test_dynamic_task_planner_huge_prompt_max_5_steps(self):
+        huge_goal = (
+            "refactor the authentication service and user session logic across all files "
+            "to support oauth2 and jwt verification pipelines with strict security headers"
+        )
+        plan = DynamicTaskPlanner.plan_tasks(
+            goal=huge_goal,
+            target_files=["auth.py", "session.py"]
+        )
+        self.assertEqual(plan["total_steps"], 5)
+        self.assertEqual(plan["complexity"], "huge")
+        actions = [s["action"] for s in plan["steps"]]
+        self.assertEqual(actions, ["scan", "prep", "synthesize", "validate", "verify"])
+        # Ensure all titles are unique and non-empty
+        titles = [s["title"] for s in plan["steps"]]
+        self.assertEqual(len(titles), len(set(titles)))
+        for s in plan["steps"]:
+            self.assertTrue(len(s["title"]) > 10)
+            self.assertTrue(len(s["progress"]) > 10)
+            self.assertTrue(len(s["detail"]) > 10)
+
+    def test_dynamic_task_planner_astar_sophisticated_algorithm(self):
+        # Prompt exactly as tested by the user with typos: "write me a sophesticated adn large code for astar algo in test.py"
+        user_prompt = "write me a sophesticated adn large code for astar algo in test.py"
+        plan = DynamicTaskPlanner.plan_tasks(
+            goal=user_prompt,
+            target_file="test.py"
+        )
+        self.assertEqual(plan["total_steps"], 5)
+        self.assertEqual(plan["complexity"], "huge")
+        self.assertEqual(plan["target_file"], "test.py")
+        self.assertEqual(plan["topic"], "A* Pathfinding Algorithm")
+
+        actions = [s["action"] for s in plan["steps"]]
+        self.assertEqual(actions, ["scan", "prep", "synthesize", "validate", "verify"])
+
+        # Check domain-specific dynamic titles
+        self.assertIn("A* Pathfinding Algorithm", plan["steps"][0]["title"])
+        self.assertIn("heuristic", plan["steps"][0]["title"].lower())
+        self.assertIn("priority queue", plan["steps"][1]["title"].lower())
+        self.assertIn("A* Pathfinding Algorithm", plan["steps"][2]["title"])
+        self.assertIn("AST validation", plan["steps"][3]["title"])
+        self.assertIn("A* Pathfinding Algorithm", plan["steps"][4]["title"])
+
+        # Ensure all 5 titles are completely unique
+        titles = [s["title"] for s in plan["steps"]]
+        self.assertEqual(len(titles), len(set(titles)))
+
+    def test_algorithm_code_library_and_stub_prevention(self):
+        # Verify stub detection
+        dummy_stub = (
+            'def main():\n'
+            '    """Entry point for the test script."""\n'
+            '    print("Hello, World!")\n'
+            '\n'
+            'if __name__ == "__main__":\n'
+            '    main()'
+        )
+        self.assertTrue(AlgorithmCodeLibrary.is_stub_or_trivial(dummy_stub))
+        self.assertTrue(AlgorithmCodeLibrary.is_stub_or_trivial(""))
+        self.assertTrue(AlgorithmCodeLibrary.is_stub_or_trivial("pass"))
+
+        # Verify reference implementation retrieval
+        ref_code = AlgorithmCodeLibrary.get_reference_implementation(
+            "write me a sophesticated adn large code for astar algo in test.py",
+            "test.py"
+        )
+        self.assertIsNotNone(ref_code)
+        self.assertIn("class AStarPlanner", ref_code)
+        self.assertIn("def heuristic", ref_code)
+        self.assertIn("def find_path", ref_code)
+        self.assertFalse(AlgorithmCodeLibrary.is_stub_or_trivial(ref_code))
+
 if __name__ == "__main__":
     unittest.main()
+
+
 

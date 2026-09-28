@@ -2037,6 +2037,9 @@ body.claude-dark .chat-jump-down-btn:hover {
   overflow-y: auto;
   line-height: 1.5;
   white-space: pre-wrap;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  cursor: text !important;
 }
 
 /* Bottom User Console (Task Planner + Execution List) */
@@ -2303,6 +2306,24 @@ body.claude-dark .chat-jump-down-btn:hover {
   white-space: pre-wrap;
   max-height: 140px;
   overflow-y: auto;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  cursor: text !important;
+}
+
+.terminal-stream *,
+.agent-console-widget .terminal-stream * {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  cursor: text !important;
+}
+
+.terminal-stream::selection,
+.terminal-stream *::selection,
+.agent-console-widget .terminal-stream::selection,
+.agent-console-widget .terminal-stream *::selection {
+  background: rgba(204, 107, 73, 0.45) !important;
+  color: #FFFFFF !important;
 }
 
 .cmd-line {

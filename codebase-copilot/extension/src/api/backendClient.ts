@@ -300,11 +300,16 @@ export class BackendClient {
         };
     }
 
-    async createPlan(goal: string, workspacePath?: string): Promise<AgentTask> {
+    async createPlan(goal: string, workspacePath?: string, targetFile?: string, modelName?: string): Promise<AgentTask> {
         const res = await fetch(`${this.backendUrl}/api/agent/plan`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ goal, workspace_path: workspacePath })
+            body: JSON.stringify({
+                goal,
+                workspace_path: workspacePath,
+                target_file: targetFile,
+                model_name: modelName
+            })
         });
         if (!res.ok) {
             throw new Error(`Planning failed: ${res.statusText}`);
@@ -389,7 +394,7 @@ export class BackendClient {
         return { os: process.platform === 'win32' ? 'windows' : 'linux', is_windows: process.platform === 'win32', shell: 'bash' };
     }
 
-    async executeAgentStep(stepId: number, goal: string, workspacePath?: string, activeFile?: string, cursorLine?: number, targetFile?: string): Promise<any> {
+    async executeAgentStep(stepId: number, goal: string, workspacePath?: string, activeFile?: string, cursorLine?: number, targetFile?: string, stepAction?: string, totalSteps?: number): Promise<any> {
         try {
             const res = await fetch(`${this.backendUrl}/api/agent/step`, {
                 method: 'POST',
@@ -400,7 +405,9 @@ export class BackendClient {
                     workspace_path: workspacePath,
                     active_file: activeFile,
                     cursor_line: cursorLine,
-                    target_file: targetFile
+                    target_file: targetFile,
+                    step_action: stepAction,
+                    total_steps: totalSteps
                 })
             });
             if (res.ok) return await res.json();
