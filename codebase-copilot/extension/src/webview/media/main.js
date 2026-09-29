@@ -330,12 +330,11 @@
     privacyPatterns.value = currentPrivacyPatterns;
   }
 
-  // 0. Theme & IDE Bindings (CLAY Palette vs. VS Code Native Tokens)
+  // 0. Theme & IDE Bindings (CLAY Palette vs. IDE Palette Tokens)
   let currentThemeMode = localStorage.getItem('clay_theme_mode') || 'claude';
   const themeCards = document.querySelectorAll('.theme-binding-card');
-  const chkVscodeNativeTheme = document.getElementById('chk-vscode-native-theme');
 
-  function applyThemeMode(mode, showFeedback = true) {
+  function applyThemeMode(mode) {
     currentThemeMode = mode;
     try {
       localStorage.setItem('clay_theme_mode', mode);
@@ -348,10 +347,6 @@
       document.body.classList.remove('vscode-native');
     }
 
-    if (chkVscodeNativeTheme) {
-      chkVscodeNativeTheme.checked = isNative;
-    }
-
     themeCards.forEach((c) => {
       if (c.getAttribute('data-theme') === mode) {
         c.classList.add('active');
@@ -359,31 +354,17 @@
         c.classList.remove('active');
       }
     });
-
-    if (showFeedback) {
-      if (isNative) {
-        showToast('VS Code Native Theme Bindings enabled: Adopting IDE editor tokens', 'info');
-      } else {
-        showToast('CLAY Palette active: Using custom Claude warm minimalist tones', 'info');
-      }
-    }
   }
 
   themeCards.forEach((card) => {
     card.addEventListener('click', () => {
       const mode = card.getAttribute('data-theme') || 'claude';
-      applyThemeMode(mode, true);
+      applyThemeMode(mode);
     });
   });
 
-  if (chkVscodeNativeTheme) {
-    chkVscodeNativeTheme.addEventListener('change', (e) => {
-      applyThemeMode(e.target.checked ? 'vscode' : 'claude', true);
-    });
-  }
-
   // Apply saved theme mode immediately on initialization
-  applyThemeMode(currentThemeMode, false);
+  applyThemeMode(currentThemeMode);
 
   // 1. 3-Card Security Mode Grid
   const securityCards = document.querySelectorAll('.security-mode-card');

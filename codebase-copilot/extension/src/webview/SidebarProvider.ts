@@ -657,7 +657,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             <button class="pill-clear-chat" id="btn-clear-chat" title="Clear chat history and reset context" aria-label="Clear chat">
                 <span class="pill-clear-text">Clear</span>
             </button>
-            <button class="pill-theme-switch" id="btn-theme-toggle" title="Toggle Light / Claude Dark Mode" aria-label="Toggle theme">
+            <button class="pill-theme-switch" id="btn-theme-toggle" title="Toggle Light / CLAY Dark Mode" aria-label="Toggle theme">
                 <span class="pill-theme-knob">
                     <svg class="theme-icon-moon" id="icon-theme-moon" viewBox="0 0 16 16" width="9" height="9" fill="currentColor">
                         <path d="M6 1a5 5 0 0 0 5 5 5 5 0 0 0 4.9 4A6 6 0 1 1 6 1z"/>
@@ -912,7 +912,7 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
                         </svg>
                         CLAY Palette
                     </div>
-                    <div class="theme-binding-desc">Signature warm minimalist canvas with custom Claude Light &amp; Dark tones.</div>
+                    <div class="theme-binding-desc">Signature warm minimalist canvas with custom CLAY Light &amp; Dark tones.</div>
                 </div>
                 <div class="theme-binding-card" data-theme="vscode" id="card-theme-vscode">
                     <div class="theme-binding-badge">IDE BINDING</div>
@@ -920,21 +920,9 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
                         <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
                             <path d="M14.5 1.5l-5 4.5v4l5 4.5v-13zM1.5 5.2L7 1.5v13L1.5 10.8V5.2z"/>
                         </svg>
-                        VS Code Native
+                        IDE PALETTE
                     </div>
                     <div class="theme-binding-desc">Binds live to IDE editor tokens (var(--vscode-editor-background), foreground, diffs &amp; borders).</div>
-                </div>
-            </div>
-            <div class="settings-card" style="margin-top: 10px;">
-                <div class="settings-row">
-                    <div class="settings-row-info">
-                        <div class="settings-row-title">Adopt VS Code Editor Tokens</div>
-                        <div class="settings-row-desc">Automatically synchronize background, text, and diffs with your current active VS Code color theme</div>
-                    </div>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="chk-vscode-native-theme">
-                        <span class="toggle-slider"></span>
-                    </label>
                 </div>
             </div>
         </div>

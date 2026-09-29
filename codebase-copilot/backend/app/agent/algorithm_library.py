@@ -1,9 +1,4 @@
-"""
-Algorithm Code Library for CLAY Copilot.
-Provides industrial-grade, production-ready reference implementations
-for common complex algorithms, data structures, and architectural engines.
-Used to ensure high-fidelity code generation and prevent trivial stubs (e.g. Hello World).
-"""
+
 
 from typing import Optional, Dict, Any
 import re
@@ -15,9 +10,7 @@ class AlgorithmCodeLibrary:
     """
 
     ASTAR_IMPLEMENTATION = '''"""
-A* (A-Star) Pathfinding Algorithm Implementation
-Production-ready, highly optimized search algorithm with Manhattan and Euclidean heuristics,
-obstacle avoidance, diagonal movement support, and full path reconstruction.
+A* (A-Star) Pathfinding Algorithm Implementation.
 """
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Set, Dict
