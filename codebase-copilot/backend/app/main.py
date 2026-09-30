@@ -30,7 +30,6 @@ from .agent.instruction_parser import (
     TopicDomainResolver,
     normalize_prompt_text,
 )
-from .agent.algorithm_library import AlgorithmCodeLibrary
 from .agent.repair_loop import SelfHealingRepairLoop
 from .agent.tools.terminal_agent import TerminalAgent
 from .llm.gemma_provider import OllamaGemmaProvider
@@ -488,8 +487,9 @@ def save_persisted_settings():
             "model": ollama_provider.model_name,
             "host": ollama_provider.base_url,
             "connection_type": ollama_provider.connection_type,
-            "api_key": ollama_provider.api_key
         }
+        # Do not persist secrets/keys to unencrypted JSON on disk (Domain 5 SecretStorage spec)
+        to_save.pop("api_key", None)
         SETTINGS_FILE.write_text(json.dumps(to_save, indent=2), encoding="utf-8")
     except Exception:
         pass
@@ -513,13 +513,22 @@ class SettingsUpdateRequest(BaseModel):
 
 @app.get("/api/settings")
 async def get_settings():
+    safe_runtime = {k: v for k, v in runtime_settings.items() if k != "api_key"}
+    raw_key = ollama_provider.api_key or ""
+    masked_key = (
+        f"{raw_key[:4]}••••••••{raw_key[-4:]}"
+        if len(raw_key) > 8
+        else ("••••••••" if raw_key else "")
+    )
     return {
         "status": "success",
-        **runtime_settings,
+        **safe_runtime,
         "active_model": ollama_provider.model_name,
         "host": ollama_provider.base_url,
         "connection_type": ollama_provider.connection_type,
-        "api_key": ollama_provider.api_key,
+        "has_api_key": bool(raw_key),
+        "api_key_masked": masked_key,
+        "api_key": masked_key,
         "temperature": ollama_provider.temperature,
         "num_ctx": ollama_provider.num_ctx,
         "num_predict": ollama_provider.num_predict,
@@ -1186,6 +1195,8 @@ class PlanRequest(BaseModel):
     goal: str
     workspace_path: Optional[str] = None
     target_file: Optional[str] = None
+    active_file: Optional[str] = None
+    active_file_content: Optional[str] = None
     model_name: Optional[str] = None
 
 @app.post("/api/agent/plan")
@@ -1197,8 +1208,14 @@ async def create_plan(req: PlanRequest):
     intent_info = InstructionClassifier.classify(req.goal)
     accessible = WorkspaceFileResolver.list_accessible_files(workspace_dir)
     target_files = SymbolEntityResolver.resolve_target_files(req.goal, workspace_dir, accessible)
-    if req.target_file and req.target_file not in target_files:
-        target_files.insert(0, req.target_file)
+    target_candidate = req.target_file or req.active_file
+    if target_candidate:
+        cand_name = Path(target_candidate.replace("\\", "/")).name
+        if cand_name not in target_files and target_candidate not in target_files:
+            target_files.insert(0, cand_name)
+        if req.active_file_content:
+            live_file_buffers[cand_name] = req.active_file_content
+            live_file_buffers[target_candidate] = req.active_file_content
     ambiguity = AmbiguityDetector.check_ambiguity(req.goal, target_files)
     change_specs = SymbolEntityResolver.extract_change_specs(req.goal)
 
@@ -1241,6 +1258,7 @@ class StepExecuteRequest(BaseModel):
     workspace_path: Optional[str] = None
     cursor_line: Optional[int] = None
     active_file: Optional[str] = None
+    active_file_content: Optional[str] = None
     target_file: Optional[str] = None
 
 @app.post("/api/agent/step")
@@ -1267,31 +1285,48 @@ async def execute_agent_step(req: StepExecuteRequest):
         or req.step_action == "delete"
     )
 
-    # Resolve primary target filename and path
+    # Resolve primary target filename and path (prioritizing target_file, active_file, goal extraction)
     target_filename = None
     target_path_obj = None
 
-    if req.target_file:
-        tf_clean = req.target_file.strip().replace("\\", "/")
-        if tf_clean in accessible:
+    target_candidate = req.target_file or req.active_file
+    if target_candidate:
+        cand_path = Path(target_candidate)
+        tf_clean = target_candidate.strip().replace("\\", "/")
+        tf_name = Path(tf_clean).name
+        # 1. Check if candidate is an absolute or direct path that exists on disk
+        if cand_path.is_file() and cand_path.exists():
+            target_path_obj = cand_path
+            target_filename = cand_path.name
+        elif tf_clean in accessible:
             target_path_obj = accessible[tf_clean]
-            target_filename = tf_clean
+            target_filename = tf_name
+        elif tf_name in accessible:
+            target_path_obj = accessible[tf_name]
+            target_filename = tf_name
         elif (Path(workspace_dir) / tf_clean).exists():
             target_path_obj = Path(workspace_dir) / tf_clean
-            target_filename = tf_clean
+            target_filename = tf_name
+        elif (Path(workspace_dir) / tf_name).exists():
+            target_path_obj = Path(workspace_dir) / tf_name
+            target_filename = tf_name
         else:
-            target_path_obj = Path(workspace_dir) / tf_clean
-            target_filename = tf_clean
+            target_path_obj = Path(workspace_dir) / tf_name
+            target_filename = tf_name
 
     if not target_path_obj:
         if target_files:
             tf_first = target_files[0].replace("\\", "/")
+            tf_first_name = Path(tf_first).name
             if tf_first in accessible:
                 target_path_obj = accessible[tf_first]
-                target_filename = tf_first
+                target_filename = tf_first_name
+            elif tf_first_name in accessible:
+                target_path_obj = accessible[tf_first_name]
+                target_filename = tf_first_name
             else:
-                target_path_obj = Path(workspace_dir) / tf_first
-                target_filename = tf_first
+                target_path_obj = Path(workspace_dir) / tf_first_name
+                target_filename = tf_first_name
         else:
             direct_files = WorkspaceFileResolver.resolve_query_files(req.goal, workspace_dir)
             if direct_files:
@@ -1309,14 +1344,14 @@ async def execute_agent_step(req: StepExecuteRequest):
     if not target_filename:
         extracted_from_goal = SymbolEntityResolver.extract_target_filepaths(req.goal)
         if extracted_from_goal:
-            target_filename = extracted_from_goal[0]
+            target_filename = Path(extracted_from_goal[0]).name
             target_path_obj = Path(workspace_dir) / target_filename
         else:
             words = req.goal.split()
             for w in words:
                 clean_w = w.strip(".,;:?!'\"()[]{}<>`")
                 if "." in clean_w and not clean_w.startswith("."):
-                    target_filename = clean_w
+                    target_filename = Path(clean_w).name
                     break
             if not target_filename:
                 target_filename = "test_c.py" if (Path(workspace_dir) / "test_c.py").exists() else "main.py"
@@ -1382,17 +1417,18 @@ async def execute_agent_step(req: StepExecuteRequest):
         for tf in target_files:
             all_found.append(Path(tf).name)
         files_found = list(dict.fromkeys(all_found))
+        display_files = target_files if target_files else files_found
 
         topic_info = TopicDomainResolver.resolve_topic(req.goal)
         is_ambiguous = bool(ambiguity and ambiguity.get("detected") and len(ambiguity.get("candidates", [])) > 1)
         if intent_label in ('CREATE_NEW', 'CREATE_FOLDER') and target_files:
             msg = f"Intent: {intent_label}. Target to create: {', '.join(target_files)}"
-        elif intent_label == "ALGORITHM_SYNTHESIS" or any(kw in req.goal.lower() for kw in ("astar", "a*", "algo", "algorithm", "dsa", "pathfinding", "sophisticated")):
+        elif intent_label == "ALGORITHM_SYNTHESIS":
             msg = f"Intent: ALGORITHM_SYNTHESIS. Analyzed problem domain & heuristic models for '{topic_info.get('topic', 'Algorithm')}' in '{target_filename}'."
         elif total_steps == 5:
-            msg = f"Intent: MULTI_FILE_REFACTOR. Indexed AST symbols across: {', '.join(files_found) if files_found else target_filename}"
+            msg = f"Intent: MULTI_FILE_REFACTOR. Indexed AST symbols across: {', '.join(display_files) if display_files else target_filename}"
         else:
-            msg = f"Intent: {intent_label}. Correlated files: {', '.join(files_found) if files_found else 'root workspace'}"
+            msg = f"Intent: {intent_label}. Correlated files: {', '.join(display_files) if display_files else 'root workspace'}"
         if is_ambiguous:
             msg += f" (Ambiguity detected: {', '.join(ambiguity['candidates'])})"
         return {
@@ -1500,39 +1536,64 @@ async def execute_agent_step(req: StepExecuteRequest):
 
         orig_lines = []
         raw_file_content = ""
-        file_content_context = ""
-        target_symbols = []
         preferred_line = req.cursor_line
 
-        if not is_new_file:
+        # 1. Prioritize active_file_content directly from the editor buffer if provided
+        if req.active_file_content is not None and req.active_file_content.strip():
+            raw_file_content = req.active_file_content
+            if target_filename:
+                live_file_buffers[target_filename] = raw_file_content
+            if target_path_obj:
+                live_file_buffers[str(target_path_obj)] = raw_file_content
+        elif target_path_obj and target_path_obj.exists() and target_path_obj.is_file():
             try:
                 raw_file_content = target_path_obj.read_text(encoding="utf-8", errors="ignore")
-                orig_lines = raw_file_content.splitlines()
-                target_symbols = SymbolEntityResolver.resolve_target_symbols(req.goal, raw_file_content)
-                if preferred_line is None:
-                    sym_positions = SymbolEntityResolver.resolve_target_symbols_with_positions(req.goal, raw_file_content)
-                    if sym_positions:
-                        preferred_line = sym_positions[0]["lineno"]
-
-                file_content_context, _ = ContextWindowBuilder.build_ast_skeleton_context(
-                    raw_file_content,
-                    target_filename,
-                    target_symbols=target_symbols,
-                    preferred_line=preferred_line
-                )
             except Exception:
-                orig_lines = []
+                raw_file_content = ""
+
+        # Check live in-memory buffer if disk is empty or unread
+        if not raw_file_content.strip():
+            if target_filename in live_file_buffers and live_file_buffers[target_filename].strip():
+                raw_file_content = live_file_buffers[target_filename]
+            elif target_path_obj and str(target_path_obj) in live_file_buffers and live_file_buffers[str(target_path_obj)].strip():
+                raw_file_content = live_file_buffers[str(target_path_obj)]
+            elif req.active_file and req.active_file in live_file_buffers and live_file_buffers[req.active_file].strip():
+                raw_file_content = live_file_buffers[req.active_file]
+
+        orig_lines = raw_file_content.splitlines() if raw_file_content else []
+        is_new_file = not (target_path_obj and target_path_obj.exists() and target_path_obj.is_file()) and not raw_file_content.strip()
+
+        target_symbols = []
+        if not is_new_file and orig_lines:
+            target_symbols = SymbolEntityResolver.resolve_target_symbols(req.goal, raw_file_content)
+            if preferred_line is None:
+                sym_positions = SymbolEntityResolver.resolve_target_symbols_with_positions(req.goal, raw_file_content)
+                if sym_positions:
+                    preferred_line = sym_positions[0]["lineno"]
+
+        # Build file context with 1-indexed line numbers (identical format as Chat tab)
+        if orig_lines:
+            numbered_lines = [f"{i+1:3d}: {line}" for i, line in enumerate(orig_lines)]
+            target_file_context = (
+                f"[Active Target File: {target_filename} ({len(orig_lines)} lines total, with EXACT 1-Indexed Line Numbers)]\n"
+                f"[IMPORTANT: Use the exact line numbers shown before the colons. Do NOT make up line numbers.]\n"
+                + "\n".join(numbered_lines)[:25000]
+            )
         else:
-            orig_lines = []
-            file_content_context = (
-                f"\n--- Target File to Create: '{target_filename}' (Brand New File) ---\n"
-                f"[Status: This file does not exist yet. Write the complete, production-ready implementation from scratch for '{target_filename}'.]\n"
+            target_file_context = (
+                f"[Target File to Create: '{target_filename}' (Brand New File)]\n"
+                f"[Status: This file does not exist yet on disk. Write the complete code implementation from scratch for '{target_filename}'.]"
             )
 
         direct_files = WorkspaceFileResolver.resolve_query_files(req.goal, workspace_dir)
-        retrieved = await hybrid_engine.search(req.goal, top_k=3, workspace_root=workspace_dir)
+        retrieved = await hybrid_engine.search(req.goal, top_k=2, workspace_root=workspace_dir)
         combined = direct_files + [c for c in retrieved if c.file_path not in {d.file_path for d in direct_files}]
-        context = HybridSearchEngine.build_context_prompt(combined[:3], workspace_root=workspace_dir)
+
+        agent_code_context = target_file_context
+        if combined:
+            rag_context = HybridSearchEngine.build_context_prompt(combined[:2], workspace_root=workspace_dir)
+            if rag_context:
+                agent_code_context += f"\n\n[Related Workspace Context]:\n{rag_context}"
 
         specs_info = ""
         if change_specs:
@@ -1546,75 +1607,45 @@ async def execute_agent_step(req: StepExecuteRequest):
         is_algorithm_or_complex = (
             intent_label == "ALGORITHM_SYNTHESIS"
             or any(kw in req.goal.lower() for kw in (
-                "large", "sophisticated", "sophesticated", "algo", "algorithm", "astar", "a*",
-                "dsa", "complete", "full", "from scratch", "implement", "write", "code for",
-                "engine", "solver", "system", "advanced", "complex", "pathfinding"
+                "astar", "a*", "a-star", "dijkstra", "pathfinding", "binary search",
+                "quicksort", "mergesort", "dynamic programming", "graph traversal",
+                "red-black tree", "avl tree"
             ))
         )
-        is_comprehensive = (
-            is_new_file
-            or (orig_lines and len([l for l in orig_lines if l.strip()]) <= 8)
-            or is_algorithm_or_complex
-        )
+        is_explicit_full_rewrite = any(kw in req.goal.lower() for kw in (
+            "from scratch", "full rewrite", "rewrite the whole file", "rewrite entire file",
+            "overwrite file", "replace entire file"
+        ))
+        is_comprehensive = is_new_file or is_explicit_full_rewrite
+
+        target_ext = Path(target_filename).suffix.lstrip(".")
+        lang_hint = target_ext if target_ext else "python"
 
         if is_comprehensive:
             prompt = (
                 f"Goal: {req.goal}\n"
                 f"Target File: {target_filename}\n"
-                f"Topic: {topic_info.get('topic', 'Production Algorithm')}\n"
-                f"{specs_info}"
-                f"{file_content_context}\n"
-                f"You are synthesizing a complete, sophisticated, production-grade {topic_info.get('topic', 'implementation')} in '{target_filename}' to fulfill: {req.goal}\n\n"
-                "STRICT ENGINEERING & SYNTHESIS STANDARDS:\n"
+                f"Write the complete code implementation for '{target_filename}' to fulfill: {req.goal}\n\n"
+                "GUIDELINES:\n"
+                "- Write the exact, complete, working implementation requested by the user.\n"
+                "- Directly answer the user prompt without adding unsolicited architecture or unnecessary boilerplate.\n"
                 "- ZERO EMOJIS: Do not use emojis anywhere in your output.\n"
-                f"- FULL PRODUCTION IMPLEMENTATION: Write the complete, production-ready, fully working implementation for '{target_filename}' from start to finish.\n"
-                "- ARCHITECTURAL SOPHISTICATION: Include all necessary imports, type annotations, dataclasses / models, heuristic / mathematical functions, core traversal / solver logic, edge case handling, and a runnable '__main__' demonstration.\n"
-                "- STRICTLY FORBIDDEN: NEVER output a trivial 'Hello World' stub, empty main function, or placeholder comments like '// ... rest of code unchanged ...'. The user specifically requested a sophisticated, full implementation.\n"
-                f"- Output your code inside a ```python code block (or appropriate language block) or as a unified diff with header '+++ b/{target_filename}'.\n"
-                "Output the code block directly without preamble."
+                f"- Output your code inside a ```{lang_hint} code block directly."
             )
         else:
             prompt = (
                 f"Goal: {req.goal}\n"
                 f"Target File: {target_filename}\n"
                 f"{specs_info}"
-                f"{file_content_context}\n"
-                f"You are implementing the surgical code solution for '{target_filename}' to achieve: {req.goal}\n"
-                "STRICT OPERATIONAL & SURGICAL CODING RULES:\n"
+                f"Implement the minimal, surgical change in '{target_filename}' to achieve: {req.goal}\n\n"
+                "RULES:\n"
                 "- ZERO EMOJIS: Do not use emojis anywhere in your output.\n"
-                f"- MINIMAL SURGICAL SCOPE: If '{target_filename}' exists, make ONLY the minimal changes required to achieve the goal. Do NOT rewrite unchanged logic or delete the file.\n"
-                "- EXACT LINE NUMBERS: Use the exact literal 1-indexed line numbers shown before the colons in the context above. NEVER guess or hallucinate line numbers.\n"
-                "- CONTEXT ANCHORING: Include 2 to 3 lines of unchanged context above and below the change to ensure unambiguous anchor matching.\n"
-                "- EXACT INDENTATION: Preserve the target file's exact leading indentation (spaces/tabs) to prevent syntax or indentation errors.\n"
-                "- NO LAZY TRUNCATIONS: Never write placeholder comments like '// ... rest of code unchanged ...' or '# ... existing code ...'.\n"
-                "- Output your solution in ONE of these formats:\n"
-                "  Format A (SEARCH/REPLACE block - recommended for 1-5 line edits):\n"
-                "  <<<<<<< SEARCH\n"
-                "  <exact existing lines to replace>\n"
-                "  =======\n"
-                "  <new replacement lines>\n"
-                "  >>>>>>> REPLACE\n\n"
-                "  Format B (Standard Unified Diff with EXACT line numbers from context above):\n"
-                "  ```diff\n"
-                "  @@ -line,count +line,count @@\n"
-                "  -old line\n"
-                "  +new line\n"
-                "  ```\n\n"
-                "  Format C (Updated function or variable assignment in code block):\n"
-                "  ```python\n"
-                "  <the updated function or statement>\n"
-                "  ```\n\n"
-                f"If '{target_filename}' is empty or new, write the full, working implementation from scratch.\n"
-                "Do NOT refuse. Do NOT output conversational fluff. Output the code block directly."
+                f"- MINIMAL SURGICAL SCOPE: Make ONLY the minimal changes required in '{target_filename}'. Do NOT rewrite unchanged logic.\n"
+                "- EXACT LINE NUMBERS: Use the exact line numbers from the context above.\n"
+                f"- Output your solution as a standard unified diff (```diff) or updated code block (```{lang_hint})."
             )
 
-        generated = await ollama_provider.generate_text(prompt, code_context=context)
-
-        # Fallback to industrial-grade reference implementation if model generated a trivial placeholder
-        if is_comprehensive and AlgorithmCodeLibrary.is_stub_or_trivial(generated):
-            ref_impl = AlgorithmCodeLibrary.get_reference_implementation(req.goal, target_filename)
-            if ref_impl:
-                generated = ref_impl
+        generated = await ollama_provider.generate_text(prompt, code_context=agent_code_context)
 
         # Build surgical minimal diff using multi-strategy builder (eliminates full-file wipes and line desync)
         diff_text = PatchEngine.build_surgical_diff(orig_lines, generated, target_filename, preferred_line=preferred_line)
@@ -1632,7 +1663,7 @@ async def execute_agent_step(req: StepExecuteRequest):
                     f"Please provide the corrected, syntactically valid code or SEARCH/REPLACE block for '{target_filename}'.\n"
                     "Output ONLY the corrected code or diff inside a code block."
                 )
-                repair_gen = await ollama_provider.generate_text(repair_prompt, code_context=context)
+                repair_gen = await ollama_provider.generate_text(repair_prompt, code_context=agent_code_context)
                 repaired_diff = PatchEngine.build_surgical_diff(orig_lines, repair_gen, target_filename)
                 rep_valid, rep_diff, _ = PatchEngine.validate_and_heal_diff(orig_lines, repaired_diff, target_filename)
                 if rep_valid:
@@ -1650,12 +1681,12 @@ async def execute_agent_step(req: StepExecuteRequest):
         hunks = PatchEngine.split_into_hunks(final_diff)
         staged_files = PatchEngine.split_multi_file_diff(final_diff)
 
-        if is_algorithm_or_complex:
+        if is_new_file:
+            log_msg = f"Generated complete implementation for new file '{target_filename}'."
+        elif is_algorithm_or_complex:
             log_msg = f"Synthesized production-ready implementation of {topic_info.get('topic', 'algorithm')} for '{target_filename}'."
-        elif is_new_file:
-            log_msg = f"Generated complete implementation for new file {target_filename}."
         else:
-            log_msg = f"Synthesized surgical solution for {target_filename}." if final_diff else f"Generated response for {target_filename}."
+            log_msg = f"Synthesized surgical solution for '{target_filename}'." if final_diff else f"Generated response for '{target_filename}'."
 
         return {
             "step_id": req.step_id,

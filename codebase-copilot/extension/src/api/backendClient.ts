@@ -394,7 +394,7 @@ export class BackendClient {
         return { os: process.platform === 'win32' ? 'windows' : 'linux', is_windows: process.platform === 'win32', shell: 'bash' };
     }
 
-    async executeAgentStep(stepId: number, goal: string, workspacePath?: string, activeFile?: string, cursorLine?: number, targetFile?: string, stepAction?: string, totalSteps?: number): Promise<any> {
+    async executeAgentStep(stepId: number, goal: string, workspacePath?: string, activeFile?: string, cursorLine?: number, targetFile?: string, stepAction?: string, totalSteps?: number, activeFileContent?: string): Promise<any> {
         try {
             const res = await fetch(`${this.backendUrl}/api/agent/step`, {
                 method: 'POST',
@@ -404,6 +404,7 @@ export class BackendClient {
                     goal,
                     workspace_path: workspacePath,
                     active_file: activeFile,
+                    active_file_content: activeFileContent,
                     cursor_line: cursorLine,
                     target_file: targetFile,
                     step_action: stepAction,

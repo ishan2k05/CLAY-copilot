@@ -2484,61 +2484,87 @@ body.claude-dark .chat-jump-down-btn:hover {
 
 .sticky-review-bar {
   position: sticky;
-  bottom: 0;
-  background: var(--surface-card);
-  border-top: 1px solid var(--border-subtle);
-  padding: 8px 10px;
+  bottom: 6px;
+  background: transparent;
+  border-top: none;
+  padding: 8px 10px 4px 10px;
   display: flex;
   gap: 8px;
   box-sizing: border-box;
-  z-index: 10;
+  z-index: 20;
+  pointer-events: none;
 }
 
 .btn-reject {
   flex: 1;
   min-width: 0;
-  padding: 8px 6px;
+  padding: 8px 10px;
   background: var(--surface-card);
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  font-size: 11px;
-  font-weight: 600;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 4px;
+  font-family: var(--font-pixel);
+  font-size: 8.5px;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  font-weight: 700;
   cursor: pointer;
   color: var(--text-primary);
-  transition: all 0.15s ease;
+  box-shadow: 0 2px 0 var(--border-strong), 0 4px 12px rgba(0, 0, 0, 0.3);
+  transition: all 0.12s ease;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   text-align: center;
   box-sizing: border-box;
+  pointer-events: auto;
 }
 
 .btn-reject:hover {
-  border-color: #B91C1C;
-  color: #B91C1C;
+  border-color: #EF4444;
+  color: #EF4444;
+  box-shadow: 0 3px 0 #991B1B, 0 6px 14px rgba(239, 68, 68, 0.25);
+  transform: translateY(-1px);
+}
+
+.btn-reject:active {
+  box-shadow: 0 1px 0 #991B1B;
+  transform: translateY(1px);
 }
 
 .btn-accept {
   flex: 1.2;
   min-width: 0;
-  padding: 8px 6px;
+  padding: 8px 10px;
   background: var(--primary-terracotta);
-  border: none;
-  border-radius: 8px;
-  font-size: 11px;
-  font-weight: 600;
+  border: 1.5px solid #8E3A22;
+  border-radius: 4px;
+  font-family: var(--font-pixel);
+  font-size: 8.5px;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  font-weight: 700;
   color: white;
   cursor: pointer;
-  transition: all 0.15s ease;
+  box-shadow: 0 2px 0 #8E3A22, 0 4px 12px rgba(204, 107, 73, 0.35);
+  transition: all 0.12s ease;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   text-align: center;
   box-sizing: border-box;
+  pointer-events: auto;
 }
 
 .btn-accept:hover {
-  background: var(--primary-hover);
+  background: #D86846;
+  border-color: #7C311C;
+  box-shadow: 0 3px 0 #7C311C, 0 6px 16px rgba(217, 119, 87, 0.45);
+  transform: translateY(-1px);
+}
+
+.btn-accept:active {
+  box-shadow: 0 1px 0 #7C311C;
+  transform: translateY(1px);
 }
 
 /* --------------------------------------------------
@@ -3696,8 +3722,33 @@ body.claude-dark .copilot-note-card {
 }
 
 body.claude-dark .sticky-review-bar {
+  background: transparent;
+  border-top: none;
+}
+
+body.claude-dark .btn-reject {
   background: #25231F;
-  border-top-color: #38342D;
+  border-color: #3C3831;
+  color: #ECE6DC;
+  box-shadow: 0 2px 0 #3C3831, 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+body.claude-dark .btn-reject:hover {
+  border-color: #EF4444;
+  color: #EF4444;
+  box-shadow: 0 3px 0 #991B1B, 0 6px 14px rgba(239, 68, 68, 0.3);
+}
+
+body.claude-dark .btn-accept {
+  background: #D97757;
+  border-color: #8E3A22;
+  box-shadow: 0 2px 0 #8E3A22, 0 4px 12px rgba(217, 119, 87, 0.35);
+}
+
+body.claude-dark .btn-accept:hover {
+  background: #E48667;
+  border-color: #7C311C;
+  box-shadow: 0 3px 0 #7C311C, 0 6px 16px rgba(217, 119, 87, 0.5);
 }
 
 body.claude-dark .settings-card {
@@ -4347,6 +4398,16 @@ body.vscode-native .nav-tab-bar {
 
 body.vscode-native .nav-tab {
   color: var(--vscode-sideBarTitle-foreground, #8c8c8c);
+  outline: none;
+}
+
+body.vscode-native .nav-tab:focus {
+  outline: none;
+}
+
+body.vscode-native .nav-tab:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #007acc);
+  outline-offset: -2px;
 }
 
 body.vscode-native .nav-tab:hover {
@@ -4358,24 +4419,124 @@ body.vscode-native .nav-tab.active-tab {
   border-top-color: var(--vscode-panelTitle-activeBorder, var(--vscode-button-background, #3794ff));
 }
 
+/* Assistant Chat Bubble: seamless borderless flow without artificial box lines */
 body.vscode-native .assistant-card {
-  background: var(--vscode-editor-background, #1e1e1e);
-  border: 1px solid var(--vscode-widget-border, #333333);
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 6px 2px 12px 2px;
 }
 
 body.vscode-native .assistant-header {
-  border-bottom: 1px solid var(--vscode-widget-border, #333333);
+  border: none !important;
+  border-bottom: none !important;
+  margin-bottom: 6px;
+  padding-bottom: 0;
+}
+
+body.vscode-native .pixel-prompt-glyph,
+body.vscode-native .pixel-prompt-badge,
+body.vscode-native .model-badge {
+  color: var(--vscode-panelTitle-activeForeground, var(--vscode-button-background, #3794ff)) !important;
 }
 
 body.vscode-native .user-bubble {
   background: var(--vscode-editorWidget-background, #252526);
-  border-color: var(--vscode-widget-border, #3c3c3c);
+  border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.25));
   color: var(--vscode-editor-foreground, #ffffff);
+  box-shadow: 0 1px 3px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.12));
+}
+
+body.vscode-native .user-bubble .bubble-footer,
+body.vscode-native .assistant-card .bubble-footer {
+  color: var(--vscode-descriptionForeground, #888888);
+}
+
+body.vscode-native .bubble-copy-btn {
+  color: var(--vscode-descriptionForeground, #888888);
+}
+
+body.vscode-native .bubble-copy-btn:hover {
+  color: var(--vscode-button-background, #3794ff);
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.12));
+  border-color: var(--vscode-widget-border, rgba(128, 128, 128, 0.3));
+}
+
+body.vscode-native .chat-jump-down-btn {
+  background: var(--vscode-editorWidget-background, #252526);
+  border-color: var(--vscode-widget-border, #3c3c3c);
+  color: var(--vscode-editor-foreground, #cccccc);
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.2));
+}
+
+body.vscode-native .chat-jump-down-btn:hover {
+  border-color: var(--vscode-focusBorder, #007acc);
+  color: var(--vscode-button-background, #3794ff);
+}
+
+/* Chat Markdown Elements, Headings & Tables */
+body.vscode-native .clay-table-wrapper {
+  background: var(--vscode-editor-background, #1e1e1e);
+  border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.25));
+  border-radius: 6px;
+}
+
+body.vscode-native .clay-table th {
+  background: var(--vscode-sideBarSectionHeader-background, var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.15))) !important;
+  color: var(--vscode-editor-foreground, #cccccc) !important;
+  border-bottom: 2px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.25)) !important;
+}
+
+body.vscode-native .clay-table td {
+  border-bottom: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.15)) !important;
+  color: var(--vscode-editor-foreground, #cccccc) !important;
+}
+
+body.vscode-native .clay-table tbody tr:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.08)) !important;
+}
+
+body.vscode-native .assistant-content code,
+body.vscode-native code {
+  background: var(--vscode-textCodeBlock-background, var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.12)));
+  color: var(--vscode-textPreformat-foreground, var(--vscode-editor-foreground, #cccccc));
+  border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.2));
+}
+
+body.vscode-native .clay-chat-h,
+body.vscode-native .clay-chat-h1,
+body.vscode-native .clay-chat-h2,
+body.vscode-native .clay-chat-h3,
+body.vscode-native .clay-chat-h4 {
+  color: var(--vscode-editor-foreground, #cccccc) !important;
+}
+
+body.vscode-native .clay-chat-h2 {
+  color: var(--vscode-panelTitle-activeForeground, var(--vscode-button-background, #3794ff)) !important;
+}
+
+body.vscode-native .clay-chat-h1 {
+  border-bottom-color: var(--vscode-widget-border, rgba(128, 128, 128, 0.2));
+}
+
+body.vscode-native .clay-chat-quote {
+  border-left: 3px solid var(--vscode-button-background, #3794ff);
+  background: var(--vscode-textBlockQuote-background, rgba(128, 128, 128, 0.08));
+  color: var(--vscode-textBlockQuote-border, var(--vscode-descriptionForeground, #999999));
+}
+
+body.vscode-native .clay-chat-hr {
+  border-top: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.2));
+}
+
+body.vscode-native .clay-chat-li {
+  color: var(--vscode-editor-foreground, #cccccc);
 }
 
 body.vscode-native .settings-card,
 body.vscode-native .task-card,
 body.vscode-native .terminal-widget,
+body.vscode-native .user-console-widget,
 body.vscode-native .repo-tree-card {
   background: var(--vscode-sideBar-background, var(--vscode-editorWidget-background, #252526));
   border-color: var(--vscode-widget-border, #333333);
@@ -4409,24 +4570,264 @@ body.vscode-native .settings-select:focus {
   border-color: var(--vscode-focusBorder, #007acc);
 }
 
+/* Primary Action & Scan Buttons (Zero terracotta shadow leakage) */
+body.vscode-native #view-repo #btn-scan-repo,
+body.vscode-native #btn-scan-repo,
 body.vscode-native .btn-primary-action,
-body.vscode-native .send-btn {
+body.vscode-native .send-btn,
+body.vscode-native .btn-run-task,
+body.vscode-native .terminal-cli-exec-btn,
+body.vscode-native #btn-test-ollama,
+body.vscode-native #btn-save-all-settings {
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #ffffff);
+  border: 1px solid var(--vscode-button-border, transparent);
+  box-shadow: none !important;
+  text-shadow: none;
+}
+
+body.vscode-native #view-repo #btn-scan-repo:hover,
+body.vscode-native #btn-scan-repo:hover,
+body.vscode-native .btn-primary-action:hover,
+body.vscode-native .send-btn:hover,
+body.vscode-native .btn-run-task:hover,
+body.vscode-native .terminal-cli-exec-btn:hover,
+body.vscode-native #btn-test-ollama:hover,
+body.vscode-native #btn-save-all-settings:hover {
+  background: var(--vscode-button-hoverBackground, #1177bb);
+  color: var(--vscode-button-foreground, #ffffff);
+  border-color: var(--vscode-button-border, transparent);
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+body.vscode-native #view-repo #btn-scan-repo:active,
+body.vscode-native #btn-scan-repo:active,
+body.vscode-native .btn-primary-action:active,
+body.vscode-native .send-btn:active,
+body.vscode-native .btn-run-task:active,
+body.vscode-native .terminal-cli-exec-btn:active {
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+body.vscode-native .send-btn.is-stop,
+body.vscode-native .send-btn.is-generating,
+body.vscode-native .btn-stop-action,
+body.vscode-native .btn-stop-task {
+  background: var(--vscode-statusBarItem-errorBackground, #c72e2e) !important;
+  color: #ffffff !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+
+body.vscode-native .send-btn.is-stop:hover,
+body.vscode-native .send-btn.is-generating:hover,
+body.vscode-native .btn-stop-action:hover,
+body.vscode-native .btn-stop-task:hover {
+  background: #e53935 !important;
+  box-shadow: none !important;
+}
+
+/* Secondary & Pixel Utility Buttons */
+body.vscode-native .btn-secondary-action,
+body.vscode-native .pixel-btn,
+body.vscode-native .pixel-mini-btn,
+body.vscode-native .cli-chip,
+body.vscode-native .pill-clear-chat,
+body.vscode-native .pill-theme-switch,
+body.vscode-native .btn-diff-action {
+  background: var(--vscode-button-secondaryBackground, #3a3d41);
+  color: var(--vscode-button-secondaryForeground, #ffffff);
+  border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.25));
+  box-shadow: none !important;
+}
+
+body.vscode-native .btn-secondary-action:hover,
+body.vscode-native .pixel-btn:hover,
+body.vscode-native .pixel-mini-btn:hover,
+body.vscode-native .cli-chip:hover,
+body.vscode-native .pill-clear-chat:hover,
+body.vscode-native .pill-theme-switch:hover,
+body.vscode-native .btn-diff-action:hover {
+  background: var(--vscode-button-secondaryHoverBackground, #45494e);
+  color: var(--vscode-button-secondaryForeground, #ffffff);
+  border-color: var(--vscode-focusBorder, #007acc);
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+body.vscode-native .pixel-btn:active,
+body.vscode-native .pixel-mini-btn:active {
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+/* Diff Reviewer Floating Action Bar & Pixel Buttons */
+body.vscode-native .sticky-review-bar {
+  background: transparent !important;
+  border-top: none !important;
+  box-shadow: none !important;
+}
+
+body.vscode-native .btn-reject {
+  font-family: var(--font-pixel) !important;
+  font-size: 8.5px !important;
+  letter-spacing: 0.7px !important;
+  text-transform: uppercase !important;
+  border-radius: 4px !important;
+  background: var(--vscode-button-secondaryBackground, #3a3d41) !important;
+  color: var(--vscode-button-secondaryForeground, #ffffff) !important;
+  border: 1px solid var(--vscode-widget-border, #3c3c3c) !important;
+  box-shadow: 0 3px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35)) !important;
+}
+
+body.vscode-native .btn-reject:hover {
+  background: var(--vscode-button-secondaryHoverBackground, #45494e) !important;
+  border-color: var(--vscode-focusBorder, #007acc) !important;
+  color: var(--vscode-button-secondaryForeground, #ffffff) !important;
+  box-shadow: 0 4px 10px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.45)) !important;
+  transform: translateY(-1px) !important;
+}
+
+body.vscode-native .btn-accept {
+  font-family: var(--font-pixel) !important;
+  font-size: 8.5px !important;
+  letter-spacing: 0.7px !important;
+  text-transform: uppercase !important;
+  border-radius: 4px !important;
+  background: var(--vscode-button-background, #0e639c) !important;
+  color: var(--vscode-button-foreground, #ffffff) !important;
+  border: 1px solid var(--vscode-button-border, transparent) !important;
+  box-shadow: 0 3px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35)) !important;
+}
+
+body.vscode-native .btn-accept:hover {
+  background: var(--vscode-button-hoverBackground, #1177bb) !important;
+  border-color: var(--vscode-button-border, transparent) !important;
+  box-shadow: 0 4px 10px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.45)) !important;
+  transform: translateY(-1px) !important;
+}
+
+/* Terminal & Agent Execution Plan */
+body.vscode-native .terminal-cli-bar {
+  background: var(--vscode-editorWidget-background, #252526);
+  border-top: 1px solid var(--vscode-widget-border, #333333);
+}
+
+body.vscode-native .terminal-cli-input {
+  color: var(--vscode-input-foreground, #cccccc);
+}
+
+body.vscode-native .terminal-cli-input::placeholder {
+  color: var(--vscode-input-placeholderForeground, #888888);
+}
+
+body.vscode-native .terminal-mode-indicator {
+  color: var(--vscode-badge-foreground, var(--vscode-button-background, #3794ff));
+  background: var(--vscode-badge-background, rgba(0, 122, 204, 0.15));
+  border: 1px solid var(--vscode-widget-border, rgba(0, 122, 204, 0.3));
+}
+
+body.vscode-native .terminal-quick-chips {
+  background: var(--vscode-sideBar-background, var(--vscode-editorWidget-background, #252526));
+  border-top: 1px solid var(--vscode-widget-border, #333333);
+}
+
+body.vscode-native .user-console-cli-bar {
+  background: var(--vscode-input-background, #1e1e1e);
+  border: 1px solid var(--vscode-input-border, #3c3c3c);
+  box-shadow: none;
+}
+
+body.vscode-native .user-console-cli-bar:focus-within {
+  border-color: var(--vscode-focusBorder, #007acc);
+  box-shadow: 0 0 0 1px var(--vscode-focusBorder, #007acc);
+}
+
+body.vscode-native .user-console-prompt {
+  color: var(--vscode-button-background, #3794ff);
+}
+
+body.vscode-native .user-task-input {
+  color: var(--vscode-input-foreground, #cccccc);
+}
+
+body.vscode-native .user-task-input::placeholder {
+  color: var(--vscode-input-placeholderForeground, #888888);
+}
+
+body.vscode-native .terminal-progress-section {
+  border-top: 1px dashed var(--vscode-widget-border, #333333);
+}
+
+body.vscode-native .terminal-progress-bar-track {
+  background: var(--vscode-progressBar-background, rgba(128, 128, 128, 0.2));
+}
+
+body.vscode-native .terminal-progress-bar {
+  background: var(--vscode-button-background, #0e639c);
+}
+
+body.vscode-native .terminal-progress-text {
+  color: var(--vscode-descriptionForeground, #888888);
+}
+
+body.vscode-native .terminal-plan-header {
+  color: var(--vscode-descriptionForeground, #999999);
+}
+
+body.vscode-native .user-console-widget .step-item {
+  background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
+  border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-editor-foreground, #cccccc);
+}
+
+body.vscode-native .user-console-widget .step-item strong {
+  color: var(--vscode-editor-foreground, #ffffff);
+}
+
+body.vscode-native .user-console-widget .step-queued {
+  background: var(--vscode-list-inactiveSelectionBackground, rgba(128, 128, 128, 0.05));
+  border-color: var(--vscode-widget-border, rgba(128, 128, 128, 0.15));
+  opacity: 0.7;
+}
+
+body.vscode-native .user-console-widget .step-queued .step-bullet {
+  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.15));
+  color: var(--vscode-descriptionForeground, #888888);
+}
+
+body.vscode-native .user-console-widget .step-active {
+  border-color: var(--vscode-focusBorder, #007acc);
+  background: var(--vscode-list-activeSelectionBackground, rgba(0, 122, 204, 0.15));
+  color: var(--vscode-editor-foreground, #ffffff);
+  box-shadow: 0 0 0 1px var(--vscode-focusBorder, #007acc);
+}
+
+body.vscode-native .user-console-widget .step-active .step-bullet {
   background: var(--vscode-button-background, #0e639c);
   color: var(--vscode-button-foreground, #ffffff);
 }
 
-body.vscode-native .btn-primary-action:hover,
-body.vscode-native .send-btn:hover {
-  background: var(--vscode-button-hoverBackground, #1177bb);
+body.vscode-native .user-console-widget .step-done {
+  border-color: var(--vscode-testing-iconPassed, rgba(34, 197, 94, 0.35));
+  background: rgba(46, 160, 67, 0.08);
+  color: var(--vscode-editor-foreground, #cccccc);
 }
 
-body.vscode-native .btn-secondary-action {
-  background: var(--vscode-button-secondaryBackground, #3a3d41);
-  color: var(--vscode-button-secondaryForeground, #ffffff);
+body.vscode-native .user-console-widget .step-done strong {
+  color: var(--vscode-editor-foreground, #ffffff);
 }
 
-body.vscode-native .btn-secondary-action:hover {
-  background: var(--vscode-button-secondaryHoverBackground, #45494e);
+body.vscode-native .user-console-widget .step-done .step-bullet {
+  background: rgba(46, 160, 67, 0.2);
+  color: var(--vscode-testing-iconPassed, #4ade80);
+  border: 1px solid rgba(46, 160, 67, 0.35);
+}
+
+body.vscode-native .clay-cube-icon rect {
+  fill: var(--vscode-button-background, #0e639c);
 }
 
 body.vscode-native .code-block-wrapper {
@@ -4500,11 +4901,11 @@ body.vscode-native .empty-state-desc {
    ========================================================================== */
 .mermaid-diagram-card {
   margin: 10px 0;
-  border: 1px solid var(--border-subtle, rgba(204, 107, 73, 0.25));
+  border: 1px solid var(--border-subtle, #E2DAD0);
   border-radius: 8px;
-  background: var(--surface-primary, #1C1917);
+  background: var(--surface-card, #FAF6F0);
   overflow: hidden;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
 }
 
 .mermaid-diagram-header {
@@ -4512,8 +4913,8 @@ body.vscode-native .empty-state-desc {
   justify-content: space-between;
   align-items: center;
   padding: 6px 10px;
-  background: var(--surface-muted, #24201D);
-  border-bottom: 1px solid var(--border-subtle, rgba(204, 107, 73, 0.2));
+  background: var(--surface-muted, #EDE6D8);
+  border-bottom: 1px solid var(--border-subtle, #E2DAD0);
   user-select: none;
 }
 
@@ -4540,8 +4941,8 @@ body.vscode-native .empty-state-desc {
 
 .mermaid-view-pill {
   display: inline-flex;
-  background: var(--surface-subtle, #141210);
-  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+  background: var(--surface-subtle, #F5EFE6);
+  border: 1px solid var(--border-subtle, #E2DAD0);
   border-radius: 4px;
   padding: 1px;
 }
@@ -4549,7 +4950,7 @@ body.vscode-native .empty-state-desc {
 .btn-mermaid-view-toggle {
   background: transparent;
   border: none;
-  color: var(--text-muted, #888888);
+  color: var(--text-secondary, #746C63);
   font-family: var(--font-pixel), monospace;
   font-size: 7.5px;
   padding: 2px 6px;
@@ -4566,9 +4967,9 @@ body.vscode-native .empty-state-desc {
 }
 
 .btn-mermaid-action {
-  background: var(--surface-subtle, #141210);
-  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
-  color: var(--text-secondary, #BBBBBB);
+  background: var(--surface-subtle, #F5EFE6);
+  border: 1px solid var(--border-subtle, #E2DAD0);
+  color: var(--text-secondary, #746C63);
   font-family: var(--font-pixel), monospace;
   font-size: 7.5px;
   padding: 2px 6px;
@@ -4579,16 +4980,16 @@ body.vscode-native .empty-state-desc {
 }
 
 .btn-mermaid-action:hover {
-  background: var(--surface-hover, #2D2824);
-  color: var(--text-primary, #FFFFFF);
+  background: var(--surface-muted, #EDE6D8);
+  color: var(--text-primary, #2D2926);
   border-color: var(--primary-terracotta, #CC6B49);
 }
 
 .mermaid-zoom-pill {
   display: inline-flex;
   align-items: center;
-  background: var(--surface-subtle, #141210);
-  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+  background: var(--surface-subtle, #F5EFE6);
+  border: 1px solid var(--border-subtle, #E2DAD0);
   border-radius: 4px;
   padding: 1px;
   gap: 1px;
@@ -4597,7 +4998,7 @@ body.vscode-native .empty-state-desc {
 .btn-mermaid-zoom {
   background: transparent;
   border: none;
-  color: var(--text-secondary, #CCCCCC);
+  color: var(--text-secondary, #746C63);
   font-family: var(--font-pixel), monospace;
   font-size: 7.5px;
   padding: 2px 5px;
@@ -4610,7 +5011,7 @@ body.vscode-native .empty-state-desc {
 }
 
 .btn-mermaid-zoom:hover {
-  background: var(--surface-hover, #2D2824);
+  background: var(--surface-muted, #EDE6D8);
   color: var(--primary-terracotta, #CC6B49);
 }
 
@@ -4628,7 +5029,7 @@ body.vscode-native .empty-state-desc {
 
 .mermaid-diagram-viewport {
   position: relative;
-  background: #141210;
+  background: var(--surface-subtle, #F5EFE6);
   padding: 16px;
   overflow: auto;
   max-height: 520px;
@@ -4637,6 +5038,220 @@ body.vscode-native .empty-state-desc {
   user-select: none;
   -webkit-overflow-scrolling: touch;
   box-sizing: border-box;
+  scrollbar-width: none !important; /* Firefox / modern Chromium 121+ */
+  scrollbar-color: transparent transparent !important;
+  -ms-overflow-style: none !important; /* IE / Edge */
+}
+
+/* Hide both horizontal and vertical scrollbars while preserving full scroll/pan functionality */
+.mermaid-diagram-viewport,
+.mermaid-diagram-viewport *,
+.mermaid-viewport-inner,
+.mermaid-diagram-canvas,
+body.claude-dark .mermaid-diagram-viewport,
+body.claude-dark .mermaid-diagram-viewport *,
+body.claude-light .mermaid-diagram-viewport,
+body.claude-light .mermaid-diagram-viewport *,
+body.vscode-native .mermaid-diagram-viewport,
+body.vscode-native .mermaid-diagram-viewport *,
+body.vscode-light .mermaid-diagram-viewport,
+body.vscode-dark .mermaid-diagram-viewport {
+  scrollbar-width: none !important;
+  scrollbar-color: transparent transparent !important;
+  -ms-overflow-style: none !important;
+}
+
+.mermaid-diagram-viewport::-webkit-scrollbar,
+.mermaid-diagram-viewport *::-webkit-scrollbar,
+.mermaid-viewport-inner::-webkit-scrollbar,
+.mermaid-diagram-canvas::-webkit-scrollbar,
+body.claude-dark .mermaid-diagram-viewport::-webkit-scrollbar,
+body.claude-dark .mermaid-diagram-viewport *::-webkit-scrollbar,
+body.claude-light .mermaid-diagram-viewport::-webkit-scrollbar,
+body.claude-light .mermaid-diagram-viewport *::-webkit-scrollbar,
+body.vscode-native .mermaid-diagram-viewport::-webkit-scrollbar,
+body.vscode-native .mermaid-diagram-viewport *::-webkit-scrollbar,
+body.vscode-light .mermaid-diagram-viewport::-webkit-scrollbar,
+body.vscode-dark .mermaid-diagram-viewport::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  background: transparent !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+.mermaid-diagram-viewport::-webkit-scrollbar-track,
+.mermaid-diagram-viewport *::-webkit-scrollbar-track,
+.mermaid-diagram-viewport::-webkit-scrollbar-thumb,
+.mermaid-diagram-viewport *::-webkit-scrollbar-thumb,
+.mermaid-diagram-viewport::-webkit-scrollbar-button,
+.mermaid-diagram-viewport *::-webkit-scrollbar-button,
+.mermaid-diagram-viewport::-webkit-scrollbar-corner,
+.mermaid-diagram-viewport *::-webkit-scrollbar-corner,
+body.claude-dark .mermaid-diagram-viewport::-webkit-scrollbar-track,
+body.claude-dark .mermaid-diagram-viewport::-webkit-scrollbar-thumb,
+body.claude-dark .mermaid-diagram-viewport::-webkit-scrollbar-button,
+body.claude-dark .mermaid-diagram-viewport::-webkit-scrollbar-corner,
+body.claude-dark .mermaid-diagram-viewport *::-webkit-scrollbar-track,
+body.claude-dark .mermaid-diagram-viewport *::-webkit-scrollbar-thumb,
+body.claude-dark .mermaid-diagram-viewport *::-webkit-scrollbar-button,
+body.claude-dark .mermaid-diagram-viewport *::-webkit-scrollbar-corner,
+body.claude-light .mermaid-diagram-viewport::-webkit-scrollbar-track,
+body.claude-light .mermaid-diagram-viewport::-webkit-scrollbar-thumb,
+body.claude-light .mermaid-diagram-viewport::-webkit-scrollbar-button,
+body.claude-light .mermaid-diagram-viewport::-webkit-scrollbar-corner,
+body.vscode-native .mermaid-diagram-viewport::-webkit-scrollbar-track,
+body.vscode-native .mermaid-diagram-viewport::-webkit-scrollbar-thumb,
+body.vscode-native .mermaid-diagram-viewport::-webkit-scrollbar-button,
+body.vscode-native .mermaid-diagram-viewport::-webkit-scrollbar-corner {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  background: transparent !important;
+  opacity: 0 !important;
+}
+
+/* Explicit Dark Theme Overrides for CLAY Dark Mode */
+body.claude-dark .mermaid-diagram-card {
+  border-color: rgba(204, 107, 73, 0.25);
+  background: #1C1917;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+
+body.claude-dark .mermaid-diagram-header {
+  background: #24201D;
+  border-bottom-color: rgba(204, 107, 73, 0.2);
+}
+
+body.claude-dark .mermaid-view-pill,
+body.claude-dark .mermaid-zoom-pill,
+body.claude-dark .btn-mermaid-action {
+  background: #141210;
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #BBBBBB;
+}
+
+body.claude-dark .btn-mermaid-zoom {
+  color: #CCCCCC !important;
+}
+
+body.claude-dark .mermaid-diagram-viewport {
+  background: #141210 !important;
+}
+
+/* Explicit Dark Theme Overrides for Mermaid Nodes & Edges in CLAY Dark Mode */
+body.claude-dark .mermaid-diagram-card {
+  border-color: rgba(204, 107, 73, 0.25) !important;
+  background: #1C1917 !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25) !important;
+}
+
+body.claude-dark .mermaid-diagram-header {
+  background: #24201D !important;
+  border-bottom-color: rgba(204, 107, 73, 0.2) !important;
+}
+
+body.claude-dark .mermaid-view-pill,
+body.claude-dark .mermaid-zoom-pill,
+body.claude-dark .btn-mermaid-action {
+  background: #141210 !important;
+  border-color: rgba(255, 255, 255, 0.1) !important;
+  color: #BBBBBB !important;
+}
+
+body.claude-dark .mermaid-node-item rect,
+body.claude-dark .mermaid-node-item polygon {
+  fill: #1E1B18 !important;
+  stroke: #CC6B49 !important;
+}
+
+body.claude-dark .mermaid-node-item text {
+  fill: #EDEDEC !important;
+}
+
+body.claude-dark .mermaid-edge-group path {
+  stroke: #E07A5F !important;
+}
+
+body.claude-dark .mermaid-edge-group rect {
+  fill: #1C1917 !important;
+  stroke: rgba(204, 107, 73, 0.4) !important;
+}
+
+body.claude-dark .mermaid-edge-group text {
+  fill: #E8B4A2 !important;
+}
+
+body.claude-dark #clay-arrow path,
+body.claude-dark #seq-arrow path {
+  fill: #E07A5F !important;
+}
+
+body.claude-dark .mermaid-subgraph rect:first-child {
+  fill: rgba(204, 107, 73, 0.05) !important;
+  stroke: rgba(204, 107, 73, 0.3) !important;
+}
+
+body.claude-dark .mermaid-subgraph rect:nth-child(2) {
+  fill: #24201D !important;
+  stroke: rgba(204, 107, 73, 0.3) !important;
+}
+
+body.claude-dark .mermaid-diagram-canvas svg {
+  filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.35)) !important;
+}
+
+/* Explicit Light Theme Overrides for CLAY Light Mode */
+body:not(.claude-dark):not(.vscode-native) .mermaid-diagram-viewport,
+body.claude-light .mermaid-diagram-viewport {
+  background: var(--surface-subtle, #F5EFE6) !important;
+}
+
+body:not(.claude-dark):not(.vscode-native) .mermaid-diagram-card {
+  border-color: var(--border-subtle, #E2DAD0);
+  background: var(--surface-card, #FAF6F0);
+}
+
+body:not(.claude-dark):not(.vscode-native) .mermaid-diagram-header {
+  background: var(--surface-muted, #EDE6D8);
+  border-bottom-color: var(--border-subtle, #E2DAD0);
+}
+
+body:not(.claude-dark):not(.vscode-native) .mermaid-node-item rect,
+body:not(.claude-dark):not(.vscode-native) .mermaid-node-item polygon,
+body.claude-light .mermaid-node-item rect,
+body.claude-light .mermaid-node-item polygon {
+  fill: #FFFFFF !important;
+  stroke: #CC6B49 !important;
+}
+
+body:not(.claude-dark):not(.vscode-native) .mermaid-node-item text,
+body.claude-light .mermaid-node-item text {
+  fill: #2D2926 !important;
+}
+
+body:not(.claude-dark):not(.vscode-native) .mermaid-edge-group path,
+body.claude-light .mermaid-edge-group path {
+  stroke: #B85837 !important;
+}
+
+body:not(.claude-dark):not(.vscode-native) .mermaid-edge-group rect,
+body.claude-light .mermaid-edge-group rect {
+  fill: #EDE6D8 !important;
+  stroke: rgba(204, 107, 73, 0.35) !important;
+}
+
+body:not(.claude-dark):not(.vscode-native) .mermaid-edge-group text,
+body.claude-light .mermaid-edge-group text {
+  fill: #594F45 !important;
+}
+
+body:not(.claude-dark):not(.vscode-native) #clay-arrow path,
+body:not(.claude-dark):not(.vscode-native) #seq-arrow path,
+body.claude-light #clay-arrow path,
+body.claude-light #seq-arrow path {
+  fill: #B85837 !important;
 }
 
 .mermaid-diagram-viewport.is-panning {
@@ -4662,7 +5277,7 @@ body.vscode-native .empty-state-desc {
   display: block;
   width: 100%;
   height: 100%;
-  filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.3));
+  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.06));
 }
 
 .mermaid-node-item {
@@ -4686,14 +5301,52 @@ body.vscode-native .empty-state-desc {
   border-radius: 0;
 }
 
+/* VS Code Explicit Light Theme Overrides (Only when NOT in CLAY Dark Mode) */
+body:not(.claude-dark).vscode-light .mermaid-diagram-card,
+body:not(.claude-dark)[data-vscode-theme-kind="vscode-light"] .mermaid-diagram-card {
+  border-color: var(--vscode-widget-border, #E0E0E0);
+  background: var(--vscode-editor-background, #FFFFFF);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+body:not(.claude-dark).vscode-light .mermaid-diagram-header,
+body:not(.claude-dark)[data-vscode-theme-kind="vscode-light"] .mermaid-diagram-header {
+  background: var(--vscode-sideBarSectionHeader-background, var(--vscode-editorWidget-background, #F3F3F3));
+  border-bottom-color: var(--vscode-widget-border, #E0E0E0);
+}
+
+body:not(.claude-dark).vscode-light .mermaid-diagram-viewport,
+body:not(.claude-dark)[data-vscode-theme-kind="vscode-light"] .mermaid-diagram-viewport {
+  background: var(--vscode-editor-background, #FAF8F5) !important;
+}
+
 body.vscode-native .mermaid-diagram-card {
   border-color: var(--vscode-widget-border, #333333);
   background: var(--vscode-editor-background, #1e1e1e);
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.2));
 }
 
 body.vscode-native .mermaid-diagram-header {
+  background: var(--vscode-sideBarSectionHeader-background, var(--vscode-editorWidget-background, #252526));
+  border-bottom: 1px solid var(--vscode-widget-border, #333333);
+}
+
+body.vscode-native .mermaid-diagram-title {
+  color: var(--vscode-panelTitle-activeForeground, var(--vscode-button-background, #3794ff));
+}
+
+body.vscode-native .mermaid-diagram-title svg {
+  color: var(--vscode-panelTitle-activeForeground, var(--vscode-button-background, #3794ff));
+}
+
+body.vscode-native .mermaid-view-pill,
+body.vscode-native .mermaid-zoom-pill {
   background: var(--vscode-editorWidget-background, #252526);
-  border-color: var(--vscode-widget-border, #333333);
+  border-color: var(--vscode-widget-border, #3c3c3c);
+}
+
+body.vscode-native .btn-mermaid-view-toggle {
+  color: var(--vscode-descriptionForeground, #999999);
 }
 
 body.vscode-native .btn-mermaid-view-toggle.btn-mermaid-active {
@@ -4701,6 +5354,119 @@ body.vscode-native .btn-mermaid-view-toggle.btn-mermaid-active {
   color: var(--vscode-button-foreground, #ffffff);
 }
 
+body.vscode-native .btn-mermaid-zoom {
+  color: var(--vscode-descriptionForeground, #999999);
+}
+
+body.vscode-native .btn-mermaid-zoom:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+  color: var(--vscode-editor-foreground, #ffffff);
+}
+
+body.vscode-native .btn-mermaid-action {
+  background: var(--vscode-button-secondaryBackground, #3a3d41);
+  color: var(--vscode-button-secondaryForeground, #ffffff);
+  border-color: var(--vscode-widget-border, #3c3c3c);
+}
+
+body.vscode-native .btn-mermaid-action:hover {
+  background: var(--vscode-button-secondaryHoverBackground, #45494e);
+  color: var(--vscode-button-secondaryForeground, #ffffff);
+  border-color: var(--vscode-focusBorder, #007acc);
+}
+
 body.vscode-native .mermaid-diagram-viewport {
   background: var(--vscode-editor-background, #1e1e1e);
+}
+
+body.vscode-native .mermaid-diagram-canvas svg {
+  filter: none !important;
+}
+
+body.vscode-native .mermaid-node-item rect,
+body.vscode-native .mermaid-node-item polygon {
+  fill: var(--vscode-editorWidget-background, #252526) !important;
+  stroke: var(--vscode-focusBorder, var(--vscode-button-background, #007acc)) !important;
+  filter: none !important;
+}
+
+body.vscode-native .mermaid-node-item text {
+  fill: var(--vscode-editor-foreground, #cccccc) !important;
+}
+
+body.vscode-native .mermaid-node-item:hover rect,
+body.vscode-native .mermaid-node-item:hover polygon,
+body.vscode-native .mermaid-node-item:hover path {
+  stroke: var(--vscode-focusBorder, #007acc) !important;
+  filter: drop-shadow(0 0 6px var(--vscode-focusBorder, #007acc)) !important;
+}
+
+body.vscode-native .mermaid-edge-group path {
+  stroke: var(--vscode-editor-foreground, #888888) !important;
+  opacity: 0.75 !important;
+}
+
+body.vscode-native .mermaid-edge-group rect {
+  fill: var(--vscode-editor-background, #1e1e1e) !important;
+  stroke: var(--vscode-widget-border, #333333) !important;
+}
+
+body.vscode-native .mermaid-edge-group text {
+  fill: var(--vscode-descriptionForeground, #999999) !important;
+}
+
+body.vscode-native #clay-arrow path,
+body.vscode-native #seq-arrow path {
+  fill: var(--vscode-editor-foreground, #888888) !important;
+}
+
+body.vscode-native .mermaid-subgraph rect {
+  stroke: var(--vscode-widget-border, #333333) !important;
+  fill: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.05)) !important;
+}
+
+body.vscode-native .mermaid-subgraph text {
+  fill: var(--vscode-button-background, #3794ff) !important;
+}
+
+/* VS Code Native Mode under VS Code Light Theme */
+body.vscode-native:not(.claude-dark).vscode-light .mermaid-diagram-viewport,
+body.vscode-native:not(.claude-dark)[data-vscode-theme-kind="vscode-light"] .mermaid-diagram-viewport {
+  background: var(--vscode-editor-background, #FFFFFF) !important;
+}
+
+body.vscode-native:not(.claude-dark).vscode-light .mermaid-node-item rect,
+body.vscode-native:not(.claude-dark).vscode-light .mermaid-node-item polygon,
+body.vscode-native:not(.claude-dark)[data-vscode-theme-kind="vscode-light"] .mermaid-node-item rect,
+body.vscode-native:not(.claude-dark)[data-vscode-theme-kind="vscode-light"] .mermaid-node-item polygon {
+  fill: var(--vscode-editorWidget-background, #FFFFFF) !important;
+  stroke: var(--vscode-focusBorder, var(--vscode-button-background, #007acc)) !important;
+}
+
+body.vscode-native:not(.claude-dark).vscode-light .mermaid-node-item text,
+body.vscode-native:not(.claude-dark)[data-vscode-theme-kind="vscode-light"] .mermaid-node-item text {
+  fill: var(--vscode-editor-foreground, #1E1E1E) !important;
+}
+
+body.vscode-native:not(.claude-dark).vscode-light .mermaid-edge-group path,
+body.vscode-native:not(.claude-dark)[data-vscode-theme-kind="vscode-light"] .mermaid-edge-group path {
+  stroke: var(--vscode-editor-foreground, #555555) !important;
+}
+
+body.vscode-native:not(.claude-dark).vscode-light .mermaid-edge-group rect,
+body.vscode-native:not(.claude-dark)[data-vscode-theme-kind="vscode-light"] .mermaid-edge-group rect {
+  fill: var(--vscode-editor-background, #F0F0F0) !important;
+  stroke: var(--vscode-widget-border, #D0D0D0) !important;
+}
+
+body.vscode-native:not(.claude-dark).vscode-light .mermaid-edge-group text,
+body.vscode-native:not(.claude-dark)[data-vscode-theme-kind="vscode-light"] .mermaid-edge-group text {
+  fill: var(--vscode-descriptionForeground, #555555) !important;
+}
+
+body.vscode-native:not(.claude-dark).vscode-light #clay-arrow path,
+body.vscode-native:not(.claude-dark).vscode-light #seq-arrow path,
+body.vscode-native:not(.claude-dark)[data-vscode-theme-kind="vscode-light"] #clay-arrow path,
+body.vscode-native:not(.claude-dark)[data-vscode-theme-kind="vscode-light"] #seq-arrow path {
+  fill: var(--vscode-editor-foreground, #555555) !important;
 }

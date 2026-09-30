@@ -41,6 +41,7 @@
   let currentRepoFilesList = [];
   let activeEditorFile = '';
   let activeEditorCursorLine = null;
+  let activeEditorContent = '';
 
   function extractDiffFilename(diffText) {
     if (!diffText) return null;
@@ -308,7 +309,11 @@
 
   // State: Reference Settings
   let currentConnectionType = localStorage.getItem('clay_connection_type') || 'local';
-  let currentApiKey = localStorage.getItem('clay_api_key') || '';
+  let currentApiKey = '';
+  // Domain 5: Purge any legacy unencrypted API keys left in localStorage
+  try {
+    localStorage.removeItem('clay_api_key');
+  } catch (e) {}
   let currentSecurityMode = localStorage.getItem('clay_security_mode') || 'sandboxed';
   let currentAllowNetwork = localStorage.getItem('clay_allow_net') !== 'false';
 
@@ -354,6 +359,9 @@
         c.classList.remove('active');
       }
     });
+
+    // Re-render any visible mermaid diagram cards to match palette tokens immediately
+    refreshAllMermaidDiagrams();
   }
 
   themeCards.forEach((card) => {
@@ -727,11 +735,21 @@
 
   if (btnSaveSettings) {
     btnSaveSettings.addEventListener('click', async () => {
+      let apiKeyToSend = undefined;
+      if (inputApiKey) {
+        const trimmed = inputApiKey.value.trim();
+        if (trimmed && !trimmed.includes('••••')) {
+          apiKeyToSend = trimmed;
+        } else if (inputApiKey.dataset.cleared === 'true') {
+          apiKeyToSend = '';
+        }
+      }
+
       const payload = {
         model: modelSelect ? modelSelect.value : currentModel,
         host: hostInput ? hostInput.value.trim() : currentHost,
         connection_type: selectConnectionType ? selectConnectionType.value : currentConnectionType,
-        api_key: inputApiKey ? inputApiKey.value.trim() : currentApiKey,
+        api_key: apiKeyToSend,
         temperature: tempSlider ? parseFloat(tempSlider.value) : currentTemperature,
         num_ctx: ctxSelect ? parseInt(ctxSelect.value, 10) : currentNumCtx,
         num_predict: maxTokensSelect ? parseInt(maxTokensSelect.value, 10) : currentNumPredict,
@@ -742,7 +760,7 @@
         theme_mode: currentThemeMode
       };
 
-      // Persist to local storage immediately
+      // Persist non-sensitive preferences to local storage immediately
       currentTemperature = payload.temperature;
       currentNumCtx = payload.num_ctx;
       currentNumPredict = payload.num_predict;
@@ -756,7 +774,6 @@
       localStorage.setItem('clay_model', payload.model);
       if (payload.host) localStorage.setItem('clay_host', payload.host);
       if (payload.connection_type) localStorage.setItem('clay_connection_type', payload.connection_type);
-      if (payload.api_key !== undefined) localStorage.setItem('clay_api_key', payload.api_key);
       localStorage.setItem('clay_theme_mode', currentThemeMode);
 
       btnSaveSettings.textContent = 'Settings Saved!';
@@ -823,10 +840,16 @@
           if (selectConnectionType) selectConnectionType.value = currentConnectionType;
           if (groupApiKey) groupApiKey.style.display = currentConnectionType === 'cloud' ? 'block' : 'none';
         }
-        if (s.api_key !== undefined && inputApiKey) {
-          inputApiKey.value = s.api_key;
-          currentApiKey = s.api_key;
-          localStorage.setItem('clay_api_key', currentApiKey);
+        if (inputApiKey) {
+          if (s.has_api_key || (s.api_key && s.api_key.trim())) {
+            const masked = s.api_key_masked || (s.api_key && s.api_key.includes('••••') ? s.api_key : '••••••••');
+            inputApiKey.placeholder = `Saved in OS Keychain (${masked})`;
+            inputApiKey.dataset.hasKey = 'true';
+            inputApiKey.value = '';
+          } else {
+            inputApiKey.placeholder = 'Enter ollama.com API key (e.g. sk_...)';
+            inputApiKey.dataset.hasKey = 'false';
+          }
         }
         if (s.host && hostInput) {
           hostInput.value = s.host;
@@ -2099,7 +2122,9 @@
         body: JSON.stringify({
           goal: goal,
           workspace_path: currentRepoPath,
-          target_file: (chatPayload && chatPayload.targetFile) ? chatPayload.targetFile : undefined,
+          target_file: (chatPayload && chatPayload.targetFile) ? chatPayload.targetFile : (activeEditorFile ? activeEditorFile.replace(/\\/g, '/').split('/').pop() : undefined),
+          active_file: activeEditorFile || undefined,
+          active_file_content: activeEditorContent || undefined,
           model_name: currentModel
         })
       });
@@ -2121,7 +2146,7 @@
     appendTerminalLog(`[plan] Dynamic plan: ${totalSteps} steps created for '${goal.slice(0, 45)}'`);
 
     let effectiveGoal = goal;
-    let confirmedTargetFile = (chatPayload && chatPayload.targetFile) ? chatPayload.targetFile : (plan.target_file || null);
+    let confirmedTargetFile = (chatPayload && chatPayload.targetFile) ? chatPayload.targetFile : (plan.target_file || (activeEditorFile ? activeEditorFile.replace(/\\/g, '/').split('/').pop() : null));
 
     try {
       for (let i = 0; i < steps.length; i++) {
@@ -2134,8 +2159,8 @@
         const progressPct = Math.round((stepNum / (totalSteps + 1)) * 90);
         setAgentProgress(progressPct, `Step ${stepNum} of ${totalSteps}: ${currentStep.progress || currentStep.title}...`);
 
-        let stepTarget = confirmedTargetFile || effectiveGoal;
-        const stepRes = await executeStep(currentStep.id, stepTarget, confirmedTargetFile, stepAction, totalSteps);
+        // Execute step with effectiveGoal (the user prompt), confirmedTargetFile, and stepAction
+        const stepRes = await executeStep(currentStep.id, effectiveGoal, confirmedTargetFile, stepAction, totalSteps);
         if (!isAgentRunning) return;
 
         // Check ambiguity if step 1 returned multiple candidates
@@ -2198,6 +2223,9 @@
         agentTerminalStatus.style.color = '#10B981';
       }
       appendTerminalLog(`[complete] All ${totalSteps} steps completed successfully! Inspect diff in Diff tab.`);
+      if (stagedDiffData && stagedDiffData.diff) {
+        showToast(`Diff staged for ${stagedDiffData.file} in Diff tab`, 'success');
+      }
     } catch (err) {
       appendTerminalLog(`[error] Execution failed: ${err.message}`);
     } finally {
@@ -2225,6 +2253,7 @@
   }
 
   async function executeStep(stepId, goal, targetFile = null, stepAction = null, totalSteps = 3) {
+    const finalTarget = targetFile || (activeEditorFile ? activeEditorFile.replace(/\\/g, '/').split('/').pop() : undefined);
     try {
       const res = await fetch(`${BACKEND_URL}/api/agent/step`, {
         method: 'POST',
@@ -2236,8 +2265,9 @@
           total_steps: totalSteps,
           workspace_path: currentRepoPath,
           active_file: activeEditorFile || undefined,
+          active_file_content: activeEditorContent || undefined,
           cursor_line: activeEditorCursorLine || undefined,
-          target_file: targetFile || undefined
+          target_file: finalTarget
         })
       });
       if (res.ok) return await res.json();
@@ -2259,8 +2289,9 @@
             goal,
             workspace_path: currentRepoPath,
             active_file: activeEditorFile || undefined,
+            active_file_content: activeEditorContent || undefined,
             cursor_line: activeEditorCursorLine || undefined,
-            target_file: targetFile || undefined
+            target_file: finalTarget
           });
           setTimeout(() => {
             window.removeEventListener('message', handler);
@@ -2893,6 +2924,74 @@
 
 
 
+  function isDiagramLightMode() {
+    // 1. In CLAY mode (default): if claude-dark is present on body, it is ALWAYS Dark Mode!
+    if (document.body.classList.contains('claude-dark')) {
+      return false;
+    }
+
+    // 2. If user explicitly chose "IDE Tokens" (vscode-native mode), follow VS Code's editor theme
+    if (document.body.classList.contains('vscode-native')) {
+      if (document.body.classList.contains('vscode-light') || document.body.getAttribute('data-vscode-theme-kind') === 'vscode-light') {
+        return true;
+      }
+      if (document.body.classList.contains('vscode-dark') || document.body.getAttribute('data-vscode-theme-kind') === 'vscode-dark') {
+        return false;
+      }
+      try {
+        const bg = window.getComputedStyle(document.body).backgroundColor;
+        if (bg && bg.startsWith('rgb')) {
+          const rgb = bg.match(/\d+/g);
+          if (rgb && rgb.length >= 3) {
+            const brightness = (parseInt(rgb[0], 10) * 299 + parseInt(rgb[1], 10) * 587 + parseInt(rgb[2], 10) * 114) / 1000;
+            return brightness > 128;
+          }
+        }
+      } catch (e) { }
+      return false;
+    }
+
+    // 3. In CLAY mode without claude-dark, default is warm cream Light Mode!
+    return true;
+  }
+
+  function decodeHtmlEntities(str) {
+    if (!str) return '';
+    if (!str.includes('&')) return str;
+    const txt = document.createElement('textarea');
+    txt.innerHTML = str;
+    return txt.value;
+  }
+
+  function refreshAllMermaidDiagrams() {
+    try {
+      document.querySelectorAll('.mermaid-diagram-card[data-raw-mermaid]').forEach(card => {
+        const rawAttr = card.getAttribute('data-raw-mermaid');
+        if (rawAttr) {
+          const raw = decodeHtmlEntities(rawAttr);
+          const viewportInner = card.querySelector('.mermaid-viewport-inner');
+          if (viewportInner) {
+            const newSvg = renderMermaidSvg(raw);
+            if (newSvg) {
+              const wMatch = newSvg.match(/data-base-width="(\d+)"/);
+              const hMatch = newSvg.match(/data-base-height="(\d+)"/);
+              const baseW = wMatch ? parseInt(wMatch[1], 10) : 600;
+              const baseH = hMatch ? parseInt(hMatch[1], 10) : 380;
+              const oldCanvas = viewportInner.querySelector('.mermaid-diagram-canvas');
+              const zoom = oldCanvas ? (oldCanvas.getAttribute('data-zoom') || '1.0') : '1.0';
+              const zVal = parseFloat(zoom) || 1.0;
+              const currW = Math.round(baseW * zVal);
+              const currH = Math.round(baseH * zVal);
+              viewportInner.innerHTML = `<div class="mermaid-diagram-canvas" data-zoom="${zVal}" data-base-width="${baseW}" data-base-height="${baseH}" style="width: ${currW}px; height: ${currH}px; min-width: ${currW}px;">${newSvg}</div>`;
+            }
+          }
+        }
+      });
+    } catch (err) {
+      console.warn('Failed to refresh mermaid diagrams:', err);
+    }
+  }
+
   function renderMermaidSvg(code) {
     if (!code || !code.trim()) return '';
     const trimmed = code.trim();
@@ -2969,10 +3068,36 @@
     const totalW = Math.max(340, startX * 2 + (participants.length - 1) * colWidth);
     const totalH = topY * 2 + messages.length * msgGapY + 40;
 
-    const nodeBg = '#1E1B18';
-    const nodeBorder = '#CC6B49';
-    const nodeText = '#EDEDEC';
-    const edgeColor = '#E07A5F';
+    const isVscodeNative = document.body.classList.contains('vscode-native');
+    const isLight = isDiagramLightMode();
+
+    let nodeBg, nodeBorder, nodeText, edgeColor, lineColor, textMuted, shadowColor;
+
+    if (isVscodeNative) {
+      nodeBg = 'var(--vscode-editorWidget-background, #252526)';
+      nodeBorder = 'var(--vscode-focusBorder, var(--vscode-button-background, #007acc))';
+      nodeText = 'var(--vscode-editor-foreground, #EDEDEC)';
+      edgeColor = 'var(--vscode-editor-foreground, #888888)';
+      lineColor = 'var(--vscode-widget-border, rgba(128, 128, 128, 0.3))';
+      textMuted = 'var(--vscode-descriptionForeground, #999999)';
+      shadowColor = 'transparent';
+    } else if (isLight) {
+      nodeBg = '#FFFFFF';
+      nodeBorder = '#CC6B49';
+      nodeText = '#2D2926';
+      edgeColor = '#B85837';
+      lineColor = 'rgba(204, 107, 73, 0.3)';
+      textMuted = '#746C63';
+      shadowColor = 'rgba(0, 0, 0, 0.08)';
+    } else {
+      nodeBg = '#1E1B18';
+      nodeBorder = '#CC6B49';
+      nodeText = '#EDEDEC';
+      edgeColor = '#E07A5F';
+      lineColor = 'rgba(204, 107, 73, 0.25)';
+      textMuted = '#E8B4A2';
+      shadowColor = 'rgba(204, 107, 73, 0.25)';
+    }
 
     const partCoords = new Map();
     participants.forEach((p, idx) => {
@@ -2985,14 +3110,14 @@
           <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="${edgeColor}" />
         </marker>
         <filter id="clay-glow-seq" x="-10%" y="-10%" width="120%" height="120%">
-          <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="rgba(204, 107, 73, 0.25)" />
+          <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="${shadowColor}" />
         </filter>
       </defs>
     `;
 
     participants.forEach(p => {
       const x = partCoords.get(p.id);
-      svg += `<line x1="${x}" y1="${topY + 28}" x2="${x}" y2="${totalH - topY}" stroke="rgba(204, 107, 73, 0.25)" stroke-width="1.2" stroke-dasharray="4 4" />`;
+      svg += `<line x1="${x}" y1="${topY + 28}" x2="${x}" y2="${totalH - topY}" stroke="${lineColor}" stroke-width="1.2" stroke-dasharray="4 4" />`;
     });
 
     messages.forEach((m, idx) => {
@@ -3002,7 +3127,7 @@
       const dash = m.dashed ? 'stroke-dasharray="4 3"' : '';
       svg += `<line x1="${x1}" y1="${y}" x2="${x2}" y2="${y}" stroke="${edgeColor}" stroke-width="1.5" ${dash} marker-end="url(#seq-arrow)" />`;
       const midX = (x1 + x2) / 2;
-      svg += `<text x="${midX}" y="${y - 6}" text-anchor="middle" fill="#E8B4A2" font-family="sans-serif" font-size="9.5" font-weight="500">${escapeHtml(m.text)}</text>`;
+      svg += `<text x="${midX}" y="${y - 6}" text-anchor="middle" fill="${textMuted}" font-family="sans-serif" font-size="9.5" font-weight="500">${escapeHtml(m.text)}</text>`;
     });
 
     participants.forEach(p => {
@@ -3083,10 +3208,39 @@
     const totalW = padX * 2 + labelColW + timelineW;
     const totalH = headerH + allTasks.length * rowH + 20;
 
-    const terracotta = '#CC6B49';
-    const activeColor = '#D97757';
-    const doneColor = '#10B981';
-    const critColor = '#EF4444';
+    const isVscodeNative = document.body.classList.contains('vscode-native');
+    const isLight = isDiagramLightMode();
+
+    let terracotta, activeColor, doneColor, critColor, gridLineColor, phaseTextColor, taskTextColor, rowBgEven;
+
+    if (isVscodeNative) {
+      terracotta = 'var(--vscode-panelTitle-activeForeground, var(--vscode-button-background, #3794ff))';
+      activeColor = 'var(--vscode-button-background, #0e639c)';
+      doneColor = '#10B981';
+      critColor = '#EF4444';
+      gridLineColor = 'var(--vscode-widget-border, rgba(128, 128, 128, 0.2))';
+      phaseTextColor = 'var(--vscode-descriptionForeground, #888888)';
+      taskTextColor = 'var(--vscode-editor-foreground, #EDEDEC)';
+      rowBgEven = 'rgba(255, 255, 255, 0.02)';
+    } else if (isLight) {
+      terracotta = '#CC6B49';
+      activeColor = '#CC6B49';
+      doneColor = '#059669';
+      critColor = '#DC2626';
+      gridLineColor = 'rgba(204, 107, 73, 0.18)';
+      phaseTextColor = '#746C63';
+      taskTextColor = '#2D2926';
+      rowBgEven = 'rgba(204, 107, 73, 0.04)';
+    } else {
+      terracotta = '#CC6B49';
+      activeColor = '#D97757';
+      doneColor = '#10B981';
+      critColor = '#EF4444';
+      gridLineColor = 'rgba(204, 107, 73, 0.14)';
+      phaseTextColor = '#8C847A';
+      taskTextColor = '#EDEDEC';
+      rowBgEven = 'rgba(255, 255, 255, 0.02)';
+    }
 
     let svgRows = '';
     const numCols = Math.min(6, Math.max(3, allTasks.length));
@@ -3095,15 +3249,15 @@
     let gridSvg = '';
     for (let c = 0; c <= numCols; c++) {
       const gx = padX + labelColW + c * colStepW;
-      gridSvg += `<line x1="${gx}" y1="${headerH - 6}" x2="${gx}" y2="${totalH - 12}" stroke="rgba(204, 107, 73, 0.14)" stroke-width="1" stroke-dasharray="3 3" />`;
+      gridSvg += `<line x1="${gx}" y1="${headerH - 6}" x2="${gx}" y2="${totalH - 12}" stroke="${gridLineColor}" stroke-width="1" stroke-dasharray="3 3" />`;
       if (c < numCols) {
-        gridSvg += `<text x="${gx + colStepW / 2}" y="${headerH - 10}" text-anchor="middle" fill="#8C847A" font-family="monospace, sans-serif" font-size="9" font-weight="600">PHASE ${c + 1}</text>`;
+        gridSvg += `<text x="${gx + colStepW / 2}" y="${headerH - 10}" text-anchor="middle" fill="${phaseTextColor}" font-family="monospace, sans-serif" font-size="9" font-weight="600">PHASE ${c + 1}</text>`;
       }
     }
 
     allTasks.forEach((task, idx) => {
       const y = headerH + idx * rowH;
-      const rowBg = idx % 2 === 0 ? 'rgba(255, 255, 255, 0.02)' : 'transparent';
+      const rowBg = idx % 2 === 0 ? rowBgEven : 'transparent';
       
       const startCol = idx % numCols;
       const barSpan = Math.min(numCols - startCol, Math.max(1, parseInt(task.duration, 10) || 1));
@@ -3117,7 +3271,7 @@
 
       svgRows += `
         <rect x="${padX}" y="${y}" width="${totalW - padX * 2}" height="${rowH}" fill="${rowBg}" />
-        <text x="${padX + 8}" y="${y + 19}" fill="#EDEDEC" font-family="Outfit, -apple-system, sans-serif" font-size="10" font-weight="500">${escapeHtml(task.name)}</text>
+        <text x="${padX + 8}" y="${y + 19}" fill="${taskTextColor}" font-family="Outfit, -apple-system, sans-serif" font-size="10" font-weight="500">${escapeHtml(task.name)}</text>
         <g class="mermaid-node-item" style="cursor: default;">
           <rect x="${barX}" y="${y + 7}" width="${barW}" height="${barH}" rx="5" fill="${barFill}" opacity="0.9" />
           <text x="${barX + barW / 2}" y="${y + 20.5}" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-size="9" font-weight="600">${escapeHtml(task.duration)}</text>
@@ -3211,37 +3365,71 @@
     const totalW = maxX + padX;
     const totalH = maxY + padY;
 
-    const terracotta = '#CC6B49';
-    const edgeColor = '#E07A5F';
+    const isVscodeNative = document.body.classList.contains('vscode-native');
+    const isLight = isDiagramLightMode();
+
+    let terracotta, edgeColor, nodeBg, nodeText, headerFill, dividerColor, fieldColor, methodColor, noMethodColor;
+
+    if (isVscodeNative) {
+      terracotta = 'var(--vscode-focusBorder, var(--vscode-button-background, #007acc))';
+      edgeColor = 'var(--vscode-editor-foreground, #888888)';
+      nodeBg = 'var(--vscode-editorWidget-background, #252526)';
+      nodeText = 'var(--vscode-editor-foreground, #EDEDEC)';
+      headerFill = 'var(--vscode-sideBarSectionHeader-background, rgba(128, 128, 128, 0.15))';
+      dividerColor = 'var(--vscode-widget-border, rgba(128, 128, 128, 0.25))';
+      fieldColor = 'var(--vscode-descriptionForeground, #999999)';
+      methodColor = 'var(--vscode-editor-foreground, #EDEDEC)';
+      noMethodColor = 'var(--vscode-descriptionForeground, #888888)';
+    } else if (isLight) {
+      terracotta = '#CC6B49';
+      edgeColor = '#B85837';
+      nodeBg = '#FFFFFF';
+      nodeText = '#2D2926';
+      headerFill = '#EDE6D8';
+      dividerColor = 'rgba(204, 107, 73, 0.25)';
+      fieldColor = '#746C63';
+      methodColor = '#2D2926';
+      noMethodColor = '#9E958A';
+    } else {
+      terracotta = '#CC6B49';
+      edgeColor = '#E07A5F';
+      nodeBg = '#1E1B18';
+      nodeText = '#EDEDEC';
+      headerFill = 'rgba(204, 107, 73, 0.18)';
+      dividerColor = 'rgba(204, 107, 73, 0.25)';
+      fieldColor = '#A8A29E';
+      methodColor = '#EDEDEC';
+      noMethodColor = '#8C847A';
+    }
 
     let svg = '';
     classList.forEach(cls => {
       const headerH = 26;
       svg += `
         <g class="mermaid-node-item" style="cursor: default;">
-          <rect x="${cls.x}" y="${cls.y}" width="${cls.width}" height="${cls.height}" rx="6" fill="#1E1B18" stroke="${terracotta}" stroke-width="1.3" />
-          <path d="M ${cls.x} ${cls.y + 6} A 6 6 0 0 1 ${cls.x + 6} ${cls.y} L ${cls.x + cls.width - 6} ${cls.y} A 6 6 0 0 1 ${cls.x + cls.width} ${cls.y + 6} L ${cls.x + cls.width} ${cls.y + headerH} L ${cls.x} ${cls.y + headerH} Z" fill="rgba(204, 107, 73, 0.18)" />
+          <rect x="${cls.x}" y="${cls.y}" width="${cls.width}" height="${cls.height}" rx="6" fill="${nodeBg}" stroke="${terracotta}" stroke-width="1.3" />
+          <path d="M ${cls.x} ${cls.y + 6} A 6 6 0 0 1 ${cls.x + 6} ${cls.y} L ${cls.x + cls.width - 6} ${cls.y} A 6 6 0 0 1 ${cls.x + cls.width} ${cls.y + 6} L ${cls.x + cls.width} ${cls.y + headerH} L ${cls.x} ${cls.y + headerH} Z" fill="${headerFill}" />
           <line x1="${cls.x}" y1="${cls.y + headerH}" x2="${cls.x + cls.width}" y2="${cls.y + headerH}" stroke="${terracotta}" stroke-width="1" />
-          <text x="${cls.x + cls.width / 2}" y="${cls.y + 17}" text-anchor="middle" fill="#EDEDEC" font-family="monospace, sans-serif" font-size="11" font-weight="700">${escapeHtml(cls.name)}</text>
+          <text x="${cls.x + cls.width / 2}" y="${cls.y + 17}" text-anchor="middle" fill="${nodeText}" font-family="monospace, sans-serif" font-size="11" font-weight="700">${escapeHtml(cls.name)}</text>
       `;
 
       let curY = cls.y + headerH + 14;
       if (cls.fields.length > 0) {
         cls.fields.forEach(f => {
-          svg += `<text x="${cls.x + 10}" y="${curY}" fill="#A8A29E" font-family="monospace, sans-serif" font-size="9">${escapeHtml(f)}</text>`;
+          svg += `<text x="${cls.x + 10}" y="${curY}" fill="${fieldColor}" font-family="monospace, sans-serif" font-size="9">${escapeHtml(f)}</text>`;
           curY += 16;
         });
-        svg += `<line x1="${cls.x}" y1="${curY - 6}" x2="${cls.x + cls.width}" y2="${curY - 6}" stroke="rgba(204, 107, 73, 0.25)" stroke-width="1" />`;
+        svg += `<line x1="${cls.x}" y1="${curY - 6}" x2="${cls.x + cls.width}" y2="${curY - 6}" stroke="${dividerColor}" stroke-width="1" />`;
         curY += 6;
       }
 
       if (cls.methods.length > 0) {
         cls.methods.forEach(m => {
-          svg += `<text x="${cls.x + 10}" y="${curY}" fill="#EDEDEC" font-family="monospace, sans-serif" font-size="9.5">${escapeHtml(m)}</text>`;
+          svg += `<text x="${cls.x + 10}" y="${curY}" fill="${methodColor}" font-family="monospace, sans-serif" font-size="9.5">${escapeHtml(m)}</text>`;
           curY += 16;
         });
       } else {
-        svg += `<text x="${cls.x + 10}" y="${curY}" fill="#8C847A" font-family="monospace, sans-serif" font-size="9" font-style="italic">(no methods)</text>`;
+        svg += `<text x="${cls.x + 10}" y="${curY}" fill="${noMethodColor}" font-family="monospace, sans-serif" font-size="9" font-style="italic">(no methods)</text>`;
       }
       svg += `</g>`;
     });
@@ -3410,30 +3598,123 @@
       return '';
     }
 
-    for (let n of nodeList) {
-      const textLen = (n.label || n.id).length;
-      n.width = Math.max(105, Math.min(220, textLen * 7.5 + 24));
-      n.height = n.shape === 'cylinder' ? 44 : 36;
+    // Helper: Wrap long labels intelligently into multiple lines to prevent text overflow
+    function splitLabelLines(rawText, maxCharsPerLine = 24) {
+      if (!rawText) return [''];
+      const clean = rawText.replace(/<br\s*\/?>/gi, '\n').replace(/\\n/g, '\n').trim();
+      const paragraphs = clean.split('\n');
+      const lines = [];
+
+      for (let para of paragraphs) {
+        para = para.trim();
+        if (!para) continue;
+        if (para.length <= maxCharsPerLine) {
+          lines.push(para);
+          continue;
+        }
+
+        // Split on whitespace or common word boundaries (parentheses, dots, underscores, hyphens)
+        const tokens = para.split(/(\s+|(?<=[_.()/-]))/);
+        let curr = '';
+        for (let tok of tokens) {
+          if (!tok) continue;
+          if ((curr + tok).length <= maxCharsPerLine) {
+            curr += tok;
+          } else {
+            if (curr.trim()) lines.push(curr.trim());
+            curr = tok.trim();
+          }
+        }
+        if (curr.trim()) lines.push(curr.trim());
+      }
+      return lines.length > 0 ? lines : [rawText];
     }
 
-    const ranks = new Map();
+    // Measure and size each node dynamically based on its text
+    for (let n of nodeList) {
+      n.lines = splitLabelLines(n.label || n.id, 24);
+      const maxLineLen = Math.max(...n.lines.map(l => l.length), 1);
+      // Generous width so text never clips or bleeds outside box (min 120, comfortable padding)
+      n.width = Math.max(120, Math.min(290, maxLineLen * 8.2 + 36));
+      const lineH = 15;
+      const basePad = n.shape === 'cylinder' ? 32 : (n.shape === 'diamond' ? 34 : 24);
+      n.height = Math.max(n.shape === 'cylinder' ? 46 : 38, n.lines.length * lineH + basePad);
+      if (n.shape === 'diamond') {
+        n.width = Math.max(n.width, n.height * 1.45);
+      }
+    }
+
     const inDegree = new Map();
+    const outDegree = new Map();
     const adj = new Map();
+    const revAdj = new Map();
 
     for (let n of nodeList) {
-      ranks.set(n.id, 0);
       inDegree.set(n.id, 0);
+      outDegree.set(n.id, 0);
       adj.set(n.id, []);
+      revAdj.set(n.id, []);
     }
 
     for (let e of edges) {
-      if (adj.has(e.from)) adj.get(e.from).push(e.to);
-      if (inDegree.has(e.to)) inDegree.set(e.to, inDegree.get(e.to) + 1);
+      if (adj.has(e.from)) {
+        adj.get(e.from).push(e.to);
+        outDegree.set(e.from, (outDegree.get(e.from) || 0) + 1);
+      }
+      if (inDegree.has(e.to)) {
+        inDegree.set(e.to, (inDegree.get(e.to) || 0) + 1);
+      }
+      if (revAdj.has(e.to)) {
+        revAdj.get(e.to).push(e.from);
+      }
     }
 
-    for (let iter = 0; iter < 10; iter++) {
+    // 1. Detect back-edges (cycles/loops) with 3-color DFS to PREVENT rank explosion & gigantic vertical lines
+    const color = new Map(); // 0 = unvisited, 1 = in-stack (ancestor), 2 = visited
+    for (let n of nodeList) color.set(n.id, 0);
+    const backEdges = new Set();
+
+    function dfsCycle(u) {
+      color.set(u, 1);
+      const neighbors = adj.get(u) || [];
+      for (let v of neighbors) {
+        const c = color.get(v);
+        if (c === 1) {
+          // u -> v is a back-edge (loop back to an ancestor)
+          backEdges.add(`${u}->${v}`);
+        } else if (c === 0) {
+          dfsCycle(v);
+        }
+      }
+      color.set(u, 2);
+    }
+
+    // Run DFS starting from root nodes (inDegree === 0)
+    for (let n of nodeList) {
+      if ((inDegree.get(n.id) || 0) === 0 && color.get(n.id) === 0) {
+        dfsCycle(n.id);
+      }
+    }
+    // Then any remaining unvisited nodes
+    for (let n of nodeList) {
+      if (color.get(n.id) === 0) {
+        dfsCycle(n.id);
+      }
+    }
+
+    // Tag edges with isBackEdge
+    for (let e of edges) {
+      e.isBackEdge = backEdges.has(`${e.from}->${e.to}`);
+    }
+
+    // 2. Assign ranks on forward-edge DAG only (immune to cycle explosions)
+    const ranks = new Map();
+    for (let n of nodeList) ranks.set(n.id, 0);
+
+    for (let iter = 0; iter < nodeList.length; iter++) {
       let changed = false;
       for (let e of edges) {
+        if (e.isBackEdge) continue; // Skip back-edges in rank assignment!
         const rFrom = ranks.get(e.from) || 0;
         const rTo = ranks.get(e.to) || 0;
         if (rTo <= rFrom) {
@@ -3442,6 +3723,14 @@
         }
       }
       if (!changed) break;
+    }
+
+    // 3. Rank Compaction: eliminate any empty rank gaps so nodes stay tightly and proportionally packed
+    const uniqueRanks = Array.from(new Set(ranks.values())).sort((a, b) => a - b);
+    const rankMap = new Map();
+    uniqueRanks.forEach((r, idx) => rankMap.set(r, idx));
+    for (let [id, r] of ranks.entries()) {
+      ranks.set(id, rankMap.get(r));
     }
 
     const maxRank = Math.max(...Array.from(ranks.values()), 0);
@@ -3453,26 +3742,52 @@
       layers[r].push(n);
     }
 
+    // 4. Barycenter ordering within each layer to minimize edge crossings
+    for (let r = 1; r < layers.length; r++) {
+      const layer = layers[r];
+      if (layer.length <= 1) continue;
+      const prevLayer = layers[r - 1];
+      const prevPos = new Map();
+      prevLayer.forEach((n, idx) => prevPos.set(n.id, idx));
+
+      layer.sort((a, b) => {
+        const parentsA = revAdj.get(a.id) || [];
+        const parentsB = revAdj.get(b.id) || [];
+        const avgA = parentsA.length > 0
+          ? parentsA.reduce((sum, p) => sum + (prevPos.has(p) ? prevPos.get(p) : prevLayer.length / 2), 0) / parentsA.length
+          : prevLayer.length / 2;
+        const avgB = parentsB.length > 0
+          ? parentsB.reduce((sum, p) => sum + (prevPos.has(p) ? prevPos.get(p) : prevLayer.length / 2), 0) / parentsB.length
+          : prevLayer.length / 2;
+        return avgA - avgB;
+      });
+    }
+
     const isTD = direction === 'TD';
-    const padX = 28;
-    const padY = 28;
-    const gapX = isTD ? 24 : 44;
-    const gapY = isTD ? 48 : 22;
+    const hasBackEdges = backEdges.size > 0;
+    const padX = hasBackEdges ? 54 : 36;
+    const padY = 32;
+    const gapX = isTD ? 28 : 44;
+    const gapY = isTD ? 52 : 24;
 
     let totalWidth = 0;
     let totalHeight = 0;
 
     if (isTD) {
       let maxLayerWidth = 0;
-      // Smart wrapping: Wrap wide layers into sub-rows of at most 4 nodes so diagrams stay balanced
       const wrappedLayers = [];
-      const MAX_NODES_PER_ROW = 4;
+      const MAX_NODES_PER_ROW = 5;
+
       for (let layer of layers) {
+        if (layer.length === 0) continue; // Skip empty ranks!
         if (layer.length <= MAX_NODES_PER_ROW) {
           wrappedLayers.push(layer);
         } else {
-          for (let i = 0; i < layer.length; i += MAX_NODES_PER_ROW) {
-            wrappedLayers.push(layer.slice(i, i + MAX_NODES_PER_ROW));
+          // Balance sub-rows evenly: e.g. 6 nodes -> 3 and 3, 7 nodes -> 4 and 3
+          const numRows = Math.ceil(layer.length / MAX_NODES_PER_ROW);
+          const perRow = Math.ceil(layer.length / numRows);
+          for (let i = 0; i < layer.length; i += perRow) {
+            wrappedLayers.push(layer.slice(i, i + perRow));
           }
         }
       }
@@ -3483,7 +3798,7 @@
         return w;
       });
 
-      totalWidth = Math.max(340, maxLayerWidth + padX * 2);
+      totalWidth = Math.max(360, maxLayerWidth + padX * 2);
       let currY = padY;
 
       for (let r = 0; r < wrappedLayers.length; r++) {
@@ -3503,7 +3818,7 @@
       totalHeight = currY - gapY + padY;
     } else {
       let maxLayerHeight = 0;
-      const layerHeights = layers.map(layer => {
+      const layerHeights = layers.filter(l => l.length > 0).map(layer => {
         const h = layer.reduce((acc, n) => acc + n.height, 0) + Math.max(0, layer.length - 1) * gapY;
         if (h > maxLayerHeight) maxLayerHeight = h;
         return h;
@@ -3514,7 +3829,8 @@
 
       for (let r = 0; r < layers.length; r++) {
         const layer = layers[r];
-        const layerH = layerHeights[r];
+        if (layer.length === 0) continue;
+        const layerH = layer.reduce((acc, n) => acc + n.height, 0) + Math.max(0, layer.length - 1) * gapY;
         let currY = (totalHeight - layerH) / 2;
 
         let layerMaxW = 0;
@@ -3530,15 +3846,52 @@
     }
 
     const nodeMap = new Map(nodeList.map(n => [n.id, n]));
-    const subgraphBoxes = [];
 
+    // 5. Calculate distributed connection ports for cleaner non-overlapping edges
+    const outEdgesBySrc = new Map();
+    const inEdgesByTgt = new Map();
+
+    for (let e of edges) {
+      if (e.isBackEdge) continue;
+      if (!outEdgesBySrc.has(e.from)) outEdgesBySrc.set(e.from, []);
+      outEdgesBySrc.get(e.from).push(e);
+
+      if (!inEdgesByTgt.has(e.to)) inEdgesByTgt.set(e.to, []);
+      inEdgesByTgt.get(e.to).push(e);
+    }
+
+    for (let [srcId, edgeList] of outEdgesBySrc.entries()) {
+      edgeList.sort((a, b) => {
+        const tgtA = nodeMap.get(a.to);
+        const tgtB = nodeMap.get(b.to);
+        return (tgtA ? tgtA.x : 0) - (tgtB ? tgtB.x : 0);
+      });
+      edgeList.forEach((e, idx) => {
+        e.srcPortIndex = idx;
+        e.srcPortCount = edgeList.length;
+      });
+    }
+
+    for (let [tgtId, edgeList] of inEdgesByTgt.entries()) {
+      edgeList.sort((a, b) => {
+        const srcA = nodeMap.get(a.from);
+        const srcB = nodeMap.get(b.from);
+        return (srcA ? srcA.x : 0) - (srcB ? srcB.x : 0);
+      });
+      edgeList.forEach((e, idx) => {
+        e.tgtPortIndex = idx;
+        e.tgtPortCount = edgeList.length;
+      });
+    }
+
+    const subgraphBoxes = [];
     for (let sub of subgraphs) {
       const subNodes = nodeList.filter(n => n.subgraph === sub.id);
       if (subNodes.length > 0) {
-        const minX = Math.min(...subNodes.map(n => n.x)) - 12;
-        const minY = Math.min(...subNodes.map(n => n.y)) - 22;
-        const maxX = Math.max(...subNodes.map(n => n.x + n.width)) + 12;
-        const maxY = Math.max(...subNodes.map(n => n.y + n.height)) + 12;
+        const minX = Math.min(...subNodes.map(n => n.x)) - 14;
+        const minY = Math.min(...subNodes.map(n => n.y)) - 24;
+        const maxX = Math.max(...subNodes.map(n => n.x + n.width)) + 14;
+        const maxY = Math.max(...subNodes.map(n => n.y + n.height)) + 14;
         subgraphBoxes.push({
           id: sub.id,
           title: sub.title,
@@ -3550,13 +3903,51 @@
       }
     }
 
-    const terracotta = '#CC6B49';
-    const nodeBg = '#1E1B18';
-    const nodeBorder = '#CC6B49';
-    const nodeText = '#EDEDEC';
-    const subBg = 'rgba(204, 107, 73, 0.05)';
-    const subBorder = 'rgba(204, 107, 73, 0.3)';
-    const edgeColor = '#E07A5F';
+    const isVscodeNative = document.body.classList.contains('vscode-native');
+    const isLight = isDiagramLightMode();
+
+    let terracotta, nodeBg, nodeBorder, nodeText, subBg, subBorder, subHeaderBg, edgeColor, lblFill, lblStroke, lblText, shadowColor;
+
+    if (isVscodeNative) {
+      terracotta = 'var(--vscode-panelTitle-activeForeground, var(--vscode-button-background, #3794ff))';
+      nodeBg = 'var(--vscode-editorWidget-background, #252526)';
+      nodeBorder = 'var(--vscode-focusBorder, var(--vscode-button-background, #007acc))';
+      nodeText = 'var(--vscode-editor-foreground, #EDEDEC)';
+      subBg = 'var(--vscode-sideBar-background, rgba(128, 128, 128, 0.05))';
+      subBorder = 'var(--vscode-widget-border, rgba(128, 128, 128, 0.3))';
+      subHeaderBg = 'var(--vscode-editorWidget-background, #252526)';
+      edgeColor = 'var(--vscode-editor-foreground, #888888)';
+      lblFill = 'var(--vscode-editor-background, #1e1e1e)';
+      lblStroke = 'var(--vscode-widget-border, #333333)';
+      lblText = 'var(--vscode-descriptionForeground, #999999)';
+      shadowColor = 'transparent';
+    } else if (isLight) {
+      terracotta = '#CC6B49';
+      nodeBg = '#FFFFFF';
+      nodeBorder = '#CC6B49';
+      nodeText = '#2D2926';
+      subBg = 'rgba(204, 107, 73, 0.04)';
+      subBorder = 'rgba(204, 107, 73, 0.28)';
+      subHeaderBg = '#EDE6D8';
+      edgeColor = '#B85837';
+      lblFill = '#EDE6D8';
+      lblStroke = 'rgba(204, 107, 73, 0.35)';
+      lblText = '#594F45';
+      shadowColor = 'rgba(0, 0, 0, 0.08)';
+    } else {
+      terracotta = '#CC6B49';
+      nodeBg = '#1E1B18';
+      nodeBorder = '#CC6B49';
+      nodeText = '#EDEDEC';
+      subBg = 'rgba(204, 107, 73, 0.05)';
+      subBorder = 'rgba(204, 107, 73, 0.3)';
+      subHeaderBg = '#24201D';
+      edgeColor = '#E07A5F';
+      lblFill = '#1C1917';
+      lblStroke = 'rgba(204, 107, 73, 0.4)';
+      lblText = '#E8B4A2';
+      shadowColor = 'rgba(204, 107, 73, 0.25)';
+    }
 
     let svgContent = '';
 
@@ -3566,7 +3957,7 @@
           <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="${edgeColor}" />
         </marker>
         <filter id="clay-glow" x="-10%" y="-10%" width="120%" height="120%">
-          <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="rgba(204, 107, 73, 0.25)" />
+          <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="${shadowColor}" />
         </filter>
       </defs>
     `;
@@ -3575,12 +3966,13 @@
       svgContent += `
         <g class="mermaid-subgraph">
           <rect x="${s.x}" y="${s.y}" width="${s.width}" height="${s.height}" rx="10" fill="${subBg}" stroke="${subBorder}" stroke-width="1.2" stroke-dasharray="4 3" />
-          <rect x="${s.x + 10}" y="${s.y - 10}" width="${Math.min(s.width - 20, s.title.length * 7 + 16)}" height="18" rx="4" fill="#24201D" stroke="${subBorder}" stroke-width="1" />
+          <rect x="${s.x + 10}" y="${s.y - 10}" width="${Math.min(s.width - 20, s.title.length * 7 + 16)}" height="18" rx="4" fill="${subHeaderBg}" stroke="${subBorder}" stroke-width="1" />
           <text x="${s.x + 18}" y="${s.y + 3}" fill="${terracotta}" font-family="monospace, sans-serif" font-size="9.5" font-weight="600" letter-spacing="0.5">${escapeHtml(s.title.toUpperCase())}</text>
         </g>
       `;
     }
 
+    // 6. Edge drawing with distributed ports and side routing for loop-backs
     for (let e of edges) {
       const src = nodeMap.get(e.from);
       const tgt = nodeMap.get(e.to);
@@ -3589,27 +3981,78 @@
       let x1, y1, x2, y2, cx1, cy1, cx2, cy2;
 
       if (isTD) {
-        x1 = src.x + src.width / 2;
-        y1 = src.y + src.height;
-        x2 = tgt.x + tgt.width / 2;
-        y2 = tgt.y;
+        if (e.isBackEdge || tgt.y < src.y) {
+          // Route loop-back edge gracefully around outer margin rather than slicing through center nodes
+          const goRight = (src.x + src.width / 2) >= totalWidth / 2;
+          const xSide = goRight
+            ? Math.max(totalWidth - padX + 18, Math.max(src.x + src.width, tgt.x + tgt.width) + 24)
+            : Math.min(padX - 18, Math.min(src.x, tgt.x) - 24);
 
-        const dy = Math.max(16, (y2 - y1) * 0.5);
-        cx1 = x1;
-        cy1 = y1 + dy;
-        cx2 = x2;
-        cy2 = y2 - dy;
+          x1 = goRight ? src.x + src.width : src.x;
+          y1 = src.y + src.height / 2;
+          x2 = goRight ? tgt.x + tgt.width : tgt.x;
+          y2 = tgt.y + tgt.height / 2;
+
+          cx1 = xSide;
+          cy1 = y1;
+          cx2 = xSide;
+          cy2 = y2;
+        } else {
+          // Forward edge: use distributed ports across node borders
+          const srcFrac = (e.srcPortCount && e.srcPortCount > 1)
+            ? (e.srcPortIndex + 1) / (e.srcPortCount + 1)
+            : 0.5;
+          const tgtFrac = (e.tgtPortCount && e.tgtPortCount > 1)
+            ? (e.tgtPortIndex + 1) / (e.tgtPortCount + 1)
+            : 0.5;
+
+          x1 = src.x + Math.max(12, Math.min(src.width - 12, src.width * srcFrac));
+          y1 = src.y + src.height;
+          x2 = tgt.x + Math.max(12, Math.min(tgt.width - 12, tgt.width * tgtFrac));
+          y2 = tgt.y;
+
+          const dy = Math.max(18, Math.min(100, (y2 - y1) * 0.5));
+          cx1 = x1;
+          cy1 = y1 + dy;
+          cx2 = x2;
+          cy2 = y2 - dy;
+        }
       } else {
-        x1 = src.x + src.width;
-        y1 = src.y + src.height / 2;
-        x2 = tgt.x;
-        y2 = tgt.y + tgt.height / 2;
+        // LR layout
+        if (e.isBackEdge || tgt.x < src.x) {
+          const goBottom = (src.y + src.height / 2) >= totalHeight / 2;
+          const ySide = goBottom
+            ? Math.max(totalHeight - padY + 16, Math.max(src.y + src.height, tgt.y + tgt.height) + 20)
+            : Math.min(padY - 16, Math.min(src.y, tgt.y) - 20);
 
-        const dx = Math.max(16, (x2 - x1) * 0.5);
-        cx1 = x1 + dx;
-        cy1 = y1;
-        cx2 = x2 - dx;
-        cy2 = y2;
+          x1 = src.x + src.width / 2;
+          y1 = goBottom ? src.y + src.height : src.y;
+          x2 = tgt.x + tgt.width / 2;
+          y2 = goBottom ? tgt.y + tgt.height : tgt.y;
+
+          cx1 = x1;
+          cy1 = ySide;
+          cx2 = x2;
+          cy2 = ySide;
+        } else {
+          const srcFrac = (e.srcPortCount && e.srcPortCount > 1)
+            ? (e.srcPortIndex + 1) / (e.srcPortCount + 1)
+            : 0.5;
+          const tgtFrac = (e.tgtPortCount && e.tgtPortCount > 1)
+            ? (e.tgtPortIndex + 1) / (e.tgtPortCount + 1)
+            : 0.5;
+
+          x1 = src.x + src.width;
+          y1 = src.y + Math.max(10, Math.min(src.height - 10, src.height * srcFrac));
+          x2 = tgt.x;
+          y2 = tgt.y + Math.max(10, Math.min(tgt.height - 10, tgt.height * tgtFrac));
+
+          const dx = Math.max(18, (x2 - x1) * 0.5);
+          cx1 = x1 + dx;
+          cy1 = y1;
+          cx2 = x2 - dx;
+          cy2 = y2;
+        }
       }
 
       const strokeDash = e.style === 'dashed' ? 'stroke-dasharray="4 3"' : '';
@@ -3624,42 +4067,59 @@
       if (e.label) {
         const midX = (x1 + x2) / 2;
         const midY = (y1 + y2) / 2;
-        const lblW = Math.max(38, e.label.length * 6.5 + 12);
+        const lblW = Math.max(34, e.label.length * 6.6 + 14);
+        const lblH = 17;
         svgContent += `
-          <rect x="${midX - lblW / 2}" y="${midY - 9}" width="${lblW}" height="17" rx="4" fill="#1C1917" stroke="rgba(204, 107, 73, 0.4)" stroke-width="1" />
-          <text x="${midX}" y="${midY + 3}" text-anchor="middle" fill="#E8B4A2" font-family="sans-serif" font-size="9" font-weight="500">${escapeHtml(e.label)}</text>
+          <rect x="${midX - lblW / 2}" y="${midY - lblH / 2}" width="${lblW}" height="${lblH}" rx="4" fill="${lblFill}" stroke="${lblStroke}" stroke-width="1" />
+          <text x="${midX}" y="${midY + 3.5}" text-anchor="middle" fill="${lblText}" font-family="sans-serif" font-size="8.5" font-weight="500">${escapeHtml(e.label)}</text>
         `;
       }
       svgContent += `</g>`;
     }
 
+    // 7. Node rendering with multi-line centered text
     for (let n of nodeList) {
       let shapeSvg = '';
-      const rx = n.shape === 'rounded' ? 16 : n.shape === 'stadium' ? 20 : 6;
+      const rx = n.shape === 'rounded' ? 14 : n.shape === 'stadium' ? 20 : 6;
+      const glowFilter = isVscodeNative ? 'none' : 'url(#clay-glow)';
 
       if (n.shape === 'cylinder') {
         shapeSvg = `
-          <path d="M ${n.x} ${n.y + 10} C ${n.x} ${n.y}, ${n.x + n.width} ${n.y}, ${n.x + n.width} ${n.y + 10} L ${n.x + n.width} ${n.y + n.height - 8} C ${n.x + n.width} ${n.y + n.height + 2}, ${n.x} ${n.y + n.height + 2}, ${n.x} ${n.y + n.height - 8} Z" fill="${nodeBg}" stroke="${nodeBorder}" stroke-width="1.3" filter="url(#clay-glow)" />
+          <path d="M ${n.x} ${n.y + 10} C ${n.x} ${n.y}, ${n.x + n.width} ${n.y}, ${n.x + n.width} ${n.y + 10} L ${n.x + n.width} ${n.y + n.height - 8} C ${n.x + n.width} ${n.y + n.height + 2}, ${n.x} ${n.y + n.height + 2}, ${n.x} ${n.y + n.height - 8} Z" fill="${nodeBg}" stroke="${nodeBorder}" stroke-width="1.3" filter="${glowFilter}" />
           <path d="M ${n.x} ${n.y + 10} C ${n.x} ${n.y + 18}, ${n.x + n.width} ${n.y + 18}, ${n.x + n.width} ${n.y + 10}" fill="none" stroke="${nodeBorder}" stroke-width="1.1" />
         `;
       } else if (n.shape === 'diamond') {
         const cx = n.x + n.width / 2;
         const cy = n.y + n.height / 2;
-        shapeSvg = `<polygon points="${cx},${n.y} ${n.x + n.width},${cy} ${cx},${n.y + n.height} ${n.x},${cy}" fill="${nodeBg}" stroke="${nodeBorder}" stroke-width="1.3" filter="url(#clay-glow)" />`;
+        shapeSvg = `<polygon points="${cx},${n.y} ${n.x + n.width},${cy} ${cx},${n.y + n.height} ${n.x},${cy}" fill="${nodeBg}" stroke="${nodeBorder}" stroke-width="1.3" filter="${glowFilter}" />`;
       } else {
-        shapeSvg = `<rect x="${n.x}" y="${n.y}" width="${n.width}" height="${n.height}" rx="${rx}" fill="${nodeBg}" stroke="${nodeBorder}" stroke-width="1.3" filter="url(#clay-glow)" />`;
+        shapeSvg = `<rect x="${n.x}" y="${n.y}" width="${n.width}" height="${n.height}" rx="${rx}" fill="${nodeBg}" stroke="${nodeBorder}" stroke-width="1.3" filter="${glowFilter}" />`;
       }
 
-      const textY = n.y + n.height / 2 + 3.5;
+      const numLines = (n.lines && n.lines.length) || 1;
+      const lineHeight = 13.5;
+      const startTextY = (n.y + n.height / 2) - ((numLines - 1) * lineHeight) / 2 + 3.5;
+      let textTspans = '';
+      if (n.lines && n.lines.length > 0) {
+        n.lines.forEach((l, idx) => {
+          const dy = idx === 0 ? 0 : lineHeight;
+          textTspans += `<tspan x="${n.x + n.width / 2}" dy="${dy}">${escapeHtml(l)}</tspan>`;
+        });
+      } else {
+        textTspans = `<tspan x="${n.x + n.width / 2}">${escapeHtml(n.label)}</tspan>`;
+      }
+
       svgContent += `
         <g class="mermaid-node-item" data-node-id="${escapeHtml(n.id)}" style="cursor: default;">
           ${shapeSvg}
-          <text x="${n.x + n.width / 2}" y="${textY}" text-anchor="middle" fill="${nodeText}" font-family="Outfit, -apple-system, sans-serif" font-size="10.5" font-weight="500">${escapeHtml(n.label)}</text>
+          <text x="${n.x + n.width / 2}" y="${startTextY}" text-anchor="middle" fill="${nodeText}" font-family="Outfit, -apple-system, sans-serif" font-size="10" font-weight="500">
+            ${textTspans}
+          </text>
         </g>
       `;
     }
 
-    const finalWidth = Math.max(300, totalWidth);
+    const finalWidth = Math.max(340, totalWidth);
     const finalHeight = Math.max(140, totalHeight);
 
     return `
@@ -3727,7 +4187,7 @@
             <button type="button" class="btn-mermaid-action btn-mermaid-copy-code" title="Copy Mermaid text">Copy</button>
           </div>
         </div>
-        <div class="mermaid-diagram-viewport" tabindex="0" title="Click and drag to pan, or use scrollbars">
+        <div class="mermaid-diagram-viewport" tabindex="0" title="Click and drag to pan" style="scrollbar-width: none; -ms-overflow-style: none;">
           <div class="mermaid-viewport-inner">
             <div class="mermaid-diagram-canvas" data-zoom="1.0" data-base-width="${baseW}" data-base-height="${baseH}" style="width: ${baseW}px; height: ${baseH}px; min-width: ${baseW}px;">
               ${svg}
@@ -4604,6 +5064,9 @@
           if (msg.line !== undefined) {
             activeEditorCursorLine = msg.line;
           }
+          if (msg.content !== undefined) {
+            activeEditorContent = msg.content;
+          }
           if (detectedSystem) applySystemInfo(detectedSystem);
         }
         break;
@@ -4615,7 +5078,49 @@
         if (msg.file) {
           activeEditorFile = msg.file;
         }
+        if (msg.content !== undefined) {
+          activeEditorContent = msg.content;
+        }
         break;
+
+      case 'activeFileContentChanged':
+        if (msg.file && msg.file === activeEditorFile && msg.content !== undefined) {
+          activeEditorContent = msg.content;
+        }
+        break;
+
+      case 'fileSavedAndSynced': {
+        const fname = msg.filename || (msg.file || '').split(/[\\/]/).pop() || 'File';
+        const linesInfo = msg.lines ? ` (${msg.lines} lines)` : '';
+        showToast(`AST Synced: ${fname}${linesInfo}`, 'info', 1800);
+        const crumb = document.getElementById('crumb-status');
+        if (crumb) {
+          const originalHtml = crumb.innerHTML;
+          crumb.innerHTML = '<span class="pill-dot" style="background:#4E9F3D;"></span>Synced';
+          setTimeout(() => { crumb.innerHTML = originalHtml; }, 1800);
+        }
+        break;
+      }
+
+      case 'fileDeletedAndPurged': {
+        const fname = msg.filename || (msg.file || '').split(/[\\/]/).pop() || 'File';
+        showToast(`AST Purged: ${fname}`, 'info', 1800);
+        break;
+      }
+
+      case 'cloudApiKeyLoaded': {
+        if (inputApiKey) {
+          if (msg.hasKey) {
+            inputApiKey.placeholder = `Saved in OS Keychain (${msg.maskedKey || '••••••••'})`;
+            inputApiKey.dataset.hasKey = 'true';
+            inputApiKey.value = '';
+          } else {
+            inputApiKey.placeholder = 'Enter ollama.com API key (e.g. sk_...)';
+            inputApiKey.dataset.hasKey = 'false';
+          }
+        }
+        break;
+      }
 
       case 'renderMermaid':
         if (mermaidCode) {
@@ -5510,7 +6015,31 @@
     try {
       localStorage.setItem('clay-theme', theme);
     } catch (e) { }
+
+    // Re-render any visible mermaid diagrams to adapt to light / dark mode immediately
+    refreshAllMermaidDiagrams();
   }
+
+  // MutationObserver to automatically re-render diagrams whenever VS Code or CLAY switches theme
+  let themeObserverDebounce = null;
+  const themeObserver = new MutationObserver((mutations) => {
+    let shouldRefresh = false;
+    for (const m of mutations) {
+      if (m.type === 'attributes' && (m.attributeName === 'class' || m.attributeName === 'data-vscode-theme-kind' || m.attributeName === 'style')) {
+        shouldRefresh = true;
+        break;
+      }
+    }
+    if (shouldRefresh) {
+      if (themeObserverDebounce) clearTimeout(themeObserverDebounce);
+      themeObserverDebounce = setTimeout(() => {
+        refreshAllMermaidDiagrams();
+      }, 50);
+    }
+  });
+  try {
+    themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'data-vscode-theme-kind', 'style'] });
+  } catch (e) { }
 
   if (btnThemeToggle) {
     btnThemeToggle.addEventListener('click', () => {

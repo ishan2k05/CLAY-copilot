@@ -33,7 +33,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this._view?.webview.postMessage({
                     command: 'activeFileChanged',
                     file: editor.document.uri.fsPath,
-                    line: cursorLine
+                    line: cursorLine,
+                    content: editor.document.getText()
                 });
             }
         });
@@ -44,8 +45,50 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this._view?.webview.postMessage({
                     command: 'cursorPositionChanged',
                     file: event.textEditor.document.uri.fsPath,
-                    line: cursorLine
+                    line: cursorLine,
+                    content: event.textEditor.document.getText()
                 });
+            }
+        });
+
+        vscode.workspace.onDidChangeTextDocument((event) => {
+            if (this._lastActiveDocument && event.document.uri.fsPath === this._lastActiveDocument.uri.fsPath && event.document.uri.scheme === 'file') {
+                this._view?.webview.postMessage({
+                    command: 'activeFileContentChanged',
+                    file: event.document.uri.fsPath,
+                    content: event.document.getText()
+                });
+            }
+        });
+
+        // Domain 2: Incremental single-file AST reindex on file save
+        vscode.workspace.onDidSaveTextDocument(async (document) => {
+            if (document.uri.scheme === 'file') {
+                const filePath = document.uri.fsPath;
+                const content = document.getText();
+                const syncRes = await this._backendClient.syncFile(filePath, content, 'changed');
+                if (syncRes && syncRes.status === 'synced') {
+                    this._view?.webview.postMessage({
+                        command: 'fileSavedAndSynced',
+                        file: filePath,
+                        filename: path.basename(filePath),
+                        lines: syncRes.lines !== undefined ? syncRes.lines : document.lineCount
+                    });
+                }
+            }
+        });
+
+        // Domain 2: Purge deleted file symbols from SQLite AST graph & vector index
+        vscode.workspace.onDidDeleteFiles(async (event) => {
+            for (const fileUri of event.files) {
+                if (fileUri.scheme === 'file') {
+                    await this._backendClient.syncFile(fileUri.fsPath, '', 'deleted');
+                    this._view?.webview.postMessage({
+                        command: 'fileDeletedAndPurged',
+                        file: fileUri.fsPath,
+                        filename: path.basename(fileUri.fsPath)
+                    });
+                }
             }
         });
 
@@ -57,7 +100,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this._view?.webview.postMessage({
                         command: 'activeFileChanged',
                         file: this._lastActiveDocument.uri.fsPath,
-                        line: cursorLine
+                        line: cursorLine,
+                        content: this._lastActiveDocument.getText()
                     });
                 }
             }
@@ -99,6 +143,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     line: cursorLine
                 });
             }
+
+            // Domain 5: Load encrypted secret from OS Keychain (SecretStorage)
+            const SECRET_KEY_NAME = 'clay_cloud_api_key';
+            this._context?.secrets.get(SECRET_KEY_NAME).then(async (storedKey) => {
+                const hasKey = !!(storedKey && storedKey.trim());
+                const cleanKey = hasKey ? storedKey!.trim() : '';
+                const maskedKey = cleanKey.length > 8
+                    ? `${cleanKey.slice(0, 4)}••••••••${cleanKey.slice(-4)}`
+                    : (cleanKey ? '••••••••' : '');
+                
+                if (hasKey) {
+                    await this._backendClient.updateSettings({ api_key: cleanKey } as any);
+                }
+
+                this._view?.webview.postMessage({
+                    command: 'cloudApiKeyLoaded',
+                    hasKey: hasKey,
+                    maskedKey: maskedKey
+                });
+            }).catch(() => {});
         }, 300);
 
         // Handle messages from Webview
@@ -183,12 +247,32 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 case 'saveSettings': {
-                    const res = await this._backendClient.updateSettings(data.settings);
+                    const s = data.settings || {};
+                    const SECRET_KEY_NAME = 'clay_cloud_api_key';
+                    if (s.api_key !== undefined) {
+                        const rawKey = typeof s.api_key === 'string' ? s.api_key.trim() : '';
+                        if (rawKey && !rawKey.includes('••••')) {
+                            await this._context?.secrets.store(SECRET_KEY_NAME, rawKey);
+                        } else if (rawKey === '') {
+                            await this._context?.secrets.delete(SECRET_KEY_NAME);
+                        }
+                    }
+                    const activeKey = (await this._context?.secrets.get(SECRET_KEY_NAME)) || '';
+                    const backendPayload = { ...s, api_key: activeKey };
+                    const res = await this._backendClient.updateSettings(backendPayload);
                     this._view?.webview.postMessage({
                         command: 'settingsSaved',
                         result: res
                     });
-                    vscode.window.showInformationMessage(`CLAY Copilot: Active model set to ${data.settings.model || 'default'}`);
+                    const maskedKey = activeKey.length > 8
+                        ? `${activeKey.slice(0, 4)}••••••••${activeKey.slice(-4)}`
+                        : (activeKey ? '••••••••' : '');
+                    this._view?.webview.postMessage({
+                        command: 'cloudApiKeyLoaded',
+                        hasKey: !!activeKey,
+                        maskedKey: maskedKey
+                    });
+                    vscode.window.showInformationMessage(`CLAY Copilot: Settings saved. Model: ${data.settings.model || 'default'}`);
                     break;
                 }
                 case 'applyPatch': {
@@ -423,6 +507,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const activeEditor = vscode.window.activeTextEditor;
                     const activeFile = data.active_file || (activeEditor?.document?.uri?.scheme === 'file' ? activeEditor.document.uri.fsPath : undefined);
                     const cursorLine = data.cursor_line !== undefined ? data.cursor_line : (activeEditor?.selection?.active?.line !== undefined ? activeEditor.selection.active.line + 1 : undefined);
+                    const activeFileContent = data.active_file_content || (activeEditor?.document?.uri?.scheme === 'file' ? activeEditor.document.getText() : (this._lastActiveDocument ? this._lastActiveDocument.getText() : undefined));
                     const res = await this._backendClient.executeAgentStep(
                         data.step_id,
                         data.goal,
@@ -431,7 +516,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         cursorLine,
                         data.target_file,
                         data.step_action,
-                        data.total_steps
+                        data.total_steps,
+                        activeFileContent
                     );
                     this._view?.webview.postMessage({
                         command: 'agentStepResult',

@@ -408,6 +408,33 @@ class TestSurgicalDiffAndMerger(unittest.TestCase):
         ast.parse(repaired)
         self.assertIn("from typing import List", repaired)
 
+    def test_single_line_print_replacement(self):
+        orig_lines = ['print ( " hello " )']
+        generated = '```python\nprint("human")\n```'
+        diff = PatchEngine.build_surgical_diff(orig_lines, generated, "app.py")
+        self.assertIn('-print ( " hello " )', diff)
+        self.assertIn('+print("human")', diff)
+        valid, healed, err = PatchEngine.validate_and_heal_diff(orig_lines, diff, "app.py")
+        self.assertTrue(valid)
+
+    def test_single_statement_with_header_comment(self):
+        orig_lines = ['print ( " hello " )']
+        generated = '```python\n# app.py\nprint("human")\n```'
+        diff = PatchEngine.build_surgical_diff(orig_lines, generated, "app.py")
+        self.assertIn('-print ( " hello " )', diff)
+        self.assertIn('+print("human")', diff)
+        valid, healed, err = PatchEngine.validate_and_heal_diff(orig_lines, diff, "app.py")
+        self.assertTrue(valid)
+
+    def test_multi_line_print_replacement_with_cursor(self):
+        orig_lines = ['# header', 'print ( " hello " )', '# footer']
+        generated = '```python\nprint("human")\n```'
+        diff = PatchEngine.build_surgical_diff(orig_lines, generated, "app.py", preferred_line=2)
+        self.assertIn('-print ( " hello " )', diff)
+        self.assertIn('+print("human")', diff)
+        valid, healed, err = PatchEngine.validate_and_heal_diff(orig_lines, diff, "app.py")
+        self.assertTrue(valid)
+
 if __name__ == "__main__":
     unittest.main()
 

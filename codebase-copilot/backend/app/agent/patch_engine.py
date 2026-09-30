@@ -141,6 +141,15 @@ class SurgicalDiffBuilder:
             return None
 
         snip_lines = snippet.strip().splitlines()
+        # Strip leading file-name comment if orig_lines doesn't start with it
+        if snip_lines and re.match(r"^(?:#|//|/\*)\s*[A-Za-z0-9_\-./\\]+\.[a-zA-Z0-9]+", snip_lines[0].strip()):
+            if not (orig_lines and orig_lines[0].strip() == snip_lines[0].strip()):
+                snip_lines = snip_lines[1:]
+                while snip_lines and not snip_lines[0].strip():
+                    snip_lines = snip_lines[1:]
+        if not snip_lines:
+            return None
+
         first_line = snip_lines[0].strip()
 
         # Case A: Function definition across Python, JS, TS, Rust, Go, C-family
@@ -274,33 +283,50 @@ class SurgicalDiffBuilder:
                 return res_lines
 
         # Case D: Rolling fuzzy similarity match for short snippets (HTML, CSS, JSON, statements, any language)
-        if len(snip_lines) <= 10 and len(orig_lines) > len(snip_lines):
+        if len(snip_lines) <= 10:
             target_str = "\n".join(l.strip() for l in snip_lines if l.strip())
-            w_len = len(snip_lines)
-            best_ratio = 0.0
-            best_idx = -1
-            for cand in range(len(orig_lines) - w_len + 1):
-                cand_str = "\n".join(l.strip() for l in orig_lines[cand : cand + w_len] if l.strip())
-                ratio = difflib.SequenceMatcher(None, target_str, cand_str).ratio()
-                if ratio > best_ratio and ratio >= 0.50:
-                    best_ratio = ratio
-                    best_idx = cand
-            if best_idx != -1:
-                orig_indent = orig_lines[best_idx][:len(orig_lines[best_idx]) - len(orig_lines[best_idx].lstrip())]
-                snip_indent = snip_lines[0][:len(snip_lines[0]) - len(snip_lines[0].lstrip())]
-                delta = len(orig_indent) - len(snip_indent)
-                aligned = []
-                for sl in snip_lines:
-                    if not sl.strip():
-                        aligned.append("")
-                    elif delta > 0:
-                        aligned.append(" " * delta + sl)
-                    elif delta < 0:
-                        trim = min(-delta, len(sl) - len(sl.lstrip()))
-                        aligned.append(sl[trim:])
-                    else:
-                        aligned.append(sl)
-                return orig_lines[:best_idx] + aligned + orig_lines[best_idx + w_len:]
+            w_len = min(len(snip_lines), len(orig_lines))
+            if w_len > 0 and len(orig_lines) >= w_len:
+                best_ratio = 0.0
+                best_idx = -1
+                for cand in range(len(orig_lines) - w_len + 1):
+                    cand_str = "\n".join(l.strip() for l in orig_lines[cand : cand + w_len] if l.strip())
+                    ratio = difflib.SequenceMatcher(None, target_str, cand_str).ratio()
+                    # Also boost if common statement prefix (e.g. print, return, assignment)
+                    cand_first = orig_lines[cand].strip()
+                    snip_first = snip_lines[0].strip()
+                    if cand_first.split("(")[0] == snip_first.split("(")[0] and "(" in cand_first:
+                        ratio = max(ratio, 0.60)
+                    elif cand_first.split("=")[0].strip() == snip_first.split("=")[0].strip() and "=" in cand_first:
+                        ratio = max(ratio, 0.60)
+
+                    if ratio > best_ratio and ratio >= 0.35:
+                        best_ratio = ratio
+                        best_idx = cand
+                if best_idx != -1:
+                    orig_indent = orig_lines[best_idx][:len(orig_lines[best_idx]) - len(orig_lines[best_idx].lstrip())]
+                    snip_indent = snip_lines[0][:len(snip_lines[0]) - len(snip_lines[0].lstrip())]
+                    delta = len(orig_indent) - len(snip_indent)
+                    aligned = []
+                    for sl in snip_lines:
+                        if not sl.strip():
+                            aligned.append("")
+                        elif delta > 0:
+                            aligned.append(" " * delta + sl)
+                        elif delta < 0:
+                            trim = min(-delta, len(sl) - len(sl.lstrip()))
+                            aligned.append(sl[trim:])
+                        else:
+                            aligned.append(sl)
+                    return orig_lines[:best_idx] + aligned + orig_lines[best_idx + w_len:]
+
+        # Case E: For small files (<= 5 lines), replace directly if snippet length matches or is single statement
+        if len(orig_lines) <= 5 and len(snip_lines) <= 5:
+            if len(orig_lines) == 1:
+                return snip_lines
+            if preferred_line is not None and 1 <= preferred_line <= len(orig_lines):
+                p_idx = preferred_line - 1
+                return orig_lines[:p_idx] + snip_lines + orig_lines[p_idx + 1:]
 
         return None
 
@@ -353,18 +379,24 @@ class SurgicalDiffBuilder:
 
         # 2. Check for explicit unified diff block
         diff_text = ""
-        diff_match = re.search(r"```(?:diff|patch)?\s*\n([\s\S]*?@@[\s\S]*?)```", generated_text, re.IGNORECASE)
+        diff_match = re.search(r"```(?:diff|patch)\s*\n([\s\S]*?)```", generated_text, re.IGNORECASE)
         if diff_match:
             diff_text = diff_match.group(1).strip()
+        elif re.search(r"```[a-zA-Z0-9_+-]*\s*\n([\s\S]*?@@[\s\S]*?)```", generated_text):
+            diff_text = re.search(r"```[a-zA-Z0-9_+-]*\s*\n([\s\S]*?@@[\s\S]*?)```", generated_text).group(1).strip()
         else:
-            raw_diff = re.search(r"(--- (?:a\/|\/dev\/null)[^\n]+\n\+\+\+ (?:b\/|[^\n]+)[^\n]*\n@@[\s\S]*?)(?:```|$)", generated_text)
+            raw_diff = re.search(r"((?:--- (?:a\/|\/dev\/null)[^\n]+\n\+\+\+ (?:b\/|[^\n]+)[^\n]*\n)?@@[\s\S]*?)(?:```|$)", generated_text)
             if raw_diff:
                 diff_text = raw_diff.group(1).strip()
+            elif re.search(r"^--- (?:a\/|\/dev\/null)[^\n]+\n\+\+\+ (?:b\/|[^\n]+)", generated_text, re.MULTILINE):
+                raw_diff2 = re.search(r"(--- (?:a\/|\/dev\/null)[^\n]+\n\+\+\+ (?:b\/|[^\n]+)[\s\S]*?)(?:```|$)", generated_text)
+                if raw_diff2:
+                    diff_text = raw_diff2.group(1).strip()
 
         if diff_text:
             try:
                 test_applied = PatchEngine._apply_unified_diff(orig_lines, diff_text.splitlines(), preferred_line=preferred_line)
-                if test_applied != orig_lines:
+                if test_applied and test_applied != orig_lines:
                     diff_iter = difflib.unified_diff(
                         orig_lines,
                         test_applied,
@@ -375,7 +407,8 @@ class SurgicalDiffBuilder:
                     return "\n".join(diff_iter).strip()
             except Exception:
                 pass
-            return diff_text
+            if any(l.startswith(("+", "-")) and not l.startswith(("+++", "---")) for l in diff_text.splitlines()):
+                return diff_text
 
         # 3. Check for code block (any language: python, js, ts, go, rust, c, html, css, etc.)
         code_body = None
@@ -384,13 +417,31 @@ class SurgicalDiffBuilder:
             code_body = code_match.group(1).strip()
         elif not generated_text.strip().startswith("I'm unable") and not generated_text.strip().startswith("I cannot"):
             raw_code = generated_text.strip()
-            if raw_code.startswith(("def ", "class ", "import ", "from ", "#!", "async def ", "function ", "const ", "let ", "var ", "func ", "fn ", "pub ", "interface ", "export ", "type ", "struct ", "package ", "<", "/*", "//", '"""', "'''")):
+            prefixes = ("def ", "class ", "import ", "from ", "#!", "async def ", "function ", "const ", "let ", "var ", "func ", "fn ", "pub ", "interface ", "export ", "type ", "struct ", "package ", "<", "/*", "//", '"""', "'''", "print", "return ", "console.", "echo ")
+            if any(raw_code.startswith(p) for p in prefixes):
                 code_body = raw_code
             elif "=" in raw_code and len(raw_code.splitlines()) <= 5:
                 code_body = raw_code
-
+            elif len(raw_code.splitlines()) <= 5 and not any(raw_code.lower().startswith(p) for p in ("here is", "sure", "i have", "the following", "note:", "sorry", "i cannot")):
+                code_body = raw_code
 
         if code_body:
+            # Check if code_body is actually a diff inside a generic code fence
+            if any(l.startswith(("@@", "--- a/", "+++ b/")) for l in code_body.splitlines()):
+                try:
+                    test_applied = PatchEngine._apply_unified_diff(orig_lines, code_body.splitlines(), preferred_line=preferred_line)
+                    if test_applied and test_applied != orig_lines:
+                        diff_iter = difflib.unified_diff(
+                            orig_lines,
+                            test_applied,
+                            fromfile=f"a/{filename}",
+                            tofile=f"b/{filename}",
+                            lineterm=""
+                        )
+                        return "\n".join(diff_iter).strip()
+                except Exception:
+                    pass
+
             # 3a. Try surgical snippet splicing first
             spliced = cls.splice_snippet_into_lines(orig_lines, code_body)
             if spliced and spliced != orig_lines:
@@ -404,7 +455,6 @@ class SurgicalDiffBuilder:
                 return "\n".join(diff_iter).strip()
 
             # 3b. Fall back to standard difflib against orig_lines
-            # This GUARANTEES that if 1 line changed in 150 lines, ONLY 1 line is diffed!
             code_lines = code_body.splitlines()
             diff_iter = difflib.unified_diff(
                 orig_lines,

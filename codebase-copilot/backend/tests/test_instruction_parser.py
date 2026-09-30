@@ -9,7 +9,6 @@ from backend.app.agent.instruction_parser import (
     TopicDomainResolver,
     normalize_prompt_text,
 )
-from backend.app.agent.algorithm_library import AlgorithmCodeLibrary
 from backend.app.agent.patch_engine import PatchEngine
 
 class TestInstructionParserAndSmarterContext(unittest.TestCase):
@@ -407,31 +406,6 @@ class TestInstructionParserAndSmarterContext(unittest.TestCase):
         # Ensure all 5 titles are completely unique
         titles = [s["title"] for s in plan["steps"]]
         self.assertEqual(len(titles), len(set(titles)))
-
-    def test_algorithm_code_library_and_stub_prevention(self):
-        # Verify stub detection
-        dummy_stub = (
-            'def main():\n'
-            '    """Entry point for the test script."""\n'
-            '    print("Hello, World!")\n'
-            '\n'
-            'if __name__ == "__main__":\n'
-            '    main()'
-        )
-        self.assertTrue(AlgorithmCodeLibrary.is_stub_or_trivial(dummy_stub))
-        self.assertTrue(AlgorithmCodeLibrary.is_stub_or_trivial(""))
-        self.assertTrue(AlgorithmCodeLibrary.is_stub_or_trivial("pass"))
-
-        # Verify reference implementation retrieval
-        ref_code = AlgorithmCodeLibrary.get_reference_implementation(
-            "write me a sophesticated adn large code for astar algo in test.py",
-            "test.py"
-        )
-        self.assertIsNotNone(ref_code)
-        self.assertIn("class AStarPlanner", ref_code)
-        self.assertIn("def heuristic", ref_code)
-        self.assertIn("def find_path", ref_code)
-        self.assertFalse(AlgorithmCodeLibrary.is_stub_or_trivial(ref_code))
 
 if __name__ == "__main__":
     unittest.main()
