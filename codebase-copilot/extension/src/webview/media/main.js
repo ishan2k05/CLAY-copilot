@@ -43,6 +43,57 @@
   let activeEditorCursorLine = null;
   let activeEditorContent = '';
 
+  function isFileInCurrentRepo(filePath) {
+    if (!filePath || typeof filePath !== 'string') return false;
+    const inputEl = document.getElementById('input-repo-path');
+    const inputVal = inputEl ? inputEl.value.trim() : '';
+    const repoRoot = (currentRepoPath && currentRepoPath !== '.' ? currentRepoPath : (inputVal && inputVal !== '.' ? inputVal : '')).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+    if (!repoRoot) return false;
+    const normalized = filePath.replace(/\\/g, '/').toLowerCase();
+    return normalized.startsWith(repoRoot + '/') || normalized === repoRoot;
+  }
+
+  function getActiveEditorFileInRepo() {
+    if (isFileInCurrentRepo(activeEditorFile)) {
+      return activeEditorFile;
+    }
+    return null;
+  }
+
+  function getActiveEditorContentInRepo() {
+    if (isFileInCurrentRepo(activeEditorFile)) {
+      return activeEditorContent;
+    }
+    return null;
+  }
+
+  function getExplicitFileFromGoal(goalText) {
+    if (!goalText || typeof goalText !== 'string') return null;
+    const trimmed = goalText.trim();
+    // Check filename patterns: e.g. app.py, models/user.py, test.ts
+    const fileMatches = trimmed.match(/(?:[a-zA-Z0-9_\-\.\/\\\:]+\.[a-zA-Z0-9_\-]+)/g);
+    if (fileMatches && fileMatches.length > 0) {
+      for (let i = fileMatches.length - 1; i >= 0; i--) {
+        let token = fileMatches[i].trim().replace(/^['"`<(\[]+|['"`>)\]]+$/g, '');
+        if (token && token.includes('.') && !token.startsWith('.') && !/^(https?:\/\/|www\.)/i.test(token)) {
+          const ext = token.split('.').pop().toLowerCase();
+          if (ext && /^[a-zA-Z0-9]{1,10}$/.test(ext) && !['com', 'org', 'net', 'io', 'ai'].includes(ext)) {
+            return token.replace(/\\/g, '/');
+          }
+        }
+      }
+    }
+    if (currentRepoFilesList && currentRepoFilesList.length > 0) {
+      const lower = trimmed.toLowerCase();
+      for (const f of currentRepoFilesList) {
+        if (f.name && lower.includes(f.name.toLowerCase())) {
+          return f.name;
+        }
+      }
+    }
+    return null;
+  }
+
   function extractDiffFilename(diffText) {
     if (!diffText) return null;
     const plusMatch = diffText.match(/\+\+\+\s+(?:b\/)?([^\s\n\r]+)/);
@@ -439,18 +490,13 @@
       const repoRoot = (currentRepoPath && currentRepoPath !== '.' ? currentRepoPath : (inputVal && inputVal !== '.' ? inputVal : '')).replace(/\\/g, '/').replace(/\/+$/, '');
 
       // 1. Check if user has an active file open in the editor within the repo
-      if (typeof activeEditorFile === 'string' && activeEditorFile) {
-        const activeNorm = activeEditorFile.replace(/\\/g, '/');
+      const repoActive = getActiveEditorFileInRepo();
+      if (repoActive) {
+        const activeNorm = repoActive.replace(/\\/g, '/');
         if (repoRoot && activeNorm.startsWith(repoRoot)) {
           let rel = activeNorm.slice(repoRoot.length).replace(/^\/+/, '');
           if (rel.endsWith('.py')) {
             return `${py} -m py_compile ${rel}`;
-          }
-        } else {
-          const parts = activeNorm.split('/');
-          const base = parts[parts.length - 1];
-          if (base.endsWith('.py')) {
-            return `${py} -m py_compile ${base}`;
           }
         }
       }
@@ -1416,16 +1462,46 @@
             }
           }
 
-          targetFilename = pathInComment || getPrimaryRepoFile(lastUserQuery || fullText);
+          const activeFile = getActiveEditorFileInRepo();
+          const activeContent = getActiveEditorContentInRepo();
+          const repoActiveFilename = activeFile ? activeFile.replace(/\\/g, '/').split('/').pop() : null;
+          targetFilename = pathInComment || getPrimaryRepoFile(lastUserQuery || fullText) || repoActiveFilename;
 
-          // If code was generated for a requested new file or creation prompt, construct and stage the new-file unified diff
+          // If code was generated for a requested new file or creation prompt, or file is empty, construct and stage creation diff
           const isCreationIntent = /\b(create|new\s+file|put\s+.*in|write\s+.*in|save\s+as|in\s+a\s+new\s+file)\b/i.test(lastUserQuery || '');
           const fileExists = currentRepoFilesList && currentRepoFilesList.some(f => f.name && f.name.toLowerCase() === (targetFilename || '').toLowerCase());
-          if (detectedCode && (isCreationIntent || !fileExists) && targetFilename) {
+          const isActiveEmpty = (activeFile && isSameFileReference(activeFile, targetFilename) && (!activeContent || !activeContent.trim()));
+
+          if (detectedCode && (isCreationIntent || !fileExists || isActiveEmpty) && targetFilename) {
             const rawLines = detectedCode.split('\n');
             const newFileDiff = `--- /dev/null\n+++ b/${targetFilename}\n@@ -0,0 +1,${rawLines.length} @@\n` + rawLines.map(l => `+${l}`).join('\n');
             detectedDiff = newFileDiff;
             stageDiff(targetFilename, newFileDiff);
+          } else if (detectedCode && targetFilename) {
+            // Asynchronously resolve diff against existing file on disk or active editor
+            (async () => {
+              try {
+                const compRes = await fetch(`${BACKEND_URL}/api/agent/compute-diff`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    target_file: targetFilename,
+                    code_or_snippet: detectedCode,
+                    workspace_path: currentRepoPath,
+                    active_file_content: (activeFile && isSameFileReference(activeFile, targetFilename)) ? activeContent : undefined
+                  })
+                });
+                if (compRes.ok) {
+                  const compData = await compRes.json();
+                  if (compData && compData.diff) {
+                    detectedDiff = compData.diff;
+                    stageDiff(targetFilename, detectedDiff);
+                  }
+                }
+              } catch (e) {
+                console.warn('[compute-diff in onStreamFinished failed]', e);
+              }
+            })();
           }
         }
       }
@@ -1457,20 +1533,19 @@
             card.appendChild(actionDiv);
           }
 
-          const capturedDiff = detectedDiff;
           const capturedCode = detectedCode;
           const capturedTarget = targetFilename || getPrimaryRepoFile(lastUserQuery || fullText);
           const capturedGoal = lastUserQuery || 'Apply generated code changes';
 
-          actionDiv.querySelector('.btn-run-in-agent').addEventListener('click', () => {
+          actionDiv.querySelector('.btn-run-in-agent').addEventListener('click', async () => {
             switchTab('agent');
             const agentTaskLabel = capturedTarget ? `Apply changes for ${capturedTarget}` : capturedGoal;
             if (agentGoalInput) {
               agentGoalInput.value = agentTaskLabel;
               resizeAgentGoalInput();
             }
-            runAgentTask({
-              pregeneratedDiff: capturedDiff,
+            await runAgentTask({
+              pregeneratedDiff: detectedDiff,
               pregeneratedCode: capturedCode,
               targetFile: capturedTarget,
               sourceGoal: capturedGoal
@@ -1811,19 +1886,27 @@
       lowerNorm.includes('production-ready') || lowerNorm.includes('advanced')
     );
 
-    // Check huge prompt or multi-file refactor (Max 5 steps)
-    const words = cleanGoal.split(/\s+/);
-    const isHuge = (
-      isAlgorithmOrComplex ||
-      words.length >= 15 ||
+    const isCreationIntent = (
+      lowerGoal.includes('create') ||
+      lowerGoal.includes('new file') ||
+      lowerGoal.includes('scaffold') ||
+      lowerGoal.includes('write me') ||
+      lowerGoal.includes('make file') ||
+      lowerGoal.includes('author') ||
+      lowerGoal.includes('generate file') ||
+      lowerGoal.includes('add file')
+    );
+
+    // Check multi-file refactor strictly (Max 5 steps) - never hijack single-file creations
+    const isHuge = !isCreationIntent && (
+      (fileMatches && fileMatches.length >= 2) ||
       lowerGoal.includes('across files') ||
       lowerGoal.includes('multiple files') ||
       lowerGoal.includes('all files') ||
-      lowerGoal.includes('refactor') ||
+      lowerGoal.includes('all modules') ||
+      lowerGoal.includes('architecture overhaul') ||
       lowerGoal.includes('overhaul') ||
-      lowerGoal.includes('architecture') ||
-      lowerGoal.includes('migrate') ||
-      (fileMatches && fileMatches.length >= 2)
+      lowerGoal.includes('migrate')
     );
 
     let steps = [];
@@ -1848,7 +1931,85 @@
         }
       ];
     }
-    // 2. Algorithm / Complex Engine / Sophisticated Large Code (5 Steps - Max)
+    // 2. Pre-generated Code or Diff from Chat (3 Steps - Instant Fast Path with AST Verification)
+    else if (isFromChat && chatPayload && (chatPayload.pregeneratedDiff || chatPayload.pregeneratedCode)) {
+      steps = [
+        {
+          id: 1,
+          action: 'scan',
+          title: `1. Correlate symbols and anchor lines in '${resolvedTarget}'`,
+          progress: `Correlating symbols in '${resolvedTarget}'...`,
+          detail: `Correlated symbols in '${resolvedTarget}'.`
+        },
+        {
+          id: 2,
+          action: 'synthesize',
+          title: `2. Apply surgical changes and compute unified diff for '${resolvedTarget}'`,
+          progress: `Applying verified changes from Chat for '${resolvedTarget}'...`,
+          detail: `Synthesized surgical solution for '${resolvedTarget}'.`
+        },
+        {
+          id: 3,
+          action: 'verify',
+          title: `3. Run AST syntax validation & verify zero regressions in '${resolvedTarget}'`,
+          progress: `Verifying syntax and AST integrity...`,
+          detail: `Syntax and AST verification passed. Changes ready for inspection in Diff tab.`
+        }
+      ];
+    }
+    // 3. Brand new file creation (3 Steps - Scan -> Synthesize -> Verify)
+    else if (isCreationIntent && (!fileMatches || fileMatches.length <= 1)) {
+      steps = [
+        {
+          id: 1,
+          action: 'scan',
+          title: `1. Analyze requirements & scaffold environment for '${resolvedTarget}'`,
+          progress: `Analyzing requirements for '${resolvedTarget}'...`,
+          detail: `Scaffold environment prepared for '${resolvedTarget}'.`
+        },
+        {
+          id: 2,
+          action: 'synthesize',
+          title: isFromChat ? `2. Apply generated code changes for '${resolvedTarget}'` : `2. Synthesize complete, production-ready implementation for '${resolvedTarget}'`,
+          progress: `Synthesizing '${resolvedTarget}' via ${currentModel}...`,
+          detail: `Generated complete implementation for '${resolvedTarget}'.`
+        },
+        {
+          id: 3,
+          action: 'verify',
+          title: `3. Run syntax validation, verify zero regressions & stage '${resolvedTarget}' diff`,
+          progress: `Validating syntax and staging diff...`,
+          detail: `Syntax and AST verified. Staged diff for '${resolvedTarget}' in Diff tab.`
+        }
+      ];
+    }
+    // 4. Code deletion / wipe / truncation (3 Steps)
+    else if (isDelete) {
+      steps = [
+        {
+          id: 1,
+          action: 'scan',
+          title: `1. Inspect '${resolvedTarget}' to isolate code boundaries for removal`,
+          progress: `Inspecting '${resolvedTarget}' code boundaries...`,
+          detail: `Identified deletion scope in '${resolvedTarget}'.`
+        },
+        {
+          id: 2,
+          action: 'delete',
+          title: `2. Generate clean truncation diff to remove code from '${resolvedTarget}'`,
+          progress: `Synthesizing truncation diff for '${resolvedTarget}'...`,
+          detail: `Generated clean truncation diff for '${resolvedTarget}'.`
+        },
+        {
+          id: 3,
+          action: 'verify',
+          title: `3. Validate clean file state, verify integrity & stage removal diff`,
+          progress: `Validating clean state for '${resolvedTarget}'...`,
+          detail: `Integrity verified. Staged deletion diff for '${resolvedTarget}'.`
+        }
+      ];
+    }
+    // 5. Algorithm / Complex Engine / Sophisticated Large Code (5 Steps - Max)
     else if (isAlgorithmOrComplex && !isDelete) {
       const topicTitle = topicInfo.topic;
       steps = [
@@ -1889,7 +2050,7 @@
         }
       ];
     }
-    // 3. Huge prompt / Multi-file refactor (5 Steps - Max)
+    // 6. Huge multi-file refactor (5 Steps - Max)
     else if (isHuge) {
       const targetsDesc = (fileMatches && fileMatches.length >= 2) ? fileMatches.slice(0, 3).join(', ') : resolvedTarget;
       steps = [
@@ -1930,7 +2091,7 @@
         }
       ];
     }
-    // 3. Nested folder + file creation (4 Steps)
+    // 7. Nested folder + file creation (4 Steps)
     else if (folderName && resolvedTarget) {
       steps = [
         {
@@ -1963,7 +2124,7 @@
         }
       ];
     }
-    // 4. Bug fix / Test repair / Debugging (4 Steps)
+    // 8. Bug fix / Test repair / Debugging (4 Steps)
     else if (lowerGoal.includes('fix') || lowerGoal.includes('repair') || lowerGoal.includes('debug') || lowerGoal.includes('failing') || lowerGoal.includes('traceback') || lowerGoal.includes('assertion')) {
       steps = [
         {
@@ -1993,58 +2154,6 @@
           title: `4. Execute AST validation, verify zero regressions & stage fix`,
           progress: `Verifying syntax and regressions...`,
           detail: `Syntax and AST verification passed. Fix staged in Diff tab.`
-        }
-      ];
-    }
-    // 5. Code deletion / wipe / truncation (3 Steps)
-    else if (isDelete) {
-      steps = [
-        {
-          id: 1,
-          action: 'scan',
-          title: `1. Inspect '${resolvedTarget}' to isolate code boundaries for removal`,
-          progress: `Inspecting '${resolvedTarget}' code boundaries...`,
-          detail: `Identified deletion scope in '${resolvedTarget}'.`
-        },
-        {
-          id: 2,
-          action: 'delete',
-          title: `2. Generate clean truncation diff to remove code from '${resolvedTarget}'`,
-          progress: `Synthesizing truncation diff for '${resolvedTarget}'...`,
-          detail: `Generated clean truncation diff for '${resolvedTarget}'.`
-        },
-        {
-          id: 3,
-          action: 'verify',
-          title: `3. Validate clean file state, verify integrity & stage removal diff`,
-          progress: `Validating clean state for '${resolvedTarget}'...`,
-          detail: `Integrity verified. Staged deletion diff for '${resolvedTarget}'.`
-        }
-      ];
-    }
-    // 6. Brand new file creation (3 Steps)
-    else if (lowerGoal.includes('create') || lowerGoal.includes('new file') || lowerGoal.includes('scaffold') || lowerGoal.includes('write me') || lowerGoal.includes('make file') || lowerGoal.includes('author')) {
-      steps = [
-        {
-          id: 1,
-          action: 'scan',
-          title: `1. Analyze requirements & scaffold environment for '${resolvedTarget}'`,
-          progress: `Analyzing requirements for '${resolvedTarget}'...`,
-          detail: `Scaffold environment prepared for '${resolvedTarget}'.`
-        },
-        {
-          id: 2,
-          action: 'synthesize',
-          title: isFromChat ? `2. Apply generated code changes for '${resolvedTarget}'` : `2. Synthesize complete, production-ready implementation for '${resolvedTarget}'`,
-          progress: `Synthesizing '${resolvedTarget}' via ${currentModel}...`,
-          detail: `Generated complete implementation for '${resolvedTarget}'.`
-        },
-        {
-          id: 3,
-          action: 'verify',
-          title: `3. Run syntax validation, verify zero regressions & stage '${resolvedTarget}' diff`,
-          progress: `Validating syntax and staging diff...`,
-          detail: `Syntax and AST verified. Staged diff for '${resolvedTarget}' in Diff tab.`
         }
       ];
     }
@@ -2114,25 +2223,76 @@
     appendTerminalLog(`[agent] Target Model: ${currentModel}`);
 
     // Generate dynamic execution plan
-    let plan = null;
-    try {
-      const planRes = await fetch(`${BACKEND_URL}/api/agent/plan`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          goal: goal,
-          workspace_path: currentRepoPath,
-          target_file: (chatPayload && chatPayload.targetFile) ? chatPayload.targetFile : (activeEditorFile ? activeEditorFile.replace(/\\/g, '/').split('/').pop() : undefined),
-          active_file: activeEditorFile || undefined,
-          active_file_content: activeEditorContent || undefined,
-          model_name: currentModel
-        })
-      });
-      if (planRes.ok) {
-        plan = await planRes.json();
+    const repoActiveFile = getActiveEditorFileInRepo();
+    const repoActiveContent = getActiveEditorContentInRepo();
+    const explicitGoalFile = getExplicitFileFromGoal(goal);
+    const candidateTarget = (chatPayload && chatPayload.targetFile)
+      ? chatPayload.targetFile
+      : (explicitGoalFile || (repoActiveFile ? repoActiveFile.replace(/\\/g, '/').split('/').pop() : undefined));
+
+    // Fast-path resolution for Chat code: ensure pregeneratedDiff is computed and ready BEFORE running steps
+    if (isFromChat && chatPayload && chatPayload.pregeneratedCode && !chatPayload.pregeneratedDiff) {
+      const targetToUse = candidateTarget || 'app.py';
+      appendTerminalLog(`[agent] Resolving diff for chat-generated code for '${targetToUse}'...`);
+      try {
+        const compRes = await fetch(`${BACKEND_URL}/api/agent/compute-diff`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            target_file: targetToUse,
+            code_or_snippet: chatPayload.pregeneratedCode,
+            workspace_path: currentRepoPath,
+            active_file_content: repoActiveContent || undefined
+          })
+        });
+        if (compRes.ok) {
+          const compData = await compRes.json();
+          if (compData && compData.diff) {
+            chatPayload.pregeneratedDiff = compData.diff;
+          }
+        }
+      } catch (err) {
+        console.warn('[compute-diff failed for chat pregeneratedCode]', err);
       }
-    } catch (e) {
-      console.warn('[fetch dynamic plan error]', e);
+
+      // Fallback: If backend compute-diff did not produce a diff, build unified diff from code
+      if (!chatPayload.pregeneratedDiff && chatPayload.pregeneratedCode) {
+        const codeLines = chatPayload.pregeneratedCode.split('\n');
+        if (repoActiveContent && repoActiveContent.trim()) {
+          const oldLines = repoActiveContent.split('\n');
+          chatPayload.pregeneratedDiff = `--- a/${targetToUse}\n+++ b/${targetToUse}\n@@ -1,${oldLines.length} +1,${codeLines.length} @@\n`
+            + oldLines.map(l => `-${l}`).join('\n') + '\n'
+            + codeLines.map(l => `+${l}`).join('\n');
+        } else {
+          chatPayload.pregeneratedDiff = `--- /dev/null\n+++ b/${targetToUse}\n@@ -0,0 +1,${codeLines.length} @@\n`
+            + codeLines.map(l => `+${l}`).join('\n');
+        }
+      }
+    }
+
+    let plan = null;
+    if (isFromChat && chatPayload && (chatPayload.pregeneratedDiff || chatPayload.pregeneratedCode)) {
+      plan = planExecutionTasks(goal, isFromChat, chatPayload);
+    } else {
+      try {
+        const planRes = await fetch(`${BACKEND_URL}/api/agent/plan`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            goal: goal,
+            workspace_path: currentRepoPath,
+            target_file: candidateTarget,
+            active_file: repoActiveFile || undefined,
+            active_file_content: repoActiveContent || undefined,
+            model_name: currentModel
+          })
+        });
+        if (planRes.ok) {
+          plan = await planRes.json();
+        }
+      } catch (e) {
+        console.warn('[fetch dynamic plan error]', e);
+      }
     }
 
     if (!plan || !plan.steps || plan.steps.length === 0) {
@@ -2146,7 +2306,9 @@
     appendTerminalLog(`[plan] Dynamic plan: ${totalSteps} steps created for '${goal.slice(0, 45)}'`);
 
     let effectiveGoal = goal;
-    let confirmedTargetFile = (chatPayload && chatPayload.targetFile) ? chatPayload.targetFile : (plan.target_file || (activeEditorFile ? activeEditorFile.replace(/\\/g, '/').split('/').pop() : null));
+    let confirmedTargetFile = (chatPayload && chatPayload.targetFile)
+      ? chatPayload.targetFile
+      : (explicitGoalFile || (plan && plan.target_file) || (repoActiveFile ? repoActiveFile.replace(/\\/g, '/').split('/').pop() : null) || getPrimaryRepoFile(goal));
 
     try {
       for (let i = 0; i < steps.length; i++) {
@@ -2159,8 +2321,28 @@
         const progressPct = Math.round((stepNum / (totalSteps + 1)) * 90);
         setAgentProgress(progressPct, `Step ${stepNum} of ${totalSteps}: ${currentStep.progress || currentStep.title}...`);
 
-        // Execute step with effectiveGoal (the user prompt), confirmedTargetFile, and stepAction
-        const stepRes = await executeStep(currentStep.id, effectiveGoal, confirmedTargetFile, stepAction, totalSteps);
+        let stepRes = null;
+        if (stepAction === 'synthesize' && isFromChat && chatPayload && (chatPayload.pregeneratedDiff || chatPayload.pregeneratedCode)) {
+          // Fast-path: Directly use pre-generated code/diff from Chat without redundant LLM re-generation
+          let finalChatDiff = chatPayload.pregeneratedDiff;
+          if (!finalChatDiff && chatPayload.pregeneratedCode) {
+            const rawLines = chatPayload.pregeneratedCode.split('\n');
+            finalChatDiff = `--- /dev/null\n+++ b/${confirmedTargetFile}\n@@ -0,0 +1,${rawLines.length} @@\n` + rawLines.map(l => `+${l}`).join('\n');
+            chatPayload.pregeneratedDiff = finalChatDiff;
+          }
+          stepRes = {
+            step_id: currentStep.id,
+            status: 'done',
+            target_file: confirmedTargetFile,
+            diff: finalChatDiff,
+            valid: true,
+            log: `Staged exact code from Chat directly for '${confirmedTargetFile}'.`
+          };
+          appendTerminalLog(`[fast-path] Staged exact changes from Chat for '${confirmedTargetFile}' (LLM re-query bypassed).`);
+        } else {
+          // Execute step with effectiveGoal (the user prompt), confirmedTargetFile, and stepAction
+          stepRes = await executeStep(currentStep.id, effectiveGoal, confirmedTargetFile, stepAction, totalSteps);
+        }
         if (!isAgentRunning) return;
 
         // Check ambiguity if step 1 returned multiple candidates
@@ -2253,7 +2435,70 @@
   }
 
   async function executeStep(stepId, goal, targetFile = null, stepAction = null, totalSteps = 3) {
-    const finalTarget = targetFile || (activeEditorFile ? activeEditorFile.replace(/\\/g, '/').split('/').pop() : undefined);
+    const repoActiveFile = getActiveEditorFileInRepo();
+    const repoActiveContent = getActiveEditorContentInRepo();
+    const explicitGoalFile = getExplicitFileFromGoal(goal);
+    const finalTarget = targetFile || explicitGoalFile || (repoActiveFile ? repoActiveFile.replace(/\\/g, '/').split('/').pop() : undefined) || getPrimaryRepoFile(goal);
+
+    // Step Action: Streaming synthesis route for real-time live terminal tokens
+    if (stepAction === 'synthesize') {
+      try {
+        const streamRes = await fetch(`${BACKEND_URL}/api/agent/step/stream`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            goal,
+            step_id: stepId,
+            step_action: stepAction,
+            total_steps: totalSteps,
+            workspace_path: currentRepoPath,
+            active_file: repoActiveFile || undefined,
+            active_file_content: repoActiveContent || undefined,
+            cursor_line: repoActiveFile ? activeEditorCursorLine : undefined,
+            target_file: finalTarget
+          })
+        });
+
+        if (streamRes.ok && streamRes.body) {
+          const reader = streamRes.body.getReader();
+          const decoder = new TextDecoder();
+          let rawBuffer = '';
+          let finalStepData = null;
+          appendTerminalLog(`[agent] Generating code via ${currentModel} (streaming live)...`);
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            rawBuffer += decoder.decode(value, { stream: true });
+            const lines = rawBuffer.split('\n');
+            rawBuffer = lines.pop() || '';
+
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                const dataStr = line.replace('data: ', '').trim();
+                if (dataStr === '[DONE]') continue;
+                try {
+                  const parsed = JSON.parse(dataStr);
+                  if (parsed.token) {
+                    appendTerminalLiveToken(parsed.token);
+                  }
+                  if (parsed.done) {
+                    finalStepData = parsed;
+                  }
+                } catch {}
+              }
+            }
+          }
+          if (finalStepData) {
+            appendTerminalLog('\n[agent] Code synthesis completed successfully.');
+            return finalStepData;
+          }
+        }
+      } catch (streamErr) {
+        console.warn('[agent stream synthesis error, falling back to standard step]', streamErr);
+      }
+    }
+
     try {
       const res = await fetch(`${BACKEND_URL}/api/agent/step`, {
         method: 'POST',
@@ -2264,9 +2509,9 @@
           step_action: stepAction || undefined,
           total_steps: totalSteps,
           workspace_path: currentRepoPath,
-          active_file: activeEditorFile || undefined,
-          active_file_content: activeEditorContent || undefined,
-          cursor_line: activeEditorCursorLine || undefined,
+          active_file: repoActiveFile || undefined,
+          active_file_content: repoActiveContent || undefined,
+          cursor_line: repoActiveFile ? activeEditorCursorLine : undefined,
           target_file: finalTarget
         })
       });
@@ -2288,15 +2533,15 @@
             total_steps: totalSteps,
             goal,
             workspace_path: currentRepoPath,
-            active_file: activeEditorFile || undefined,
-            active_file_content: activeEditorContent || undefined,
-            cursor_line: activeEditorCursorLine || undefined,
+            active_file: repoActiveFile || undefined,
+            active_file_content: repoActiveContent || undefined,
+            cursor_line: repoActiveFile ? activeEditorCursorLine : undefined,
             target_file: finalTarget
           });
           setTimeout(() => {
             window.removeEventListener('message', handler);
-            resolve({ log: `Step ${stepId} processed.` });
-          }, 12000);
+            resolve({ log: `Step ${stepId} processed (extension host fallback timeout reached after 90s).` });
+          }, 90000);
         });
       }
     }
@@ -2376,6 +2621,20 @@
   function appendTerminalLog(text) {
     if (terminalStream) {
       terminalStream.textContent += text + '\n';
+      terminalStream.scrollTop = terminalStream.scrollHeight;
+      try {
+        const lines = terminalStream.textContent.split('\n');
+        if (lines.length > 250) {
+          terminalStream.textContent = lines.slice(-250).join('\n');
+        }
+        localStorage.setItem('clay_terminal_logs', terminalStream.textContent);
+      } catch (e) {}
+    }
+  }
+
+  function appendTerminalLiveToken(token) {
+    if (terminalStream && token) {
+      terminalStream.textContent += token;
       terminalStream.scrollTop = terminalStream.scrollHeight;
       try {
         const lines = terminalStream.textContent.split('\n');
@@ -2593,8 +2852,269 @@
   const diffModeLabel = document.getElementById('diff-mode-label');
   const diffFileSelector = document.getElementById('diff-file-selector');
 
+  // Domain 4: 3-Way Merge Conflict Guard Elements
+  const diffConflictPill = document.getElementById('diff-conflict-pill');
+  const guardPillTitle = document.getElementById('guard-pill-title');
+  const btnGuardRebase = document.getElementById('btn-guard-rebase');
+  const btnGuardConflicts = document.getElementById('btn-guard-conflicts');
+  const btnGuardDismiss = document.getElementById('btn-guard-dismiss');
+  const conflictCountSpan = document.getElementById('conflict-count');
+
   let diffViewMode = 'unified';
   let stagedMultiFiles = [];
+
+  function computeFastHash(str) {
+    if (!str || typeof str !== 'string') return '0';
+    const normalized = str.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trimEnd();
+    let hash = 2166136261;
+    for (let i = 0; i < normalized.length; i++) {
+      hash ^= normalized.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16);
+  }
+
+  function ensureConflictGuardPill() {
+    let pill = document.getElementById('diff-conflict-pill');
+    if (!pill) {
+      const viewDiff = document.getElementById('view-diff');
+      const stagedContainer = document.getElementById('diff-staged-container');
+      if (viewDiff) {
+        pill = document.createElement('div');
+        pill.className = 'diff-conflict-guard-pill';
+        pill.id = 'diff-conflict-pill';
+        pill.style.display = 'none';
+        pill.innerHTML = `
+          <div class="guard-pill-badge">
+            <span class="guard-pulse-dot"></span>
+            <span class="guard-pill-title" id="guard-pill-title">Buffer modified in editor</span>
+          </div>
+          <div class="guard-pill-actions">
+            <button type="button" class="btn-guard-rebase" id="btn-guard-rebase" title="Recalculate line offsets and re-align diff with editor edits">
+              Auto-Rebase Diff
+            </button>
+            <button type="button" class="btn-guard-conflicts" id="btn-guard-conflicts" style="display: none;" title="Inspect conflicting line ranges">
+              View Conflicts (<span id="conflict-count">0</span>)
+            </button>
+            <button type="button" class="btn-guard-keep-mine" id="btn-guard-keep-mine" style="display: none;" title="Keep editor changes and discard agent diff">
+              Keep Mine
+            </button>
+            <button type="button" class="btn-guard-accept-agent" id="btn-guard-accept-agent" style="display: none;" title="Overwrite conflicting lines with agent code">
+              Accept Agent's
+            </button>
+            <button type="button" class="btn-guard-dismiss" id="btn-guard-dismiss" title="Dismiss warning and apply as-is">
+              Dismiss
+            </button>
+          </div>
+        `;
+        if (stagedContainer) {
+          viewDiff.insertBefore(pill, stagedContainer);
+        } else {
+          viewDiff.appendChild(pill);
+        }
+        pill.querySelector('#btn-guard-rebase')?.addEventListener('click', () => triggerAutoRebase());
+        pill.querySelector('#btn-guard-conflicts')?.addEventListener('click', () => {
+          const conflictEl = document.getElementById('diff-staged-container')?.querySelector('.diff-line-del, .diff-line-add, .diff-box');
+          if (conflictEl) conflictEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          showToast('Inspect conflicting hunk markers in diff viewer below', 'info');
+        });
+        pill.querySelector('#btn-guard-keep-mine')?.addEventListener('click', () => {
+          clearStagedDiff();
+          showToast('Discarded agent staged diff. Kept your editor changes.', 'info', 2500);
+        });
+        pill.querySelector('#btn-guard-accept-agent')?.addEventListener('click', () => {
+          triggerAutoRebase('agent_wins');
+        });
+        pill.querySelector('#btn-guard-dismiss')?.addEventListener('click', () => {
+          if (stagedDiffData) stagedDiffData.isDismissed = true;
+          hideConflictGuardPill();
+          showToast('Conflict warning dismissed. Diff can be applied as-is.', 'info', 2000);
+        });
+      }
+    }
+    return pill;
+  }
+
+  function showConflictGuardPill(state, titleText) {
+    const pill = ensureConflictGuardPill();
+    if (!pill) return;
+    pill.style.display = 'flex';
+    pill.className = 'diff-conflict-guard-pill';
+    if (state === 'rebased') {
+      pill.classList.add('status-rebased');
+    } else if (state === 'conflict') {
+      pill.classList.add('status-conflict');
+    }
+    const titleEl = pill.querySelector('#guard-pill-title') || document.getElementById('guard-pill-title');
+    if (titleEl && titleText) {
+      titleEl.textContent = titleText;
+    }
+    const btnConflicts = pill.querySelector('#btn-guard-conflicts') || document.getElementById('btn-guard-conflicts');
+    const btnKeepMine = pill.querySelector('#btn-guard-keep-mine') || document.getElementById('btn-guard-keep-mine');
+    const btnAcceptAgent = pill.querySelector('#btn-guard-accept-agent') || document.getElementById('btn-guard-accept-agent');
+    if (state === 'conflict') {
+      if (btnConflicts) btnConflicts.style.display = 'inline-block';
+      if (btnKeepMine) btnKeepMine.style.display = 'inline-block';
+      if (btnAcceptAgent) btnAcceptAgent.style.display = 'inline-block';
+    } else {
+      if (btnConflicts) btnConflicts.style.display = 'none';
+      if (btnKeepMine) btnKeepMine.style.display = 'none';
+      if (btnAcceptAgent) btnAcceptAgent.style.display = 'none';
+    }
+  }
+
+  function hideConflictGuardPill() {
+    const pill = document.getElementById('diff-conflict-pill');
+    if (!pill) return;
+    pill.style.display = 'none';
+    pill.className = 'diff-conflict-guard-pill';
+    const btnConflicts = pill.querySelector('#btn-guard-conflicts') || document.getElementById('btn-guard-conflicts');
+    const btnKeepMine = pill.querySelector('#btn-guard-keep-mine') || document.getElementById('btn-guard-keep-mine');
+    const btnAcceptAgent = pill.querySelector('#btn-guard-accept-agent') || document.getElementById('btn-guard-accept-agent');
+    if (btnConflicts) btnConflicts.style.display = 'none';
+    if (btnKeepMine) btnKeepMine.style.display = 'none';
+    if (btnAcceptAgent) btnAcceptAgent.style.display = 'none';
+  }
+
+  function isSameFileReference(f1, f2) {
+    if (!f1 || !f2) return false;
+    const clean1 = f1.replace(/\\/g, '/').toLowerCase();
+    const clean2 = f2.replace(/\\/g, '/').toLowerCase();
+    if (clean1 === clean2) return true;
+    const b1 = clean1.split('/').pop();
+    const b2 = clean2.split('/').pop();
+    return b1 === b2;
+  }
+
+  function checkDiffDivergence(currentBufferContent) {
+    if (!stagedDiffData || !stagedDiffData.diff) return;
+    if (stagedDiffData.isDismissed) return;
+
+    const currentHash = computeFastHash(currentBufferContent);
+    stagedDiffData.currentBufferContent = currentBufferContent;
+
+    if (!stagedDiffData.baseContent && currentBufferContent) {
+      stagedDiffData.baseContent = currentBufferContent;
+      stagedDiffData.baseHash = currentHash;
+      stagedDiffData.isDiverged = false;
+      hideConflictGuardPill();
+      return;
+    }
+
+    if (stagedDiffData.baseHash && currentHash !== stagedDiffData.baseHash) {
+      stagedDiffData.isDiverged = true;
+      showConflictGuardPill('diverged', 'Buffer modified in editor');
+    } else {
+      stagedDiffData.isDiverged = false;
+      hideConflictGuardPill();
+    }
+  }
+
+  async function triggerAutoRebase(resolution = null) {
+    if (!stagedDiffData) return;
+    const currentContent = stagedDiffData.currentBufferContent || activeEditorContent || '';
+    const baseContent = stagedDiffData.baseContent || '';
+    const targetFilePath = stagedDiffData.fullPath || stagedDiffData.file;
+    const diffToSend = stagedDiffData.cleanDiff || stagedDiffData.diff;
+
+    showToast('Rebasing diff against current editor buffer...', 'info', 2000);
+
+    if (isVsCode) {
+      vscode.postMessage({
+        command: 'rebaseDiff',
+        file: targetFilePath,
+        baseContent: baseContent,
+        diff: diffToSend,
+        currentContent: currentContent,
+        workspacePath: currentRepoPath,
+        forceResolution: resolution
+      });
+    } else {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/agent/rebase-diff`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            file_path: targetFilePath,
+            base_content: baseContent,
+            diff: diffToSend,
+            current_content: currentContent,
+            workspace_path: currentRepoPath,
+            force_resolution: resolution
+          })
+        });
+        const data = await res.json();
+        handleRebaseResult(data);
+      } catch (err) {
+        showToast(`Rebase failed: ${err.message}`, 'error');
+      }
+    }
+  }
+
+  function handleRebaseResult(res) {
+    if (!res || !stagedDiffData) return;
+    if (res.status === 'clean') {
+      showToast('Diff is already aligned with current buffer', 'info');
+      stagedDiffData.isDiverged = false;
+      hideConflictGuardPill();
+    } else if (res.status === 'already_applied') {
+      showToast('All diff changes are already present in editor', 'success');
+      clearStagedDiff();
+    } else if (res.status === 'rebased') {
+      const updatedBase = stagedDiffData.currentBufferContent || activeEditorContent || '';
+      stagedDiffData.diff = res.diff;
+      stagedDiffData.cleanDiff = res.diff;
+      stagedDiffData.baseContent = updatedBase;
+      stagedDiffData.baseHash = computeFastHash(updatedBase);
+      stagedDiffData.isDiverged = false;
+      stagedDiffData.conflicts = [];
+      stageDiff(stagedDiffData.file, res.diff, stagedMultiFiles, false, updatedBase);
+      showConflictGuardPill('rebased', 'Rebased cleanly to buffer');
+      showToast('Diff rebased cleanly to match editor changes', 'success');
+      setTimeout(() => {
+        if (stagedDiffData && !stagedDiffData.isDiverged) {
+          hideConflictGuardPill();
+        }
+      }, 3500);
+    } else if (res.status === 'conflict') {
+      const conflictCount = res.conflicts ? res.conflicts.length : 1;
+      stagedDiffData.conflicts = res.conflicts || [];
+      showConflictGuardPill('conflict', `${conflictCount} collision(s) detected`);
+      const conflictCountSpan = document.getElementById('conflict-count');
+      if (conflictCountSpan) conflictCountSpan.textContent = conflictCount;
+      if (res.diff) {
+        stageDiff(stagedDiffData.file, res.diff, stagedMultiFiles, false, stagedDiffData.baseContent);
+      }
+      showToast(`Warning: ${conflictCount} overlapping edit(s) collide with diff`, 'warning', 4000);
+    } else {
+      showToast(res.message || 'Rebase failed', 'error');
+    }
+  }
+
+  if (btnGuardRebase) {
+    btnGuardRebase.addEventListener('click', () => {
+      triggerAutoRebase();
+    });
+  }
+
+  if (btnGuardConflicts) {
+    btnGuardConflicts.addEventListener('click', () => {
+      const diffContainer = document.getElementById('diff-staged-container');
+      const conflictEl = diffContainer?.querySelector('.diff-line-del, .diff-line-add, .diff-box');
+      if (conflictEl) {
+        conflictEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      showToast('Inspect conflicting hunk markers in diff viewer below', 'info');
+    });
+  }
+
+  if (btnGuardDismiss) {
+    btnGuardDismiss.addEventListener('click', () => {
+      if (stagedDiffData) stagedDiffData.isDismissed = true;
+      hideConflictGuardPill();
+      showToast('Conflict warning dismissed. Diff can be applied as-is.', 'info', 2000);
+    });
+  }
 
   if (btnDiffViewMode) {
     btnDiffViewMode.addEventListener('click', () => {
@@ -2636,13 +3156,46 @@
     }
   }
 
-  function stageDiff(filename, diffText, stagedFiles = null, forceEditedState = null) {
+  function stageDiff(filename, diffText, stagedFiles = null, forceEditedState = null, baseContent = null) {
     if (forceEditedState !== null) {
       stagedDiffIsEdited = forceEditedState;
     } else if (!stagedDiffData || stagedDiffData.file !== filename) {
       stagedDiffIsEdited = false;
     }
-    stagedDiffData = { file: filename, diff: diffText };
+
+    let resolvedBaseContent = '';
+    let resolvedFullPath = filename;
+    if (typeof baseContent === 'string' && baseContent.length > 0) {
+      resolvedBaseContent = baseContent;
+    } else if (activeEditorContent !== undefined && activeEditorFile && isSameFileReference(activeEditorFile, filename)) {
+      resolvedBaseContent = activeEditorContent;
+      resolvedFullPath = activeEditorFile;
+    } else if (stagedDiffData && isSameFileReference(stagedDiffData.file, filename) && stagedDiffData.baseContent) {
+      resolvedBaseContent = stagedDiffData.baseContent;
+      resolvedFullPath = stagedDiffData.fullPath || filename;
+    }
+
+    let cleanDiff = diffText;
+    if (diffText && diffText.includes('<<<<<<< YOUR CHANGES')) {
+      cleanDiff = (stagedDiffData && stagedDiffData.cleanDiff) ? stagedDiffData.cleanDiff : diffText;
+    } else if (stagedDiffData && isSameFileReference(stagedDiffData.file, filename) && stagedDiffData.cleanDiff && diffText === stagedDiffData.diff) {
+      cleanDiff = stagedDiffData.cleanDiff;
+    }
+
+    stagedDiffData = {
+      file: filename,
+      fullPath: resolvedFullPath,
+      diff: diffText,
+      cleanDiff: cleanDiff,
+      baseContent: resolvedBaseContent,
+      baseHash: computeFastHash(resolvedBaseContent),
+      isDiverged: false,
+      isDismissed: false,
+      currentBufferContent: resolvedBaseContent,
+      conflicts: (stagedDiffData && isSameFileReference(stagedDiffData.file, filename)) ? stagedDiffData.conflicts || [] : []
+    };
+    hideConflictGuardPill();
+
     try {
       localStorage.setItem('clay_staged_diff', JSON.stringify({
         file: filename,
@@ -2794,10 +3347,15 @@
   if (btnAcceptDiff) {
     btnAcceptDiff.addEventListener('click', async () => {
       if (!stagedDiffData) return;
+      if (stagedDiffData.diff && stagedDiffData.diff.includes('<<<<<<< YOUR CHANGES')) {
+        showToast('Cannot apply diff with merge conflicts. Choose [Accept Agent\'s] or [Keep Mine] first.', 'warning', 4000);
+        return;
+      }
+      const targetFilePath = stagedDiffData.fullPath || stagedDiffData.file;
       if (isVsCode) {
         vscode.postMessage({
           command: 'applyPatch',
-          file: stagedDiffData.file,
+          file: targetFilePath,
           diff: stagedDiffData.diff,
           workspacePath: currentRepoPath
         });
@@ -2807,7 +3365,7 @@
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              file_path: stagedDiffData.file,
+              file_path: targetFilePath,
               diff: stagedDiffData.diff,
               workspace_path: currentRepoPath
             })
@@ -2836,6 +3394,7 @@
   function clearStagedDiff() {
     stagedDiffData = null;
     stagedDiffIsEdited = false;
+    hideConflictGuardPill();
     try {
       localStorage.removeItem('clay_staged_diff');
     } catch (e) {}
@@ -5087,6 +5646,19 @@
         if (msg.file && msg.file === activeEditorFile && msg.content !== undefined) {
           activeEditorContent = msg.content;
         }
+        if (stagedDiffData && stagedDiffData.diff && msg.content !== undefined) {
+          if (isSameFileReference(stagedDiffData.file, msg.file)) {
+            checkDiffDivergence(msg.content);
+          }
+        }
+        break;
+
+      case 'diffRebased':
+        handleRebaseResult(msg.result);
+        break;
+
+      case 'diffRebaseFailed':
+        showToast(`Rebase failed: ${msg.error || 'Unknown error'}`, 'error');
         break;
 
       case 'fileSavedAndSynced': {
@@ -5759,8 +6331,9 @@
 
     const rawText = codeEl.innerText || codeEl.textContent || '';
     let target = extractDiffFilename(rawText);
-    if (!target && activeEditorFile) {
-      const parts = activeEditorFile.split(/[\\/]/);
+    const repoActive = getActiveEditorFileInRepo();
+    if (!target && repoActive) {
+      const parts = repoActive.split(/[\\/]/);
       target = parts[parts.length - 1];
     }
     if (!target) {

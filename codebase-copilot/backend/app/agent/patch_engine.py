@@ -351,12 +351,76 @@ class SurgicalDiffBuilder:
         generated_text = generated_text.replace(r'\"\"\"', '"""').replace(r"\'\'\'", "'''")
 
         if not orig_lines or not any(l.strip() for l in orig_lines):
+            # Target extension to guide fence preference
+            target_ext = Path(filename).suffix.lstrip(".").lower()
+            ext_lang_map = {
+                "py": ("python", "py"),
+                "js": ("javascript", "js", "node"),
+                "ts": ("typescript", "ts"),
+                "html": ("html", "htm"),
+                "css": ("css",),
+                "json": ("json",),
+                "md": ("markdown", "md"),
+                "sh": ("bash", "sh", "shell"),
+                "sql": ("sql",),
+                "cpp": ("cpp", "c++", "c"),
+                "c": ("c",),
+                "java": ("java",),
+                "rs": ("rust", "rs"),
+                "go": ("go",)
+            }
+            preferred_tags = ext_lang_map.get(target_ext, (target_ext,)) if target_ext else ()
+
             code_lines = []
-            code_match = re.search(r"```[a-zA-Z0-9_+-]*\s*\n([\s\S]*?)```", generated_text, re.IGNORECASE)
-            if code_match:
-                code_lines = code_match.group(1).strip().splitlines()
+            matches = list(re.finditer(r"```([a-zA-Z0-9_+-]*)\s*\n([\s\S]*?)```", generated_text, re.IGNORECASE))
+            if matches:
+                chosen_block = None
+                # 1. Match preferred language tag
+                for m in matches:
+                    tag = (m.group(1) or "").strip().lower()
+                    if tag in preferred_tags:
+                        chosen_block = m.group(2)
+                        break
+                # 2. If no direct tag match, pick the largest non-shell code block
+                if chosen_block is None:
+                    non_shell = [m.group(2) for m in matches if (m.group(1) or "").strip().lower() not in ("bash", "sh", "shell", "cmd", "powershell")]
+                    if non_shell:
+                        chosen_block = max(non_shell, key=lambda b: len(b.strip().splitlines()))
+                    else:
+                        chosen_block = max((m.group(2) for m in matches), key=lambda b: len(b.strip().splitlines()))
+                if chosen_block:
+                    code_lines = chosen_block.strip().splitlines()
             else:
-                code_lines = [l for l in generated_text.splitlines() if not l.startswith("```")]
+                # No code fence: filter conversational lead-in and sign-off lines
+                lead_in_patterns = (
+                    "here is", "sure", "certainly", "hope this", "below is", "this code", "to run",
+                    "usage:", "output:", "note:", "let me know", "in this implementation",
+                    "i have created", "feel free", "as requested", "here's"
+                )
+                filtered_lines = []
+                in_content = False
+                for raw_l in generated_text.splitlines():
+                    stripped = raw_l.strip()
+                    if not stripped:
+                        if in_content:
+                            filtered_lines.append(raw_l)
+                        continue
+                    low = stripped.lower()
+                    if not in_content and any(low.startswith(p) for p in lead_in_patterns):
+                        continue
+                    if not in_content and (stripped.endswith(":") and not stripped.startswith(("def ", "class ", "if ", "for ", "while ", "try", "except", "with ", "else:", "elif "))):
+                        continue
+                    if stripped.startswith("```"):
+                        continue
+                    if any(low.startswith(p) for p in ("hope this helps", "let me know if", "feel free to", "save this file")):
+                        break
+                    in_content = True
+                    filtered_lines.append(raw_l)
+
+                while filtered_lines and not filtered_lines[-1].strip():
+                    filtered_lines.pop()
+                code_lines = filtered_lines
+
             return (
                 f"--- /dev/null\n+++ b/{filename}\n"
                 f"@@ -0,0 +1,{max(1, len(code_lines))} @@\n"
@@ -495,13 +559,20 @@ class PatchEngine:
             clean_name = clean_name[2:]
         clean_name = clean_name.lstrip("/")
 
-        p = Path(clean_name)
-        if p.is_absolute() and p.exists():
-            return p.resolve()
-
         if workspace_path:
             from ..retrieval.file_resolver import WorkspaceFileResolver
             ws = WorkspaceFileResolver._resolve_root(workspace_path)
+            
+            p = Path(clean_name)
+            if p.is_absolute():
+                if p.exists() or p.parent.exists():
+                    return p.resolve()
+                try:
+                    p.resolve().relative_to(ws.resolve())
+                    return p.resolve()
+                except ValueError:
+                    p = Path(p.name)
+
             direct = ws / p
             if direct.exists():
                 return direct.resolve()
@@ -521,20 +592,22 @@ class PatchEngine:
                         return py_files[0].resolve()
                     if accessible:
                         return list(accessible.values())[0].resolve()
+            
+            # Check if clean_name exists as absolute path outside ws
+            p_clean = Path(clean_name)
+            if p_clean.exists():
+                return p_clean.resolve()
+            p_orig = Path(file_path)
+            if p_orig.exists():
+                return p_orig.resolve()
+
             return direct.resolve()
 
+        p = Path(clean_name)
         if p.exists():
             return p.resolve()
 
-        for candidate_root in [Path.home() / "Desktop", Path.cwd().parent, Path.cwd()]:
-            if candidate_root.exists():
-                try:
-                    for sub in candidate_root.rglob(p.name):
-                        if sub.is_file():
-                            return sub.resolve()
-                except Exception:
-                    pass
-        return p.resolve()
+        return (Path.cwd() / p).resolve()
 
     @classmethod
     def apply_patch_hunks(
@@ -571,14 +644,13 @@ class PatchEngine:
                 pass
 
         # Only treat as a new file if the file truly does not exist or has 0 bytes.
-        # NEVER wipe existing non-empty file just because of diff header tokens.
         is_new_file = (not file_exists or is_empty)
 
         lines_diff = diff_text.splitlines()
+        orig_lines: List[str] = []
+        original_content = ""
 
         if is_new_file:
-            # Extract content for new file: take all lines prefixed with + (excluding +++)
-            # or if plain code was passed
             new_lines = []
             has_diff_headers = any(line.startswith("+++") or line.startswith("@@") for line in lines_diff)
 
@@ -587,7 +659,15 @@ class PatchEngine:
                     if line.startswith("+++") or line.startswith("---") or line.startswith("@@"):
                         continue
                     if line.startswith("+"):
-                        new_lines.append(line[1:])
+                        content_line = line[1:]
+                        if content_line.startswith(("@@", "---", "+++")):
+                            continue
+                        if content_line.startswith("+"):
+                            new_lines.append(content_line[1:])
+                        elif content_line.startswith("-"):
+                            continue
+                        else:
+                            new_lines.append(content_line)
                     elif not line.startswith("-") and not line.startswith("\\"):
                         new_lines.append(line)
             else:
@@ -603,10 +683,10 @@ class PatchEngine:
             # Existing file: parse unified diff hunks
             try:
                 original_content = target_path.read_text(encoding="utf-8")
+                orig_lines = original_content.splitlines()
             except Exception as e:
                 return {"status": "error", "message": f"Failed reading file {target_path}: {e}"}
 
-            orig_lines = original_content.splitlines()
             new_lines = cls._apply_unified_diff(orig_lines, lines_diff)
             new_content = "\n".join(new_lines)
             if not new_content.endswith("\n"):
@@ -616,19 +696,22 @@ class PatchEngine:
         if target_path.suffix == ".py":
             orig_is_valid = cls.validate_python_syntax(original_content) if not is_new_file else True
             if not cls.validate_python_syntax(new_content):
-                repaired = cls._attempt_syntax_repair(orig_lines, lines_diff, new_content)
-                if repaired and cls.validate_python_syntax(repaired):
-                    new_content = repaired
-                else:
-                    if not orig_is_valid:
-                        # Original file already had syntax errors prior to the patch.
-                        # Do NOT reject the patch since the user is likely repairing or editing the broken file!
-                        pass
-                    else:
+                if not is_new_file and orig_lines:
+                    repaired = cls._attempt_syntax_repair(orig_lines, lines_diff, new_content)
+                    if repaired and cls.validate_python_syntax(repaired):
+                        new_content = repaired
+                    elif orig_is_valid:
                         return {
                             "status": "error",
                             "message": f"Patch rejected: Introduced Python syntax error in {target_path.name}."
                         }
+                elif not orig_is_valid:
+                    pass
+                else:
+                    return {
+                        "status": "error",
+                        "message": f"Patch rejected: Introduced Python syntax error in {target_path.name}."
+                    }
 
         # Safe atomic write
         try:
@@ -1318,3 +1401,242 @@ class PatchEngine:
             "old_spans": old_spans,
             "new_spans": new_spans
         }
+
+    @classmethod
+    def rebase_staged_diff(
+        cls,
+        file_path: str,
+        base_content: str,
+        diff_text: str,
+        current_content: str,
+        workspace_path: Optional[str] = None,
+        force_resolution: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Executes a 3-way merge rebase:
+        Base (O): File state when diff was generated.
+        Agent (A): Proposed patched file (O + Agent Diff).
+        Current (B): Current active editor buffer state.
+
+        If user edits and agent diff hunks are disjoint:
+          Re-anchors hunk headers against current buffer and emits clean shifted diff.
+        If user edits collide with agent diff hunks:
+          Pinpoints collision spans and returns conflict markers for user resolution.
+          If force_resolution == 'agent_wins', allows agent hunks to overwrite collisions.
+        """
+        target_path = cls.resolve_target_path(file_path, workspace_path)
+
+        # Fallback for base_content if client snapshot was empty but file exists on disk
+        if (not base_content or not base_content.strip()) and target_path.exists() and target_path.is_file():
+            try:
+                base_content = target_path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                pass
+
+        # Normalize line endings to avoid CRLF desync
+        base_content = (base_content or "").replace("\r\n", "\n").replace("\r", "\n")
+        current_content = (current_content or "").replace("\r\n", "\n").replace("\r", "\n")
+
+        orig_lines = base_content.splitlines()
+        curr_lines = current_content.splitlines()
+        lines_diff = diff_text.splitlines()
+
+        filename = Path(file_path).name
+
+        # If current editor buffer is identical to base snapshot, diff is fully valid as-is
+        if curr_lines == orig_lines and not force_resolution:
+            return {
+                "status": "clean",
+                "diff": diff_text,
+                "has_collision": False,
+                "conflicts": [],
+                "message": "Buffer is in sync with base snapshot."
+            }
+
+        # Apply diff to base lines to get full proposed Agent version A
+        try:
+            agent_lines = cls._apply_unified_diff(orig_lines, lines_diff)
+        except Exception as e:
+            agent_lines = [l[1:] for l in lines_diff if l.startswith("+") and not l.startswith("+++")]
+            if not agent_lines:
+                return {
+                    "status": "error",
+                    "diff": diff_text,
+                    "has_collision": False,
+                    "conflicts": [],
+                    "message": f"Could not apply base diff to original lines: {e}"
+                }
+
+        # Check if the user's current editor already matches the agent's target state
+        if curr_lines == agent_lines:
+            return {
+                "status": "already_applied",
+                "diff": "",
+                "has_collision": False,
+                "conflicts": [],
+                "message": "Changes already incorporated into active editor buffer."
+            }
+
+        # Compute opcodes between Base (O) and Agent (A)
+        matcher_oa = difflib.SequenceMatcher(None, orig_lines, agent_lines)
+        agent_ops = [
+            (i1, i2, agent_lines[j1:j2], "agent")
+            for tag, i1, i2, j1, j2 in matcher_oa.get_opcodes()
+            if tag != "equal"
+        ]
+
+        # Compute opcodes between Base (O) and Current Editor (B)
+        matcher_ob = difflib.SequenceMatcher(None, orig_lines, curr_lines)
+        user_ops = [
+            (i1, i2, curr_lines[j1:j2], "user")
+            for tag, i1, i2, j1, j2 in matcher_ob.get_opcodes()
+            if tag != "equal"
+        ]
+
+        # Check for collision between Agent edits and User edits
+        conflicts = []
+        for a_i1, a_i2, a_repl, _ in agent_ops:
+            for u_i1, u_i2, u_repl, _ in user_ops:
+                # Disjoint check: intervals [a_i1, a_i2] and [u_i1, u_i2]
+                is_overlap = False
+                if a_i1 < a_i2 and u_i1 < u_i2:
+                    is_overlap = max(a_i1, u_i1) < min(a_i2, u_i2)
+                elif a_i1 == a_i2 and u_i1 == u_i2:
+                    # Both are pure insertions at the same line
+                    if len(orig_lines) == 0:
+                        # For an empty / new file, user code and agent code are complementary
+                        is_overlap = False
+                    else:
+                        is_overlap = (a_repl != u_repl and a_i1 == u_i1)
+                elif a_i1 == a_i2:
+                    # Agent inserts: only overlaps if strictly inside user replacement range
+                    is_overlap = (u_i1 < a_i1 < u_i2)
+                elif u_i1 == u_i2:
+                    # User inserts: only overlaps if strictly inside agent replacement range
+                    is_overlap = (a_i1 < u_i1 < a_i2)
+
+                if is_overlap:
+                    conflicts.append({
+                        "base_start": min(a_i1, u_i1),
+                        "base_end": max(a_i2, u_i2),
+                        "agent_lines": a_repl,
+                        "user_lines": u_repl
+                    })
+
+        if conflicts:
+            if force_resolution == "agent_wins":
+                # Agent wins: drop user operations that collide with agent hunks
+                filtered_user_ops = []
+                for u_i1, u_i2, u_repl, u_tag in user_ops:
+                    collides = False
+                    for a_i1, a_i2, _, _ in agent_ops:
+                        if a_i1 < a_i2 and u_i1 < u_i2:
+                            if max(a_i1, u_i1) < min(a_i2, u_i2):
+                                collides = True
+                                break
+                        elif a_i1 == u_i1 and a_i2 == u_i2:
+                            collides = True
+                            break
+                        elif a_i1 == a_i2 and (u_i1 <= a_i1 <= u_i2):
+                            collides = True
+                            break
+                        elif u_i1 == u_i2 and (a_i1 <= u_i1 <= a_i2):
+                            collides = True
+                            break
+                    if not collides:
+                        filtered_user_ops.append((u_i1, u_i2, u_repl, u_tag))
+                user_ops = filtered_user_ops
+            else:
+                # Overlapping edits: construct conflict view diff
+                conflict_diff = cls._build_conflict_diff(conflicts, filename)
+                return {
+                    "status": "conflict",
+                    "diff": conflict_diff,
+                    "has_collision": True,
+                    "conflicts": conflicts,
+                    "message": f"Detected {len(conflicts)} collision(s) between editor edits and agent diff."
+                }
+
+        # Non-overlapping or resolved: perform clean 3-way merge onto Base
+        # Preserve user insertions first if tie at insertion point
+        all_ops = sorted(agent_ops + user_ops, key=lambda op: (op[0], op[1], 0 if op[3] == "user" else 1))
+        merged_lines = []
+        curr_idx = 0
+        for i1, i2, repl, _ in all_ops:
+            if curr_idx < i1:
+                merged_lines.extend(orig_lines[curr_idx:i1])
+            merged_lines.extend(repl)
+            curr_idx = i2
+        if curr_idx < len(orig_lines):
+            merged_lines.extend(orig_lines[curr_idx:])
+
+        if curr_lines == merged_lines:
+            return {
+                "status": "already_applied",
+                "diff": "",
+                "has_collision": False,
+                "conflicts": [],
+                "message": "All diff changes are already present in active editor buffer."
+            }
+
+        # Generate rebased unified diff between Current Editor Buffer and Merged
+        rebased_diff = "\n".join(difflib.unified_diff(
+            curr_lines,
+            merged_lines,
+            fromfile=f"a/{filename}",
+            tofile=f"b/{filename}",
+            lineterm=""
+        ))
+
+        if not rebased_diff.strip():
+            return {
+                "status": "already_applied",
+                "diff": "",
+                "has_collision": False,
+                "conflicts": [],
+                "message": "All diff changes are already present in active editor buffer."
+            }
+
+        # Validate syntax if Python
+        if filename.endswith(".py"):
+            val_ok, healed_diff, val_err = cls.validate_and_heal_diff(current_content, rebased_diff, filename)
+            if val_ok and healed_diff:
+                rebased_diff = healed_diff
+
+        return {
+            "status": "rebased",
+            "diff": rebased_diff,
+            "has_collision": False,
+            "conflicts": [],
+            "message": "Rebased diff cleanly against current editor buffer."
+        }
+
+    @classmethod
+    def _build_conflict_diff(
+        cls,
+        conflicts: List[Dict[str, Any]],
+        filename: str
+    ) -> str:
+        """
+        Builds a unified diff representation containing Git-style conflict markers
+        for user review when editor edits collide with agent hunks.
+        """
+        conflict_blocks = []
+        conflict_blocks.append(f"--- a/{filename}")
+        conflict_blocks.append(f"+++ b/{filename} (CONFLICT)")
+
+        for c in conflicts:
+            a_lines = c.get("agent_lines", [])
+            u_lines = c.get("user_lines", [])
+            b_start = c.get("base_start", 0)
+            b_end = c.get("base_end", 0)
+            conflict_blocks.append(f"@@ -{b_start+1},{max(1, b_end - b_start)} +{b_start+1},{max(1, len(a_lines))} @@")
+            conflict_blocks.append("<<<<<<< YOUR CHANGES (Current Editor)")
+            for l in u_lines:
+                conflict_blocks.append(f"+{l}")
+            conflict_blocks.append("=======")
+            for l in a_lines:
+                conflict_blocks.append(f"-{l}")
+            conflict_blocks.append(">>>>>>> CLAY AGENT")
+
+        return "\n".join(conflict_blocks)

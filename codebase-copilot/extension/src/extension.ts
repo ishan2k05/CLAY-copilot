@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { BackendClient } from './api/backendClient';
 import { SidebarProvider } from './webview/SidebarProvider';
 import { ServerProcessManager } from './server/processManager';
@@ -115,12 +116,24 @@ export async function activate(context: vscode.ExtensionContext) {
     );
 
     // 7. Real-Time Document Synchronization & Hot Reload
+    const isFileInActiveWorkspace = (filePath: string): boolean => {
+        const targetWs = context.globalState.get<string>('lastRepoPath') || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!targetWs || !filePath) return true;
+        try {
+            const normFile = path.resolve(filePath).toLowerCase();
+            const normWs = path.resolve(targetWs).toLowerCase();
+            return normFile.startsWith(normWs + path.sep) || normFile === normWs;
+        } catch {
+            return true;
+        }
+    };
+
     let docChangeTimeout: NodeJS.Timeout | null = null;
     context.subscriptions.push(
         vscode.workspace.onDidChangeTextDocument((e) => {
             if (e.document.uri.scheme !== 'file') return;
             const fileName = e.document.fileName;
-            if (fileName.includes('node_modules') || fileName.includes('.git')) return;
+            if (fileName.includes('node_modules') || fileName.includes('.git') || !isFileInActiveWorkspace(fileName)) return;
 
             if (docChangeTimeout) clearTimeout(docChangeTimeout);
             docChangeTimeout = setTimeout(() => {
@@ -132,7 +145,7 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.workspace.onDidSaveTextDocument((doc) => {
             if (doc.uri.scheme !== 'file') return;
-            if (doc.fileName.includes('node_modules') || doc.fileName.includes('.git') || doc.fileName.includes('__pycache__')) return;
+            if (doc.fileName.includes('node_modules') || doc.fileName.includes('.git') || doc.fileName.includes('__pycache__') || !isFileInActiveWorkspace(doc.fileName)) return;
             backendClient.syncFile(doc.fileName, doc.getText(), 'saved');
         })
     );
@@ -141,7 +154,7 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.workspace.onDidCreateFiles((e) => {
             for (const fileUri of e.files) {
-                if (fileUri.scheme === 'file') {
+                if (fileUri.scheme === 'file' && isFileInActiveWorkspace(fileUri.fsPath)) {
                     vscode.workspace.openTextDocument(fileUri).then((doc) => {
                         backendClient.syncFile(doc.fileName, doc.getText(), 'created');
                     });
@@ -153,7 +166,7 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.workspace.onDidDeleteFiles((e) => {
             for (const fileUri of e.files) {
-                if (fileUri.scheme === 'file') {
+                if (fileUri.scheme === 'file' && isFileInActiveWorkspace(fileUri.fsPath)) {
                     backendClient.syncFile(fileUri.fsPath, '', 'deleted');
                 }
             }
@@ -163,7 +176,7 @@ export async function activate(context: vscode.ExtensionContext) {
     // 9. OS-level File System Watcher for external editors (VS Code, external editors, git checkout)
     const fileWatcher = vscode.workspace.createFileSystemWatcher('**/*.{py,js,ts,tsx,jsx,json,md,html,css}');
     fileWatcher.onDidChange(async (uri) => {
-        if (uri.fsPath.includes('node_modules') || uri.fsPath.includes('.git') || uri.fsPath.includes('__pycache__')) return;
+        if (uri.fsPath.includes('node_modules') || uri.fsPath.includes('.git') || uri.fsPath.includes('__pycache__') || !isFileInActiveWorkspace(uri.fsPath)) return;
         try {
             const data = await vscode.workspace.fs.readFile(uri);
             const content = new TextDecoder().decode(data);
@@ -171,7 +184,7 @@ export async function activate(context: vscode.ExtensionContext) {
         } catch {}
     });
     fileWatcher.onDidCreate(async (uri) => {
-        if (uri.fsPath.includes('node_modules') || uri.fsPath.includes('.git') || uri.fsPath.includes('__pycache__')) return;
+        if (uri.fsPath.includes('node_modules') || uri.fsPath.includes('.git') || uri.fsPath.includes('__pycache__') || !isFileInActiveWorkspace(uri.fsPath)) return;
         try {
             const data = await vscode.workspace.fs.readFile(uri);
             const content = new TextDecoder().decode(data);
@@ -179,7 +192,7 @@ export async function activate(context: vscode.ExtensionContext) {
         } catch {}
     });
     fileWatcher.onDidDelete((uri) => {
-        if (uri.fsPath.includes('node_modules') || uri.fsPath.includes('.git') || uri.fsPath.includes('__pycache__')) return;
+        if (uri.fsPath.includes('node_modules') || uri.fsPath.includes('.git') || uri.fsPath.includes('__pycache__') || !isFileInActiveWorkspace(uri.fsPath)) return;
         backendClient.syncFile(uri.fsPath, '', 'deleted');
     });
     context.subscriptions.push(fileWatcher);

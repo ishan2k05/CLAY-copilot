@@ -330,6 +330,26 @@ export class BackendClient {
         return await res.json();
     }
 
+    async rebaseDiff(filePath: string, baseContent: string, diff: string, currentContent: string, workspacePath?: string, forceResolution?: string): Promise<any> {
+        const res = await fetch(`${this.backendUrl}/api/agent/rebase-diff`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                file_path: filePath,
+                base_content: baseContent,
+                diff: diff,
+                current_content: currentContent,
+                workspace_path: workspacePath,
+                force_resolution: forceResolution
+            })
+        });
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error(err);
+        }
+        return await res.json();
+    }
+
     async getAgentTask(): Promise<AgentTask | null> {
         try {
             const res = await fetch(`${this.backendUrl}/api/agent/task`);

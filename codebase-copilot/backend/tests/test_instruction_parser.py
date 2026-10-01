@@ -319,6 +319,22 @@ class TestInstructionParserAndSmarterContext(unittest.TestCase):
         self.assertIn("truncation diff", plan["steps"][1]["title"].lower())
         self.assertIn("test1.py", plan["steps"][1]["title"])
 
+    def test_dynamic_task_planner_partial_removal_is_edit_existing(self):
+        """
+        Partial code removals like 'remove first print statement' must NOT trigger
+        a full-file wipe / truncation diff. They must be routed to surgical synthesis.
+        """
+        plan = DynamicTaskPlanner.plan_tasks(
+            goal="remove first print statement",
+            target_files=["app.py"]
+        )
+        self.assertEqual(plan["total_steps"], 3)
+        self.assertEqual(plan["steps"][0]["action"], "scan")
+        self.assertEqual(plan["steps"][1]["action"], "synthesize")
+        self.assertEqual(plan["steps"][2]["action"], "verify")
+        self.assertNotIn("truncation diff", plan["steps"][1]["title"].lower())
+        self.assertIn("app.py", plan["steps"][1]["title"])
+
     def test_dynamic_task_planner_new_file(self):
         plan = DynamicTaskPlanner.plan_tasks(
             goal="write me basic code in test1.py",

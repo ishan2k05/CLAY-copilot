@@ -52,11 +52,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         });
 
         vscode.workspace.onDidChangeTextDocument((event) => {
-            if (this._lastActiveDocument && event.document.uri.fsPath === this._lastActiveDocument.uri.fsPath && event.document.uri.scheme === 'file') {
+            if (event.document.uri.scheme === 'file') {
                 this._view?.webview.postMessage({
                     command: 'activeFileContentChanged',
                     file: event.document.uri.fsPath,
-                    content: event.document.getText()
+                    content: event.document.getText(),
+                    isDirty: event.document.isDirty
                 });
             }
         });
@@ -65,6 +66,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         vscode.workspace.onDidSaveTextDocument(async (document) => {
             if (document.uri.scheme === 'file') {
                 const filePath = document.uri.fsPath;
+                const activeWorkspace = this._context?.globalState.get<string>('lastRepoPath') || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                if (activeWorkspace && !this._isFileInWorkspace(filePath, activeWorkspace)) {
+                    return;
+                }
                 const content = document.getText();
                 const syncRes = await this._backendClient.syncFile(filePath, content, 'changed');
                 if (syncRes && syncRes.status === 'synced') {
@@ -80,8 +85,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         // Domain 2: Purge deleted file symbols from SQLite AST graph & vector index
         vscode.workspace.onDidDeleteFiles(async (event) => {
+            const activeWorkspace = this._context?.globalState.get<string>('lastRepoPath') || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
             for (const fileUri of event.files) {
                 if (fileUri.scheme === 'file') {
+                    if (activeWorkspace && !this._isFileInWorkspace(fileUri.fsPath, activeWorkspace)) {
+                        continue;
+                    }
                     await this._backendClient.syncFile(fileUri.fsPath, '', 'deleted');
                     this._view?.webview.postMessage({
                         command: 'fileDeletedAndPurged',
@@ -277,13 +286,44 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 case 'applyPatch': {
                     try {
-                        const targetWorkspace = data.workspacePath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-                        const res = await this._backendClient.applyPatch(data.file, data.diff, targetWorkspace);
-                        const finalName = res?.filename || data.file;
+                        let targetFile = data.file;
+                        if (this._lastActiveDocument && (!path.isAbsolute(targetFile) || !fs.existsSync(targetFile))) {
+                            if (path.basename(this._lastActiveDocument.uri.fsPath) === path.basename(targetFile)) {
+                                targetFile = this._lastActiveDocument.uri.fsPath;
+                            }
+                        }
+                        const targetWorkspace = data.workspacePath || (this._lastActiveDocument ? path.dirname(this._lastActiveDocument.uri.fsPath) : vscode.workspace.workspaceFolders?.[0]?.uri.fsPath);
+                        const res = await this._backendClient.applyPatch(targetFile, data.diff, targetWorkspace);
+                        const finalName = res?.filename || targetFile;
                         vscode.window.showInformationMessage(`CLAY Copilot: Patch applied cleanly to ${finalName}`);
                         this._view?.webview.postMessage({ command: 'patchApplied', file: finalName });
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`Failed to apply patch: ${err.message}`);
+                    }
+                    break;
+                }
+                case 'rebaseDiff': {
+                    try {
+                        let targetFile = data.file;
+                        if (this._lastActiveDocument && (!path.isAbsolute(targetFile) || !fs.existsSync(targetFile))) {
+                            if (path.basename(this._lastActiveDocument.uri.fsPath) === path.basename(targetFile)) {
+                                targetFile = this._lastActiveDocument.uri.fsPath;
+                            }
+                        }
+                        const targetWorkspace = data.workspacePath || (this._lastActiveDocument ? path.dirname(this._lastActiveDocument.uri.fsPath) : vscode.workspace.workspaceFolders?.[0]?.uri.fsPath);
+                        const res = await this._backendClient.rebaseDiff(targetFile, data.baseContent, data.diff, data.currentContent, targetWorkspace, data.forceResolution);
+                        this._view?.webview.postMessage({
+                            command: 'diffRebased',
+                            file: targetFile,
+                            result: res
+                        });
+                    } catch (err: any) {
+                        this._view?.webview.postMessage({
+                            command: 'diffRebaseFailed',
+                            file: data.file,
+                            error: err.message
+                        });
+                        vscode.window.showErrorMessage(`Failed to rebase diff: ${err.message}`);
                     }
                     break;
                 }
@@ -505,9 +545,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case 'executeAgentStep': {
                     const workspace = data.workspace_path || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
                     const activeEditor = vscode.window.activeTextEditor;
-                    const activeFile = data.active_file || (activeEditor?.document?.uri?.scheme === 'file' ? activeEditor.document.uri.fsPath : undefined);
-                    const cursorLine = data.cursor_line !== undefined ? data.cursor_line : (activeEditor?.selection?.active?.line !== undefined ? activeEditor.selection.active.line + 1 : undefined);
-                    const activeFileContent = data.active_file_content || (activeEditor?.document?.uri?.scheme === 'file' ? activeEditor.document.getText() : (this._lastActiveDocument ? this._lastActiveDocument.getText() : undefined));
+                    const candidateFile = data.active_file || (activeEditor?.document?.uri?.scheme === 'file' ? activeEditor.document.uri.fsPath : undefined);
+                    const activeFile = this._isFileInWorkspace(candidateFile, workspace) ? candidateFile : undefined;
+                    const cursorLine = activeFile && (data.cursor_line !== undefined ? data.cursor_line : (activeEditor?.selection?.active?.line !== undefined ? activeEditor.selection.active.line + 1 : undefined));
+                    const activeFileContent = activeFile ? (data.active_file_content || (activeEditor?.document?.uri?.scheme === 'file' ? activeEditor.document.getText() : (this._lastActiveDocument ? this._lastActiveDocument.getText() : undefined))) : undefined;
                     const res = await this._backendClient.executeAgentStep(
                         data.step_id,
                         data.goal,
@@ -528,6 +569,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
             }
         });
+    }
+
+    private _isFileInWorkspace(filePath: string | undefined, workspacePath: string | undefined): boolean {
+        if (!filePath || !workspacePath) return false;
+        try {
+            const normFile = path.resolve(filePath).toLowerCase();
+            const normWorkspace = path.resolve(workspacePath).toLowerCase();
+            return normFile.startsWith(normWorkspace + path.sep) || normFile === normWorkspace;
+        } catch {
+            return false;
+        }
     }
 
     private async _executeTerminalSafely(
@@ -659,13 +711,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (visible) activeDoc = visible.document;
         }
 
-        const activeFileContext = activeDoc ? activeDoc.fileName : undefined;
-        const activeFileContent = activeDoc ? activeDoc.getText() : undefined;
+        const effectiveWorkspace = workspacePath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const isDocInWorkspace = (doc?: vscode.TextDocument) => doc && this._isFileInWorkspace(doc.fileName, effectiveWorkspace);
 
-        // Collect all open text documents to sync in-memory state with backend
+        const activeFileContext = (activeDoc && isDocInWorkspace(activeDoc)) ? activeDoc.fileName : undefined;
+        const activeFileContent = (activeDoc && isDocInWorkspace(activeDoc)) ? activeDoc.getText() : undefined;
+
+        // Collect all open text documents to sync in-memory state with backend (strictly within workspace)
         const openFiles: Array<{ path: string; content: string; is_dirty?: boolean }> = [];
         for (const doc of vscode.workspace.textDocuments) {
-            if (doc.uri.scheme === 'file' && !doc.fileName.includes('node_modules') && !doc.fileName.includes('.git')) {
+            if (doc.uri.scheme === 'file' && isDocInWorkspace(doc) && !doc.fileName.includes('node_modules') && !doc.fileName.includes('.git')) {
                 openFiles.push({
                     path: doc.fileName,
                     content: doc.getText(),
@@ -874,6 +929,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     <span class="diff-badge-add" id="diff-badge-add">+0</span>
                     <span class="diff-badge-del" id="diff-badge-del">-0</span>
                 </div>
+            </div>
+        </div>
+
+        <!-- 3-Way Merge Conflict Guard Status Pill -->
+        <div class="diff-conflict-guard-pill" id="diff-conflict-pill" style="display: none;">
+            <div class="guard-pill-badge">
+                <span class="guard-pulse-dot"></span>
+                <span class="guard-pill-title" id="guard-pill-title">Buffer modified in editor</span>
+            </div>
+            <div class="guard-pill-actions">
+                <button type="button" class="btn-guard-rebase" id="btn-guard-rebase" title="Recalculate line offsets and re-align diff with editor edits">
+                    Auto-Rebase Diff
+                </button>
+                <button type="button" class="btn-guard-conflicts" id="btn-guard-conflicts" style="display: none;" title="Inspect conflicting line ranges">
+                    View Conflicts (<span id="conflict-count">0</span>)
+                </button>
+                <button type="button" class="btn-guard-dismiss" id="btn-guard-dismiss" title="Dismiss warning and apply as-is">
+                    Dismiss
+                </button>
             </div>
         </div>
 

@@ -139,6 +139,39 @@ class SymbolEntityResolver:
         return specs
 
     @classmethod
+    def extract_folder_name(cls, goal: str) -> Optional[str]:
+        """
+        Extracts an explicit folder/directory name mentioned in the goal, if any.
+        Examples:
+        - 'create a folder named utils' -> 'utils'
+        - 'create folder dsa and put test.py in it' -> 'dsa'
+        """
+        if not goal:
+            return None
+        clean_goal = goal.strip()
+        folder_pattern = re.compile(
+            r"\b(?:folder|directory|dir)\s*(?:named|called|titled|name(?:\s+is)?|as|of|for|with|:\s*|\s+)?\s*['\"`]?([A-Za-z0-9_\-\.\/]+)['\"`]?",
+            re.IGNORECASE
+        )
+        stop_words = {
+            "named", "called", "name", "titled", "as", "of", "for", "with", "a", "an", "the",
+            "new", "me", "folder", "directory", "dir", "and", "in", "into", "inside", "it",
+            "to", "put", "file", "files", "my", "this", "that", "placeholder", "statement", "is"
+        }
+        for m in folder_pattern.finditer(clean_goal):
+            cand = m.group(1).strip("./\\ ,:;'\"`")
+            if cand.lower() not in stop_words and len(cand) > 0 and not cand.startswith("."):
+                return cand.replace("\\", "/").strip("/")
+
+        f_match2 = re.search(r"\b([A-Za-z0-9_\-\.\/]+)\s+(?:folder|directory|dir)\b", clean_goal, re.IGNORECASE)
+        if f_match2:
+            cand2 = f_match2.group(1).strip("./\\ ,:;'\"`")
+            if cand2.lower() not in stop_words and len(cand2) > 0 and not cand2.startswith("."):
+                return cand2.replace("\\", "/").strip("/")
+
+        return None
+
+    @classmethod
     def extract_target_filepaths(cls, goal: str) -> List[str]:
         """
         Extracts potential target file and folder paths from natural language instructions.
@@ -774,10 +807,13 @@ class DynamicTaskPlanner:
         intent_info = InstructionClassifier.classify(clean_goal)
         intent = intent_info.get("intent", "EDIT_EXISTING")
 
-        # Detect deletion intent
+        # Detect full-file deletion / wipe / truncation intent
+        # Must only match requests to wipe/delete the entire file or all code,
+        # never partial removals like "remove first print statement" or "delete unused function".
         is_delete = bool(
-            re.search(r"\b(delete|remove|clear|wipe|erase|truncate|empty)\b.*?\b(all\s+code|code|everything|content|file|functions)\b", clean_goal, re.IGNORECASE)
-            or re.search(r"^\s*(?:delete|remove|clear|wipe|erase|empty)\s+", clean_goal, re.IGNORECASE)
+            re.search(r"\b(?:delete|remove|clear|wipe|erase|truncate|empty)\b.*?\b(?:all\s+code|entire\s+code|all\s+content|everything|entire\s+file|all\s+lines)\b", clean_goal, re.IGNORECASE)
+            or re.search(r"^\s*(?:clear|wipe|truncate|empty)\s+(?:the\s+)?(?:file|code|content|contents|[A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)\s*$", clean_goal, re.IGNORECASE)
+            or re.search(r"^\s*delete\s+all\s+(?:code|content|lines|everything)\b", clean_goal, re.IGNORECASE)
         )
         if is_delete:
             intent = "DELETE_CODE"
@@ -843,13 +879,9 @@ class DynamicTaskPlanner:
             ))
         )
 
-        is_huge = (
-            is_algorithm_or_complex
-            or word_count >= 15
-            or any(kw in clean_goal.lower() for kw in ("across files", "multiple files", "all files", "refactor", "overhaul", "redesign", "full rewrite", "architecture", "migrate", "integration", "pipeline"))
-            or len(extracted_targets) >= 2
-            or (target_files and len(target_files) >= 2)
-        )
+        has_multiple_files = len(extracted_targets) >= 2 or (target_files and len(target_files) >= 2)
+        is_multi_file_intent = intent == "MULTI_FILE_REFACTOR" or any(kw in clean_goal.lower() for kw in ("across files", "multiple files", "all files", "entire codebase", "multi-file"))
+        is_huge = has_multiple_files or is_multi_file_intent
 
         steps: List[Dict[str, Any]] = []
 
@@ -873,7 +905,92 @@ class DynamicTaskPlanner:
                 }
             ]
 
-        # 2. Algorithm / Complex Engine / Sophisticated Large Code (5 Steps - Max)
+        # 2. Code deletion / Wipe / Truncation (3 Steps)
+        elif is_delete:
+            steps = [
+                {
+                    "id": 1,
+                    "action": "scan",
+                    "title": f"1. Inspect '{resolved_target}' to isolate code boundaries for removal",
+                    "progress": f"Inspecting '{resolved_target}' code boundaries...",
+                    "detail": f"Identified deletion scope in '{resolved_target}'."
+                },
+                {
+                    "id": 2,
+                    "action": "delete",
+                    "title": f"2. Generate clean truncation diff to remove code from '{resolved_target}'",
+                    "progress": f"Synthesizing truncation diff for '{resolved_target}'...",
+                    "detail": f"Generated clean truncation diff for '{resolved_target}'."
+                },
+                {
+                    "id": 3,
+                    "action": "verify",
+                    "title": f"3. Validate clean file state, verify integrity & stage removal diff",
+                    "progress": f"Validating clean state for '{resolved_target}'...",
+                    "detail": f"Integrity verified. Staged deletion diff for '{resolved_target}'."
+                }
+            ]
+
+        # 3. Nested folder + file creation (4 Steps)
+        elif folder_name and resolved_target and intent in ("CREATE_NEW", "CREATE_FOLDER"):
+            steps = [
+                {
+                    "id": 1,
+                    "action": "scan",
+                    "title": f"1. Resolve destination directory and prepare folder structure for '{folder_name}'",
+                    "progress": f"Resolving destination directory '{folder_name}'...",
+                    "detail": f"Directory structure verified for '{folder_name}'."
+                },
+                {
+                    "id": 2,
+                    "action": "prep",
+                    "title": f"2. Structure boilerplate schema & specifications for '{resolved_target}'",
+                    "progress": f"Structuring schema for '{resolved_target}'...",
+                    "detail": f"Path specifications established for '{resolved_target}'."
+                },
+                {
+                    "id": 3,
+                    "action": "synthesize",
+                    "title": f"3. Synthesize complete implementation for '{resolved_target}'",
+                    "progress": f"Synthesizing '{resolved_target}' via {model}...",
+                    "detail": f"Generated complete implementation for '{resolved_target}'."
+                },
+                {
+                    "id": 4,
+                    "action": "verify",
+                    "title": f"4. Verify path hierarchy, validate syntax & stage unified creation diff",
+                    "progress": "Verifying path hierarchy and staging diff...",
+                    "detail": f"Path hierarchy verified. Staged creation diff in Diff tab."
+                }
+            ]
+
+        # 4. Brand new file creation / Scaffold (3 Steps)
+        elif intent == "CREATE_NEW":
+            steps = [
+                {
+                    "id": 1,
+                    "action": "scan",
+                    "title": f"1. Analyze requirements & scaffold environment for '{resolved_target}'",
+                    "progress": f"Analyzing requirements for '{resolved_target}'...",
+                    "detail": f"Scaffold environment prepared for '{resolved_target}'."
+                },
+                {
+                    "id": 2,
+                    "action": "synthesize",
+                    "title": f"2. Synthesize complete, production-ready implementation for '{resolved_target}'",
+                    "progress": f"Synthesizing '{resolved_target}' via {model}...",
+                    "detail": f"Generated complete implementation for '{resolved_target}'."
+                },
+                {
+                    "id": 3,
+                    "action": "verify",
+                    "title": f"3. Run syntax validation, verify zero regressions & stage '{resolved_target}' diff",
+                    "progress": f"Validating syntax and staging diff...",
+                    "detail": f"Syntax and AST verified. Staged diff for '{resolved_target}' in Diff tab."
+                }
+            ]
+
+        # 5. Algorithm / Complex Engine / Sophisticated Large Code (5 Steps - Max)
         elif is_algorithm_or_complex and not is_delete:
             topic_title = topic_info["topic"]
             steps = [
@@ -914,7 +1031,7 @@ class DynamicTaskPlanner:
                 }
             ]
 
-        # 3. Huge execution / Multi-file refactor (5 Steps - Max)
+        # 6. Huge execution / Multi-file refactor (5 Steps - Max)
         elif is_huge or intent == "MULTI_FILE_REFACTOR":
             files_desc = ", ".join((target_files or extracted_targets)[:3]) if (target_files or extracted_targets) else resolved_target
             steps = [
@@ -955,40 +1072,7 @@ class DynamicTaskPlanner:
                 }
             ]
 
-        # 4. Nested folder + file creation (4 Steps)
-        elif folder_name and resolved_target:
-            steps = [
-                {
-                    "id": 1,
-                    "action": "scan",
-                    "title": f"1. Resolve destination directory and prepare folder structure for '{folder_name}'",
-                    "progress": f"Resolving destination directory '{folder_name}'...",
-                    "detail": f"Directory structure verified for '{folder_name}'."
-                },
-                {
-                    "id": 2,
-                    "action": "prep",
-                    "title": f"2. Structure boilerplate schema & specifications for '{resolved_target}'",
-                    "progress": f"Structuring schema for '{resolved_target}'...",
-                    "detail": f"Path specifications established for '{resolved_target}'."
-                },
-                {
-                    "id": 3,
-                    "action": "synthesize",
-                    "title": f"3. Synthesize complete implementation for '{resolved_target}'",
-                    "progress": f"Synthesizing '{resolved_target}' via {model}...",
-                    "detail": f"Generated complete implementation for '{resolved_target}'."
-                },
-                {
-                    "id": 4,
-                    "action": "verify",
-                    "title": f"4. Verify path hierarchy, validate syntax & stage unified creation diff",
-                    "progress": "Verifying path hierarchy and staging diff...",
-                    "detail": f"Path hierarchy verified. Staged creation diff in Diff tab."
-                }
-            ]
-
-        # 5. Bug fix / Test repair / Debugging (4 Steps)
+        # 7. Bug fix / Test repair / Debugging (4 Steps)
         elif intent == "FIX_TEST" or any(w in clean_goal.lower() for w in ("fix", "repair", "debug", "failing", "error", "traceback", "assertion")):
             steps = [
                 {
@@ -1018,58 +1102,6 @@ class DynamicTaskPlanner:
                     "title": f"4. Execute AST validation, verify zero regressions & stage fix",
                     "progress": "Verifying syntax and regressions...",
                     "detail": "Syntax and AST verification passed. Fix staged in Diff tab."
-                }
-            ]
-
-        # 6. Code deletion / Wipe / Truncation (3 Steps)
-        elif is_delete:
-            steps = [
-                {
-                    "id": 1,
-                    "action": "scan",
-                    "title": f"1. Inspect '{resolved_target}' to isolate code boundaries for removal",
-                    "progress": f"Inspecting '{resolved_target}' code boundaries...",
-                    "detail": f"Identified deletion scope in '{resolved_target}'."
-                },
-                {
-                    "id": 2,
-                    "action": "delete",
-                    "title": f"2. Generate clean truncation diff to remove code from '{resolved_target}'",
-                    "progress": f"Synthesizing truncation diff for '{resolved_target}'...",
-                    "detail": f"Generated clean truncation diff for '{resolved_target}'."
-                },
-                {
-                    "id": 3,
-                    "action": "verify",
-                    "title": f"3. Validate clean file state, verify integrity & stage removal diff",
-                    "progress": f"Validating clean state for '{resolved_target}'...",
-                    "detail": f"Integrity verified. Staged deletion diff for '{resolved_target}'."
-                }
-            ]
-
-        # 7. Brand new file creation / Scaffold (3 Steps)
-        elif intent == "CREATE_NEW":
-            steps = [
-                {
-                    "id": 1,
-                    "action": "scan",
-                    "title": f"1. Analyze requirements & scaffold environment for '{resolved_target}'",
-                    "progress": f"Analyzing requirements for '{resolved_target}'...",
-                    "detail": f"Scaffold environment prepared for '{resolved_target}'."
-                },
-                {
-                    "id": 2,
-                    "action": "synthesize",
-                    "title": f"2. Synthesize complete, production-ready implementation for '{resolved_target}'",
-                    "progress": f"Synthesizing '{resolved_target}' via {model}...",
-                    "detail": f"Generated complete implementation for '{resolved_target}'."
-                },
-                {
-                    "id": 3,
-                    "action": "verify",
-                    "title": f"3. Run syntax validation, verify zero regressions & stage '{resolved_target}' diff",
-                    "progress": f"Validating syntax and staging diff...",
-                    "detail": f"Syntax and AST verified. Staged diff for '{resolved_target}' in Diff tab."
                 }
             ]
 

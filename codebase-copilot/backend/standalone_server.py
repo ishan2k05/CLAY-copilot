@@ -71,6 +71,22 @@ def save_persisted_settings():
 
 load_persisted_settings()
 
+def is_path_in_workspace(target_path, workspace_dir) -> bool:
+    """Verifies that target_path is strictly contained within workspace_dir."""
+    if not target_path or not workspace_dir:
+        return False
+    try:
+        t_resolved = Path(target_path).resolve()
+        w_resolved = Path(workspace_dir).resolve()
+        return t_resolved.is_relative_to(w_resolved)
+    except Exception:
+        try:
+            t_norm = str(Path(target_path).resolve()).replace("\\", "/").rstrip("/").lower()
+            w_norm = str(Path(workspace_dir).resolve()).replace("\\", "/").rstrip("/").lower()
+            return t_norm.startswith(w_norm + "/") or t_norm == w_norm
+        except Exception:
+            return False
+
 graph_store = SQLiteGraphStore("code_graph.sqlite")
 graph_store._sync_init_db()
 ast_chunker = PythonASTChunker()
@@ -413,7 +429,16 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             file_path = body.get("file_path", "")
             content = body.get("content", "")
             event = body.get("event", "changed")
+            ws_path = body.get("workspace_path") or runtime_settings.get("repo_path", ".")
             p = Path(file_path).resolve()
+            ws_resolved = Path(ws_path).resolve()
+            if not is_path_in_workspace(p, ws_resolved):
+                self.send_response(200)
+                self._set_cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "ignored", "file": str(p), "reason": "file_outside_workspace"}).encode("utf-8"))
+                return
+
             if event == "deleted" or (content is None and not p.exists()):
                 graph_store._sync_delete_file_symbols(str(p))
             else:
@@ -436,6 +461,10 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             context_file = body.get("context_file")
             active_file_content = body.get("active_file_content")
             ws_path = body.get("workspace_path") or runtime_settings.get("repo_path", ".")
+            ws_resolved = Path(ws_path).resolve()
+            if context_file and not is_path_in_workspace(context_file, ws_resolved):
+                context_file = None
+                active_file_content = None
             
             # Silent zero-token background sync check before resolving context
             try:
@@ -848,17 +877,46 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(result).encode("utf-8"))
 
+        elif self.path == "/api/agent/rebase-diff":
+            file_path = body.get("file_path", "")
+            base_content = body.get("base_content", "")
+            diff_text = body.get("diff", "")
+            current_content = body.get("current_content", "")
+            ws_path = body.get("workspace_path") or runtime_settings.get("repo_path", ".")
+            force_resolution = body.get("force_resolution")
+            result = PatchEngine.rebase_staged_diff(
+                file_path=file_path,
+                base_content=base_content,
+                diff_text=diff_text,
+                current_content=current_content,
+                workspace_path=str(ws_path),
+                force_resolution=force_resolution
+            )
+            self.send_response(200)
+            self._set_cors_headers()
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode("utf-8"))
+
         elif self.path == "/api/agent/compute-diff":
             file_path = body.get("target_file", "")
             code_snippet = body.get("code_or_snippet", "")
             ws_path = body.get("workspace_path") or runtime_settings.get("repo_path", ".")
             target_path = PatchEngine.resolve_target_path(file_path, str(ws_path))
             orig_lines = []
-            if target_path.exists() and target_path.is_file():
+            active_content = body.get("active_file_content")
+            if active_content is not None:
+                orig_lines = active_content.splitlines()
+                live_file_buffers[file_path] = active_content
+                live_file_buffers[target_path.name] = active_content
+            elif target_path.exists() and target_path.is_file():
                 try:
                     orig_lines = target_path.read_text(encoding="utf-8", errors="ignore").splitlines()
                 except Exception:
                     orig_lines = []
+            elif file_path in live_file_buffers:
+                orig_lines = live_file_buffers[file_path].splitlines()
+            elif target_path.name in live_file_buffers:
+                orig_lines = live_file_buffers[target_path.name].splitlines()
 
             pref_line = body.get("preferred_line") or body.get("cursor_line")
             diff_text = PatchEngine.build_surgical_diff(orig_lines, code_snippet, target_path.name, preferred_line=pref_line)
@@ -948,18 +1006,41 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
 
         elif self.path == "/api/agent/plan":
             goal = body.get("goal", "")
-            ws_path = body.get("workspace_path") or runtime_settings.get("repo_path", ".")
+            raw_ws = body.get("workspace_path") or runtime_settings.get("repo_path", ".")
+            from app.main import resolve_workspace_path
+            ws_path = str(resolve_workspace_path(raw_ws))
             accessible = WorkspaceFileResolver.list_accessible_files(ws_path)
             target_files = SymbolEntityResolver.resolve_target_files(goal, ws_path, accessible)
-            target_candidate = body.get("target_file") or body.get("active_file")
-            if target_candidate:
-                cand_name = Path(target_candidate.replace("\\", "/")).name
-                if cand_name not in target_files and target_candidate not in target_files:
-                    target_files.insert(0, cand_name)
-                act_content = body.get("active_file_content")
-                if act_content:
-                    live_file_buffers[cand_name] = act_content
-                    live_file_buffers[target_candidate] = act_content
+            
+            # Strictly validate active_file against ws_path
+            active_in_ws = None
+            if body.get("active_file") and is_path_in_workspace(body.get("active_file"), ws_path):
+                active_in_ws = Path(body.get("active_file")).resolve().name
+
+            target_candidate = None
+            raw_tf = body.get("target_file")
+            if raw_tf:
+                cand_p = Path(raw_tf)
+                if cand_p.is_absolute():
+                    if is_path_in_workspace(cand_p, ws_path):
+                        target_candidate = cand_p.name
+                else:
+                    target_candidate = cand_p.name
+
+            # 1. Goal-extracted files take top priority.
+            # 2. Only if goal had no explicit files, fallback to validated target_candidate or active_in_ws
+            if not target_files:
+                if target_candidate:
+                    target_files.append(target_candidate)
+                elif active_in_ws:
+                    target_files.append(active_in_ws)
+
+            # Only buffer active file content if verified inside workspace
+            if active_in_ws and body.get("active_file_content"):
+                live_file_buffers[active_in_ws] = body.get("active_file_content")
+                if body.get("active_file") and is_path_in_workspace(body.get("active_file"), ws_path):
+                    live_file_buffers[str(Path(body.get("active_file")).resolve())] = body.get("active_file_content")
+
             change_specs = SymbolEntityResolver.extract_change_specs(goal)
             selected_model = body.get("model_name") or runtime_settings.get("model", OLLAMA_MODEL)
 
@@ -974,22 +1055,52 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(plan).encode("utf-8"))
 
-        elif self.path == "/api/agent/step":
+        elif self.path in ("/api/agent/step", "/api/agent/step/stream"):
+            is_stream = (self.path == "/api/agent/step/stream")
+            if is_stream:
+                self.send_response(200)
+                self._set_cors_headers(content_type="text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
             step_id = body.get("step_id", 1)
             step_action = body.get("step_action")
             total_steps = body.get("total_steps", 3)
             goal = body.get("goal", "")
-            ws_path = body.get("workspace_path") or runtime_settings.get("repo_path", ".")
+            raw_ws = body.get("workspace_path") or runtime_settings.get("repo_path", ".")
+            from app.main import resolve_workspace_path
+            ws_path = str(resolve_workspace_path(raw_ws))
             try:
                 _silent_sync_workspace_sync(ws_path)
             except Exception:
                 pass
 
-            target_candidate = body.get("target_file") or body.get("active_file")
             accessible = WorkspaceFileResolver.list_accessible_files(ws_path)
             target_files = SymbolEntityResolver.resolve_target_files(goal, ws_path, accessible)
-            if target_candidate and target_candidate not in target_files:
-                target_files.insert(0, target_candidate)
+
+            # Strictly validate active_file against ws_path
+            active_in_ws = None
+            if body.get("active_file") and is_path_in_workspace(body.get("active_file"), ws_path):
+                active_in_ws = Path(body.get("active_file")).resolve().name
+
+            valid_target_file = None
+            raw_tf = body.get("target_file")
+            if raw_tf:
+                cand_p = Path(raw_tf)
+                if cand_p.is_absolute():
+                    if is_path_in_workspace(cand_p, ws_path):
+                        valid_target_file = cand_p.name
+                else:
+                    valid_target_file = cand_p.name
+
+            if valid_target_file:
+                if valid_target_file in target_files:
+                    target_files.remove(valid_target_file)
+                    target_files.insert(0, valid_target_file)
+                elif not target_files:
+                    target_files.insert(0, valid_target_file)
+            elif not target_files and active_in_ws:
+                target_files.append(active_in_ws)
+
             ambiguity = AmbiguityDetector.check_ambiguity(goal, target_files)
             change_specs = SymbolEntityResolver.extract_change_specs(goal)
 
@@ -997,76 +1108,63 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             intent_label = intent_info.get('intent', 'EDIT_EXISTING')
             is_delete = (
                 intent_label == "DELETE_CODE"
-                or any(w in goal.lower() for w in ("delete all", "wipe all", "remove all code", "clear code", "delete code", "wipe code", "empty file", "truncate file"))
                 or step_action == "delete"
+                or bool(re.search(r"\b(?:delete|remove|clear|wipe|erase|truncate|empty)\b.*?\b(?:all\s+code|entire\s+code|all\s+content|everything|entire\s+file|all\s+lines)\b", goal, re.IGNORECASE))
+                or bool(re.search(r"^\s*(?:clear|wipe|truncate|empty)\s+(?:the\s+)?(?:file|code|content|contents|[A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)\s*$", goal, re.IGNORECASE))
             )
 
+            # Resolve primary target filename and path strictly confined to ws_path
             target_filename = None
             target_path_obj = None
 
-            if target_candidate:
-                cand_path = Path(target_candidate)
-                tf_clean = target_candidate.strip().replace("\\", "/")
-                tf_name = Path(tf_clean).name
-                if cand_path.is_file() and cand_path.exists():
-                    target_path_obj = cand_path
-                    target_filename = cand_path.name
-                elif tf_clean in accessible:
-                    target_path_obj = accessible[tf_clean]
-                    target_filename = tf_name
-                elif tf_name in accessible:
-                    target_path_obj = accessible[tf_name]
-                    target_filename = tf_name
-                elif (Path(ws_path) / tf_clean).exists():
-                    target_path_obj = Path(ws_path) / tf_clean
-                    target_filename = tf_name
-                elif (Path(ws_path) / tf_name).exists():
-                    target_path_obj = Path(ws_path) / tf_name
-                    target_filename = tf_name
+            if target_files:
+                primary_name = target_files[0]
+                target_filename = Path(primary_name).name
+                if primary_name in accessible:
+                    target_path_obj = accessible[primary_name]
+                elif target_filename in accessible:
+                    target_path_obj = accessible[target_filename]
+                elif (Path(ws_path) / primary_name).exists():
+                    target_path_obj = Path(ws_path) / primary_name
                 else:
-                    target_path_obj = Path(ws_path) / tf_name
-                    target_filename = tf_name
-
-            if not target_path_obj:
-                if target_files:
-                    tf_first = target_files[0].replace("\\", "/")
-                    tf_first_name = Path(tf_first).name
-                    if tf_first in accessible:
-                        target_path_obj = accessible[tf_first]
-                        target_filename = tf_first_name
-                    elif tf_first_name in accessible:
-                        target_path_obj = accessible[tf_first_name]
-                        target_filename = tf_first_name
-                    else:
-                        target_path_obj = Path(ws_path) / tf_first_name
-                        target_filename = tf_first_name
-                else:
-                    direct_files = WorkspaceFileResolver.resolve_query_files(goal, ws_path)
-                    if direct_files:
-                        target_path_obj = Path(direct_files[0].file_path)
-                        target_filename = target_path_obj.name
-                    elif accessible:
-                        py_files = [p for p in accessible.values() if p.suffix == ".py"]
-                        if py_files:
-                            target_path_obj = py_files[0]
-                            target_filename = target_path_obj.name
-                        else:
-                            target_path_obj = list(accessible.values())[0]
-                            target_filename = target_path_obj.name
-
-            if not target_filename:
-                extracted_from_goal = SymbolEntityResolver.extract_target_filepaths(goal)
-                if extracted_from_goal:
-                    target_filename = Path(extracted_from_goal[0]).name
                     target_path_obj = Path(ws_path) / target_filename
+            elif active_in_ws:
+                target_filename = active_in_ws
+                if active_in_ws in accessible:
+                    target_path_obj = accessible[active_in_ws]
                 else:
-                    for w in goal.split():
-                        clean_w = w.strip(".,;:?!'\"()[]{}<>`")
-                        if "." in clean_w and not clean_w.startswith("."):
-                            target_filename = Path(clean_w).name
-                            break
-                    if not target_filename:
-                        target_filename = "test_c.py" if (Path(ws_path) / "test_c.py").exists() else "main.py"
+                    target_path_obj = Path(ws_path) / active_in_ws
+            else:
+                direct_files = WorkspaceFileResolver.resolve_query_files(goal, ws_path)
+                if direct_files:
+                    target_path_obj = Path(direct_files[0].file_path)
+                    target_filename = target_path_obj.name
+                elif accessible:
+                    py_files = [p for p in accessible.values() if p.suffix == ".py"]
+                    if py_files:
+                        target_path_obj = py_files[0]
+                        target_filename = target_path_obj.name
+                    else:
+                        target_path_obj = list(accessible.values())[0]
+                        target_filename = target_path_obj.name
+                else:
+                    extracted_from_goal = SymbolEntityResolver.extract_target_filepaths(goal)
+                    if extracted_from_goal:
+                        target_filename = Path(extracted_from_goal[0]).name
+                        target_path_obj = Path(ws_path) / target_filename
+                    else:
+                        for w in goal.split():
+                            clean_w = w.strip(".,;:?!'\"()[]{}<>`")
+                            if "." in clean_w and not clean_w.startswith("."):
+                                target_filename = Path(clean_w).name
+                                break
+                        if not target_filename:
+                            target_filename = "app.py"
+                        target_path_obj = Path(ws_path) / target_filename
+
+            # Safety invariant: target_path_obj must NEVER escape ws_path
+            if not is_path_in_workspace(target_path_obj, ws_path):
+                target_path_obj = Path(ws_path) / (target_filename or "app.py")
 
             action = step_action
             if not action:
@@ -1224,10 +1322,7 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                 if is_folder_only:
                     folder_dir = Path(ws_path) / target_filename
                     folder_dir.mkdir(parents=True, exist_ok=True)
-                    self.send_response(200)
-                    self._set_cors_headers()
-                    self.end_headers()
-                    self.wfile.write(json.dumps({
+                    res = {
                         "step_id": step_id,
                         "status": "done",
                         "target_file": target_filename,
@@ -1237,7 +1332,17 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                         "valid": True,
                         "generated": f"Created folder '{target_filename}' successfully.",
                         "log": f"Created folder '{target_filename}' in workspace."
-                    }).encode("utf-8"))
+                    }
+                    if is_stream:
+                        res["done"] = True
+                        self.wfile.write(f"data: {json.dumps(res)}\n\n".encode("utf-8"))
+                        self.wfile.write(b"data: [DONE]\n\n")
+                        self.wfile.flush()
+                    else:
+                        self.send_response(200)
+                        self._set_cors_headers()
+                        self.end_headers()
+                        self.wfile.write(json.dumps(res).encode("utf-8"))
                     return
 
                 # Check if file exists or is brand new
@@ -1350,26 +1455,63 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                 active_model = runtime_settings.get("model", OLLAMA_MODEL)
                 active_host = runtime_settings.get("host", OLLAMA_URL)
                 generated = ""
-                try:
-                    payload = json.dumps({
-                        "model": active_model,
-                        "messages": [
-                            {"role": "system", "content": sys_msg},
-                            {"role": "user", "content": prompt}
-                        ],
-                        "stream": False,
-                        "options": {
-                            "temperature": runtime_settings.get("temperature", 0.2),
-                            "num_ctx": runtime_settings.get("num_ctx", 32768),
-                            "num_predict": runtime_settings.get("num_predict", 4096)
-                        }
-                    }).encode("utf-8")
-                    req = urllib.request.Request(f"{active_host}/api/chat", data=payload, headers={"Content-Type": "application/json"})
-                    with urllib.request.urlopen(req, timeout=120.0) as resp:
-                        gen_resp = json.loads(resp.read().decode("utf-8"))
-                        generated = gen_resp.get("message", {}).get("content", "")
-                except Exception as e:
-                    generated = f"// Error connecting to {active_model}: {str(e)}"
+                if is_stream:
+                    accumulated_tokens = []
+                    try:
+                        payload = json.dumps({
+                            "model": active_model,
+                            "messages": [
+                                {"role": "system", "content": sys_msg},
+                                {"role": "user", "content": prompt}
+                            ],
+                            "stream": True,
+                            "options": {
+                                "temperature": runtime_settings.get("temperature", 0.2),
+                                "num_ctx": runtime_settings.get("num_ctx", 32768),
+                                "num_predict": runtime_settings.get("num_predict", 4096)
+                            }
+                        }).encode("utf-8")
+                        req = urllib.request.Request(f"{active_host}/api/chat", data=payload, headers={"Content-Type": "application/json"})
+                        with urllib.request.urlopen(req, timeout=120.0) as resp:
+                            for line in resp:
+                                if line:
+                                    try:
+                                        chunk = json.loads(line.decode("utf-8"))
+                                        token = chunk.get("message", {}).get("content", "")
+                                        if token:
+                                            clean_tok = token.replace(r'\"\"\"', '"""').replace(r"\'\'\'", "'''")
+                                            accumulated_tokens.append(clean_tok)
+                                            sse = f"data: {json.dumps({'token': clean_tok})}\n\n"
+                                            self.wfile.write(sse.encode("utf-8"))
+                                            self.wfile.flush()
+                                    except Exception:
+                                        pass
+                    except Exception as e:
+                        err_sse = f"data: {json.dumps({'token': f'\\n[Ollama Notice: {str(e)}]' })}\n\n"
+                        self.wfile.write(err_sse.encode("utf-8"))
+                        self.wfile.flush()
+                    generated = "".join(accumulated_tokens)
+                else:
+                    try:
+                        payload = json.dumps({
+                            "model": active_model,
+                            "messages": [
+                                {"role": "system", "content": sys_msg},
+                                {"role": "user", "content": prompt}
+                            ],
+                            "stream": False,
+                            "options": {
+                                "temperature": runtime_settings.get("temperature", 0.2),
+                                "num_ctx": runtime_settings.get("num_ctx", 32768),
+                                "num_predict": runtime_settings.get("num_predict", 4096)
+                            }
+                        }).encode("utf-8")
+                        req = urllib.request.Request(f"{active_host}/api/chat", data=payload, headers={"Content-Type": "application/json"})
+                        with urllib.request.urlopen(req, timeout=120.0) as resp:
+                            gen_resp = json.loads(resp.read().decode("utf-8"))
+                            generated = gen_resp.get("message", {}).get("content", "")
+                    except Exception as e:
+                        generated = f"// Error connecting to {active_model}: {str(e)}"
 
                 # Build surgical minimal diff using multi-strategy builder (eliminates full-file wipes and line desync)
                 diff_text = PatchEngine.build_surgical_diff(orig_lines, generated, target_filename, preferred_line=preferred_line)
@@ -1432,10 +1574,16 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             else:
                 res = {"status": "error", "message": f"Unknown step action: {action}"}
 
-            self.send_response(200)
-            self._set_cors_headers()
-            self.end_headers()
-            self.wfile.write(json.dumps(res).encode("utf-8"))
+            if is_stream:
+                res["done"] = True
+                self.wfile.write(f"data: {json.dumps(res)}\n\n".encode("utf-8"))
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            else:
+                self.send_response(200)
+                self._set_cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps(res).encode("utf-8"))
 
         elif self.path == "/api/agent/review":
             self.send_response(200)

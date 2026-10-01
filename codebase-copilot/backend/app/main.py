@@ -138,6 +138,22 @@ def resolve_workspace_path(path_str: Optional[str]) -> Path:
         return Path(current).resolve()
     return Path(DEFAULT_WORKSPACE).resolve() if Path(DEFAULT_WORKSPACE).exists() else Path.cwd().resolve()
 
+def is_path_in_workspace(target_path: Optional[Union[str, Path]], workspace_dir: Optional[Union[str, Path]]) -> bool:
+    """Verifies that target_path is strictly contained within workspace_dir."""
+    if not target_path or not workspace_dir:
+        return False
+    try:
+        t_resolved = Path(target_path).resolve()
+        w_resolved = Path(workspace_dir).resolve()
+        return t_resolved.is_relative_to(w_resolved)
+    except Exception:
+        try:
+            t_norm = str(Path(target_path).resolve()).replace("\\", "/").rstrip("/").lower()
+            w_norm = str(Path(workspace_dir).resolve()).replace("\\", "/").rstrip("/").lower()
+            return t_norm.startswith(w_norm + "/") or t_norm == w_norm
+        except Exception:
+            return False
+
 async def auto_index_workspace(workspace_dir: str) -> Dict[str, int]:
     """
     Auto-indexes workspace files into SQLite symbol graph and vector store.
@@ -371,6 +387,10 @@ class SyncFileRequest(BaseModel):
 async def sync_file_endpoint(req: SyncFileRequest):
     """Real-time hot reload sync endpoint for editor documents and agent changes."""
     p = Path(req.file_path).resolve()
+    ws = resolve_workspace_path(req.workspace_path or runtime_settings.get("repo_path"))
+    if not is_path_in_workspace(p, ws):
+        return {"status": "ignored", "file": str(p), "reason": "file_outside_workspace"}
+
     if req.event == "deleted" or (req.content is None and not p.exists()):
         live_file_buffers.pop(str(p), None)
         live_file_buffers.pop(p.name, None)
@@ -636,12 +656,17 @@ async def chat_endpoint(req: ChatRequest):
     # Silent background sync: microsecond stat() check on workspace files to capture any manual edits, deletions, or emptyings
     await silent_sync_workspace(workspace_dir)
 
-    # Sync live active file buffer and open files from VS Code in real-time
-    if req.context_file and req.active_file_content is not None:
+    # Sync live active file buffer and open files from VS Code in real-time (strictly within workspace)
+    if req.context_file:
         p_res = Path(req.context_file).resolve()
-        live_file_buffers[str(p_res)] = req.active_file_content
-        live_file_buffers[p_res.name] = req.active_file_content
-        await reindex_file(str(p_res), req.active_file_content)
+        if is_path_in_workspace(p_res, workspace_dir):
+            if req.active_file_content is not None:
+                live_file_buffers[str(p_res)] = req.active_file_content
+                live_file_buffers[p_res.name] = req.active_file_content
+                await reindex_file(str(p_res), req.active_file_content)
+        else:
+            req.context_file = None
+            req.active_file_content = None
 
     if req.open_files:
         for of in req.open_files:
@@ -649,8 +674,9 @@ async def chat_endpoint(req: ChatRequest):
             oc = of.get("content")
             if op and oc is not None:
                 opr = Path(op).resolve()
-                live_file_buffers[str(opr)] = oc
-                live_file_buffers[opr.name] = oc
+                if is_path_in_workspace(opr, workspace_dir):
+                    live_file_buffers[str(opr)] = oc
+                    live_file_buffers[opr.name] = oc
 
     # If index is empty or workspace changed, re-index workspace
     if current_indexed_workspace != workspace_dir or len(vector_store.chunks) == 0:
@@ -1208,14 +1234,35 @@ async def create_plan(req: PlanRequest):
     intent_info = InstructionClassifier.classify(req.goal)
     accessible = WorkspaceFileResolver.list_accessible_files(workspace_dir)
     target_files = SymbolEntityResolver.resolve_target_files(req.goal, workspace_dir, accessible)
-    target_candidate = req.target_file or req.active_file
-    if target_candidate:
-        cand_name = Path(target_candidate.replace("\\", "/")).name
-        if cand_name not in target_files and target_candidate not in target_files:
-            target_files.insert(0, cand_name)
-        if req.active_file_content:
-            live_file_buffers[cand_name] = req.active_file_content
-            live_file_buffers[target_candidate] = req.active_file_content
+
+    # Strictly validate active_file against workspace_dir
+    active_in_ws = None
+    if req.active_file and is_path_in_workspace(req.active_file, workspace_dir):
+        active_in_ws = Path(req.active_file).resolve().name
+
+    target_candidate = None
+    if req.target_file:
+        cand_p = Path(req.target_file)
+        if cand_p.is_absolute():
+            if is_path_in_workspace(cand_p, workspace_dir):
+                target_candidate = cand_p.name
+        else:
+            target_candidate = cand_p.name
+
+    # 1. Goal-extracted files take top priority.
+    # 2. Only if goal had no explicit files, fallback to validated target_candidate or active_in_ws
+    if not target_files:
+        if target_candidate:
+            target_files.append(target_candidate)
+        elif active_in_ws:
+            target_files.append(active_in_ws)
+
+    # Only buffer active file content if verified inside workspace
+    if active_in_ws and req.active_file_content:
+        live_file_buffers[active_in_ws] = req.active_file_content
+        if req.active_file and is_path_in_workspace(req.active_file, workspace_dir):
+            live_file_buffers[str(Path(req.active_file).resolve())] = req.active_file_content
+
     ambiguity = AmbiguityDetector.check_ambiguity(req.goal, target_files)
     change_specs = SymbolEntityResolver.extract_change_specs(req.goal)
 
@@ -1272,8 +1319,30 @@ async def execute_agent_step(req: StepExecuteRequest):
 
     accessible = WorkspaceFileResolver.list_accessible_files(workspace_dir)
     target_files = SymbolEntityResolver.resolve_target_files(req.goal, workspace_dir, accessible)
-    if req.target_file and req.target_file not in target_files:
-        target_files.insert(0, req.target_file)
+
+    # Strictly validate active_file against workspace_dir
+    active_in_ws = None
+    if req.active_file and is_path_in_workspace(req.active_file, workspace_dir):
+        active_in_ws = Path(req.active_file).resolve().name
+
+    valid_target_file = None
+    if req.target_file:
+        cand_p = Path(req.target_file)
+        if cand_p.is_absolute():
+            if is_path_in_workspace(cand_p, workspace_dir):
+                valid_target_file = cand_p.name
+        else:
+            valid_target_file = cand_p.name
+
+    if valid_target_file:
+        if valid_target_file in target_files:
+            target_files.remove(valid_target_file)
+            target_files.insert(0, valid_target_file)
+        elif not target_files:
+            target_files.insert(0, valid_target_file)
+    elif not target_files and active_in_ws:
+        target_files.append(active_in_ws)
+
     ambiguity = AmbiguityDetector.check_ambiguity(req.goal, target_files)
     change_specs = SymbolEntityResolver.extract_change_specs(req.goal)
 
@@ -1281,80 +1350,64 @@ async def execute_agent_step(req: StepExecuteRequest):
     intent_label = intent_info.get('intent', 'EDIT_EXISTING')
     is_delete = (
         intent_label == "DELETE_CODE"
-        or any(w in req.goal.lower() for w in ("delete all", "wipe all", "remove all code", "clear code", "delete code", "wipe code", "empty file", "truncate file"))
         or req.step_action == "delete"
+        or bool(re.search(r"\b(?:delete|remove|clear|wipe|erase|truncate|empty)\b.*?\b(?:all\s+code|entire\s+code|all\s+content|everything|entire\s+file|all\s+lines)\b", req.goal, re.IGNORECASE))
+        or bool(re.search(r"^\s*(?:clear|wipe|truncate|empty)\s+(?:the\s+)?(?:file|code|content|contents|[A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)\s*$", req.goal, re.IGNORECASE))
     )
 
-    # Resolve primary target filename and path (prioritizing target_file, active_file, goal extraction)
+    # Resolve primary target filename and path strictly confined to workspace_dir
     target_filename = None
     target_path_obj = None
 
-    target_candidate = req.target_file or req.active_file
-    if target_candidate:
-        cand_path = Path(target_candidate)
-        tf_clean = target_candidate.strip().replace("\\", "/")
-        tf_name = Path(tf_clean).name
-        # 1. Check if candidate is an absolute or direct path that exists on disk
-        if cand_path.is_file() and cand_path.exists():
-            target_path_obj = cand_path
-            target_filename = cand_path.name
-        elif tf_clean in accessible:
-            target_path_obj = accessible[tf_clean]
-            target_filename = tf_name
-        elif tf_name in accessible:
-            target_path_obj = accessible[tf_name]
-            target_filename = tf_name
-        elif (Path(workspace_dir) / tf_clean).exists():
-            target_path_obj = Path(workspace_dir) / tf_clean
-            target_filename = tf_name
-        elif (Path(workspace_dir) / tf_name).exists():
-            target_path_obj = Path(workspace_dir) / tf_name
-            target_filename = tf_name
+    if target_files:
+        primary_name = target_files[0]
+        target_filename = Path(primary_name).name
+        if primary_name in accessible:
+            target_path_obj = accessible[primary_name]
+        elif target_filename in accessible:
+            target_path_obj = accessible[target_filename]
+        elif (Path(workspace_dir) / primary_name).exists():
+            target_path_obj = Path(workspace_dir) / primary_name
         else:
-            target_path_obj = Path(workspace_dir) / tf_name
-            target_filename = tf_name
-
-    if not target_path_obj:
-        if target_files:
-            tf_first = target_files[0].replace("\\", "/")
-            tf_first_name = Path(tf_first).name
-            if tf_first in accessible:
-                target_path_obj = accessible[tf_first]
-                target_filename = tf_first_name
-            elif tf_first_name in accessible:
-                target_path_obj = accessible[tf_first_name]
-                target_filename = tf_first_name
-            else:
-                target_path_obj = Path(workspace_dir) / tf_first_name
-                target_filename = tf_first_name
-        else:
-            direct_files = WorkspaceFileResolver.resolve_query_files(req.goal, workspace_dir)
-            if direct_files:
-                target_path_obj = Path(direct_files[0].file_path)
-                target_filename = target_path_obj.name
-            elif accessible:
-                py_files = [p for p in accessible.values() if p.suffix == ".py"]
-                if py_files:
-                    target_path_obj = py_files[0]
-                    target_filename = target_path_obj.name
-                else:
-                    target_path_obj = list(accessible.values())[0]
-                    target_filename = target_path_obj.name
-
-    if not target_filename:
-        extracted_from_goal = SymbolEntityResolver.extract_target_filepaths(req.goal)
-        if extracted_from_goal:
-            target_filename = Path(extracted_from_goal[0]).name
             target_path_obj = Path(workspace_dir) / target_filename
+    elif active_in_ws:
+        target_filename = active_in_ws
+        if active_in_ws in accessible:
+            target_path_obj = accessible[active_in_ws]
         else:
-            words = req.goal.split()
-            for w in words:
-                clean_w = w.strip(".,;:?!'\"()[]{}<>`")
-                if "." in clean_w and not clean_w.startswith("."):
-                    target_filename = Path(clean_w).name
-                    break
-            if not target_filename:
-                target_filename = "test_c.py" if (Path(workspace_dir) / "test_c.py").exists() else "main.py"
+            target_path_obj = Path(workspace_dir) / active_in_ws
+    else:
+        direct_files = WorkspaceFileResolver.resolve_query_files(req.goal, workspace_dir)
+        if direct_files:
+            target_path_obj = Path(direct_files[0].file_path)
+            target_filename = target_path_obj.name
+        elif accessible:
+            py_files = [p for p in accessible.values() if p.suffix == ".py"]
+            if py_files:
+                target_path_obj = py_files[0]
+                target_filename = target_path_obj.name
+            else:
+                target_path_obj = list(accessible.values())[0]
+                target_filename = target_path_obj.name
+        else:
+            extracted_from_goal = SymbolEntityResolver.extract_target_filepaths(req.goal)
+            if extracted_from_goal:
+                target_filename = Path(extracted_from_goal[0]).name
+                target_path_obj = Path(workspace_dir) / target_filename
+            else:
+                words = req.goal.split()
+                for w in words:
+                    clean_w = w.strip(".,;:?!'\"()[]{}<>`")
+                    if "." in clean_w and not clean_w.startswith("."):
+                        target_filename = Path(clean_w).name
+                        break
+                if not target_filename:
+                    target_filename = "app.py"
+                target_path_obj = Path(workspace_dir) / target_filename
+
+    # Safety invariant: target_path_obj must NEVER escape workspace_dir
+    if not is_path_in_workspace(target_path_obj, workspace_dir):
+        target_path_obj = Path(workspace_dir) / (target_filename or "app.py")
 
     # Resolve action
     action = req.step_action
@@ -1730,6 +1783,323 @@ async def execute_agent_step(req: StepExecuteRequest):
     return {"status": "error", "message": f"Unknown step action: {action}"}
 
 
+@app.post("/api/agent/step/stream")
+async def execute_agent_step_stream(req: StepExecuteRequest):
+    """
+    SSE Streaming route for Agent Step execution.
+    For synthesis steps, streams Ollama tokens live to the frontend terminal,
+    then returns the validated surgical diff upon completion.
+    """
+    import re
+    workspace_dir = str(resolve_workspace_path(req.workspace_path or runtime_settings.get("repo_path")))
+    if current_indexed_workspace != workspace_dir:
+        await auto_index_workspace(workspace_dir)
+    else:
+        await silent_sync_workspace(workspace_dir)
+
+    accessible = WorkspaceFileResolver.list_accessible_files(workspace_dir)
+    target_files = SymbolEntityResolver.resolve_target_files(req.goal, workspace_dir, accessible)
+
+    active_in_ws = None
+    if req.active_file and is_path_in_workspace(req.active_file, workspace_dir):
+        active_in_ws = Path(req.active_file).resolve().name
+
+    valid_target_file = None
+    if req.target_file:
+        cand_p = Path(req.target_file)
+        if cand_p.is_absolute():
+            if is_path_in_workspace(cand_p, workspace_dir):
+                valid_target_file = cand_p.name
+        else:
+            valid_target_file = cand_p.name
+
+    if valid_target_file:
+        if valid_target_file in target_files:
+            target_files.remove(valid_target_file)
+            target_files.insert(0, valid_target_file)
+        elif not target_files:
+            target_files.insert(0, valid_target_file)
+    elif not target_files and active_in_ws:
+        target_files.append(active_in_ws)
+
+    ambiguity = AmbiguityDetector.check_ambiguity(req.goal, target_files)
+    change_specs = SymbolEntityResolver.extract_change_specs(req.goal)
+
+    intent_info = InstructionClassifier.classify(req.goal)
+    intent_label = intent_info.get('intent', 'EDIT_EXISTING')
+    is_delete = (
+        intent_label == "DELETE_CODE"
+        or req.step_action == "delete"
+        or bool(re.search(r"\b(?:delete|remove|clear|wipe|erase|truncate|empty)\b.*?\b(?:all\s+code|entire\s+code|all\s+content|everything|entire\s+file|all\s+lines)\b", req.goal, re.IGNORECASE))
+        or bool(re.search(r"^\s*(?:clear|wipe|truncate|empty)\s+(?:the\s+)?(?:file|code|content|contents|[A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)\s*$", req.goal, re.IGNORECASE))
+    )
+
+    target_filename = None
+    target_path_obj = None
+
+    if target_files:
+        primary_name = target_files[0]
+        target_filename = Path(primary_name).name
+        if primary_name in accessible:
+            target_path_obj = accessible[primary_name]
+        elif target_filename in accessible:
+            target_path_obj = accessible[target_filename]
+        elif (Path(workspace_dir) / primary_name).exists():
+            target_path_obj = Path(workspace_dir) / primary_name
+        else:
+            target_path_obj = Path(workspace_dir) / target_filename
+    elif active_in_ws:
+        target_filename = active_in_ws
+        if active_in_ws in accessible:
+            target_path_obj = accessible[active_in_ws]
+        else:
+            target_path_obj = Path(workspace_dir) / active_in_ws
+    else:
+        direct_files = WorkspaceFileResolver.resolve_query_files(req.goal, workspace_dir)
+        if direct_files:
+            target_path_obj = Path(direct_files[0].file_path)
+            target_filename = target_path_obj.name
+        elif accessible:
+            py_files = [p for p in accessible.values() if p.suffix == ".py"]
+            if py_files:
+                target_path_obj = py_files[0]
+                target_filename = target_path_obj.name
+            else:
+                target_path_obj = list(accessible.values())[0]
+                target_filename = target_path_obj.name
+        else:
+            extracted_from_goal = SymbolEntityResolver.extract_target_filepaths(req.goal)
+            if extracted_from_goal:
+                target_filename = Path(extracted_from_goal[0]).name
+                target_path_obj = Path(workspace_dir) / target_filename
+            else:
+                words = req.goal.split()
+                for w in words:
+                    clean_w = w.strip(".,;:?!'\"()[]{}<>`")
+                    if "." in clean_w and not clean_w.startswith("."):
+                        target_filename = Path(clean_w).name
+                        break
+                if not target_filename:
+                    target_filename = "app.py"
+                target_path_obj = Path(workspace_dir) / target_filename
+
+    if not is_path_in_workspace(target_path_obj, workspace_dir):
+        target_path_obj = Path(workspace_dir) / (target_filename or "app.py")
+
+    action = req.step_action
+    total_steps = req.total_steps or 3
+    if not action:
+        if req.step_id == 1:
+            action = "scan"
+        elif req.step_id == 2:
+            action = "delete" if is_delete else ("prep" if total_steps in (2, 4, 5) else "synthesize")
+        elif req.step_id == 3 and total_steps == 3:
+            action = "verify"
+        elif req.step_id == 3 and total_steps >= 4:
+            action = "synthesize"
+        else:
+            action = "verify"
+
+    async def step_stream_generator():
+        # If action is not synthesize, delegate to execute_agent_step and emit single completed payload
+        if action != "synthesize":
+            res = await execute_agent_step(req)
+            if isinstance(res, dict):
+                res["done"] = True
+            yield f"data: {json.dumps(res)}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+
+        is_folder_only = bool(target_filename and "." not in Path(target_filename).name and any(kw in req.goal.lower() for kw in ("folder", "directory", "dir")))
+        if is_folder_only:
+            folder_dir = Path(workspace_dir) / target_filename
+            folder_dir.mkdir(parents=True, exist_ok=True)
+            res = {
+                "step_id": req.step_id,
+                "status": "done",
+                "target_file": target_filename,
+                "diff": "",
+                "hunks": [],
+                "staged_files": [],
+                "valid": True,
+                "generated": f"Created folder '{target_filename}' successfully.",
+                "log": f"Created folder '{target_filename}' in workspace.",
+                "done": True
+            }
+            yield f"data: {json.dumps(res)}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+
+        orig_lines = []
+        raw_file_content = ""
+        preferred_line = req.cursor_line
+
+        if req.active_file_content is not None and req.active_file_content.strip():
+            raw_file_content = req.active_file_content
+            if target_filename:
+                live_file_buffers[target_filename] = raw_file_content
+            if target_path_obj:
+                live_file_buffers[str(target_path_obj)] = raw_file_content
+        elif target_path_obj and target_path_obj.exists() and target_path_obj.is_file():
+            try:
+                raw_file_content = target_path_obj.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                raw_file_content = ""
+
+        if not raw_file_content.strip():
+            if target_filename in live_file_buffers and live_file_buffers[target_filename].strip():
+                raw_file_content = live_file_buffers[target_filename]
+            elif target_path_obj and str(target_path_obj) in live_file_buffers and live_file_buffers[str(target_path_obj)].strip():
+                raw_file_content = live_file_buffers[str(target_path_obj)]
+            elif req.active_file and req.active_file in live_file_buffers and live_file_buffers[req.active_file].strip():
+                raw_file_content = live_file_buffers[req.active_file]
+
+        orig_lines = raw_file_content.splitlines() if raw_file_content else []
+        is_new_file = not (target_path_obj and target_path_obj.exists() and target_path_obj.is_file()) and not raw_file_content.strip()
+
+        target_symbols = []
+        if not is_new_file and orig_lines:
+            target_symbols = SymbolEntityResolver.resolve_target_symbols(req.goal, raw_file_content)
+            if preferred_line is None:
+                sym_positions = SymbolEntityResolver.resolve_target_symbols_with_positions(req.goal, raw_file_content)
+                if sym_positions:
+                    preferred_line = sym_positions[0]["lineno"]
+
+        if orig_lines:
+            numbered_lines = [f"{i+1:3d}: {line}" for i, line in enumerate(orig_lines)]
+            target_file_context = (
+                f"[Active Target File: {target_filename} ({len(orig_lines)} lines total, with EXACT 1-Indexed Line Numbers)]\n"
+                f"[IMPORTANT: Use the exact line numbers shown before the colons. Do NOT make up line numbers.]\n"
+                + "\n".join(numbered_lines)[:25000]
+            )
+        else:
+            target_file_context = (
+                f"[Target File to Create: '{target_filename}' (Brand New File)]\n"
+                f"[Status: This file does not exist yet on disk. Write the complete code implementation from scratch for '{target_filename}'.]"
+            )
+
+        direct_files = WorkspaceFileResolver.resolve_query_files(req.goal, workspace_dir)
+        retrieved = await hybrid_engine.search(req.goal, top_k=2, workspace_root=workspace_dir)
+        combined = direct_files + [c for c in retrieved if c.file_path not in {d.file_path for d in direct_files}]
+
+        agent_code_context = target_file_context
+        if combined:
+            rag_context = HybridSearchEngine.build_context_prompt(combined[:2], workspace_root=workspace_dir)
+            if rag_context:
+                agent_code_context += f"\n\n[Related Workspace Context]:\n{rag_context}"
+
+        specs_info = ""
+        if change_specs:
+            specs_info += f"Identified Change Targets: {json.dumps(change_specs)}\n"
+        if target_symbols:
+            specs_info += f"Identified Target Symbols: {', '.join(target_symbols)}\n"
+        if preferred_line:
+            specs_info += f"Target Code Region Focus: around line {preferred_line}\n"
+
+        topic_info = TopicDomainResolver.resolve_topic(req.goal)
+        is_algorithm_or_complex = (
+            intent_label == "ALGORITHM_SYNTHESIS"
+            or any(kw in req.goal.lower() for kw in (
+                "astar", "a*", "a-star", "dijkstra", "pathfinding", "binary search",
+                "quicksort", "mergesort", "dynamic programming", "graph traversal",
+                "red-black tree", "avl tree"
+            ))
+        )
+        is_explicit_full_rewrite = any(kw in req.goal.lower() for kw in (
+            "from scratch", "full rewrite", "rewrite the whole file", "rewrite entire file",
+            "overwrite file", "replace entire file"
+        ))
+        is_comprehensive = is_new_file or is_explicit_full_rewrite
+
+        target_ext = Path(target_filename).suffix.lstrip(".")
+        lang_hint = target_ext if target_ext else "python"
+
+        if is_comprehensive:
+            prompt = (
+                f"Goal: {req.goal}\n"
+                f"Target File: {target_filename}\n"
+                f"Write the complete code implementation for '{target_filename}' to fulfill: {req.goal}\n\n"
+                "GUIDELINES:\n"
+                "- Write the exact, complete, working implementation requested by the user.\n"
+                "- Directly answer the user prompt without adding unsolicited architecture or unnecessary boilerplate.\n"
+                "- ZERO EMOJIS: Do not use emojis anywhere in your output.\n"
+                f"- Output your code inside a ```{lang_hint} code block directly."
+            )
+        else:
+            prompt = (
+                f"Goal: {req.goal}\n"
+                f"Target File: {target_filename}\n"
+                f"{specs_info}"
+                f"Implement the minimal, surgical change in '{target_filename}' to achieve: {req.goal}\n\n"
+                "RULES:\n"
+                "- ZERO EMOJIS: Do not use emojis anywhere in your output.\n"
+                f"- MINIMAL SURGICAL SCOPE: Make ONLY the minimal changes required in '{target_filename}'. Do NOT rewrite unchanged logic.\n"
+                "- EXACT LINE NUMBERS: Use the exact line numbers from the context above.\n"
+                f"- Output your solution as a standard unified diff (```diff) or updated code block (```{lang_hint})."
+            )
+
+        accumulated_tokens = []
+        async for token in ollama_provider.stream_reasoning(prompt, code_context=agent_code_context):
+            accumulated_tokens.append(token)
+            yield f"data: {json.dumps({'token': token})}\n\n"
+
+        generated = "".join(accumulated_tokens)
+
+        # Build surgical minimal diff
+        diff_text = PatchEngine.build_surgical_diff(orig_lines, generated, target_filename, preferred_line=preferred_line)
+        is_valid, final_diff, err_msg = PatchEngine.validate_and_heal_diff(orig_lines, diff_text, target_filename)
+
+        if not is_valid and err_msg and target_filename.endswith(".py"):
+            try:
+                repair_prompt = (
+                    f"The proposed modification for '{target_filename}' caused: {err_msg}\n"
+                    f"Goal was: {req.goal}\n"
+                    f"Original diff was:\n{diff_text}\n"
+                    f"Please provide the corrected, syntactically valid code or SEARCH/REPLACE block for '{target_filename}'.\n"
+                    "Output ONLY the corrected code or diff inside a code block."
+                )
+                repair_gen = await ollama_provider.generate_text(repair_prompt, code_context=agent_code_context)
+                repaired_diff = PatchEngine.build_surgical_diff(orig_lines, repair_gen, target_filename)
+                rep_valid, rep_diff, _ = PatchEngine.validate_and_heal_diff(orig_lines, repaired_diff, target_filename)
+                if rep_valid:
+                    final_diff = rep_diff
+                    is_valid = True
+            except Exception:
+                pass
+
+        if final_diff:
+            header_match = re.search(r"\+\+\+\s+(?:b/)?([^\s\n\r]+)", final_diff)
+            if header_match and header_match.group(1) != "/dev/null":
+                target_filename = Path(header_match.group(1)).name
+
+        hunks = PatchEngine.split_into_hunks(final_diff)
+        staged_files = PatchEngine.split_multi_file_diff(final_diff)
+
+        if is_new_file:
+            log_msg = f"Generated complete implementation for new file '{target_filename}'."
+        elif is_algorithm_or_complex:
+            log_msg = f"Synthesized production-ready implementation of {topic_info.get('topic', 'algorithm')} for '{target_filename}'."
+        else:
+            log_msg = f"Synthesized surgical solution for '{target_filename}'." if final_diff else f"Generated response for '{target_filename}'."
+
+        completion_data = {
+            "step_id": req.step_id,
+            "status": "done",
+            "target_file": target_filename,
+            "diff": final_diff,
+            "hunks": hunks,
+            "staged_files": staged_files,
+            "valid": is_valid,
+            "generated": generated,
+            "log": log_msg,
+            "done": True
+        }
+        yield f"data: {json.dumps(completion_data)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(step_stream_generator(), media_type="text/event-stream")
+
+
 # ---------------------------------------------------------
 # 5. Patch Application & Self-Healing Repair Loop
 # ---------------------------------------------------------
@@ -1764,22 +2134,52 @@ async def apply_patch(req: ApplyPatchRequest):
 
     return result
 
+class RebaseDiffRequest(BaseModel):
+    file_path: str
+    base_content: str
+    diff: str
+    current_content: str
+    workspace_path: Optional[str] = None
+    force_resolution: Optional[str] = None
+
+@app.post("/api/agent/rebase-diff")
+async def rebase_diff(req: RebaseDiffRequest):
+    workspace = resolve_workspace_path(req.workspace_path)
+    result = PatchEngine.rebase_staged_diff(
+        file_path=req.file_path,
+        base_content=req.base_content,
+        diff_text=req.diff,
+        current_content=req.current_content,
+        workspace_path=str(workspace),
+        force_resolution=req.force_resolution
+    )
+    return result
+
 class ComputeDiffRequest(BaseModel):
     target_file: str
     code_or_snippet: str
     workspace_path: Optional[str] = None
     preferred_line: Optional[int] = None
+    active_file_content: Optional[str] = None
 
 @app.post("/api/agent/compute-diff")
 async def compute_diff(req: ComputeDiffRequest):
     workspace = resolve_workspace_path(req.workspace_path)
     target_path = PatchEngine.resolve_target_path(req.target_file, str(workspace))
     orig_lines = []
-    if target_path.exists() and target_path.is_file():
+    if req.active_file_content is not None:
+        orig_lines = req.active_file_content.splitlines()
+        live_file_buffers[req.target_file] = req.active_file_content
+        live_file_buffers[target_path.name] = req.active_file_content
+    elif target_path.exists() and target_path.is_file():
         try:
             orig_lines = target_path.read_text(encoding="utf-8", errors="ignore").splitlines()
         except Exception:
             orig_lines = []
+    elif req.target_file in live_file_buffers:
+        orig_lines = live_file_buffers[req.target_file].splitlines()
+    elif target_path.name in live_file_buffers:
+        orig_lines = live_file_buffers[target_path.name].splitlines()
 
     diff_text = PatchEngine.build_surgical_diff(orig_lines, req.code_or_snippet, target_path.name, preferred_line=req.preferred_line)
     is_valid, final_diff, err = PatchEngine.validate_and_heal_diff(orig_lines, diff_text, target_path.name)

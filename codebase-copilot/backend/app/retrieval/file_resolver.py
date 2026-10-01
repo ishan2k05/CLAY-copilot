@@ -183,19 +183,29 @@ class WorkspaceFileResolver:
 
         # 4. If query refers to active/open editor file ("this file", "the file", "all contents", "recheck", etc.), resolve context_file
         is_casual = bool(re.match(r'^(hi|hello|hey|greetings|hola|good\s+(morning|afternoon|evening)|who are you|what can you do)[\s!.?]*$', clean_query))
+        root_path = cls._resolve_root(workspace_root)
         if context_file and not is_casual:
             cp = Path(context_file).resolve()
-            is_valid_context = cp.exists() or bool(context_file_content) or (live_buffers and str(cp) in live_buffers)
-            if is_valid_context:
-                ref_indicators = [
-                    "the file", "this file", "current file", "entire file",
-                    "whole file", "all content", "all contents", "all the code",
-                    "from the file", "open file", "active file", "what is in", "how many lines",
-                    "recheck", "rechcek", "rechek", "refresh", "sync", "code", "lines", "write",
-                    "implement", "add", "refactor", "inspect", "review", "examine", "check", "explain", "run"
-                ]
-                if any(ind in normalized_query for ind in ref_indicators) or not matched_paths:
-                    matched_paths[str(cp)] = cp
+            # Boundary containment: ensure context_file is strictly within root_path
+            is_in_root = False
+            try:
+                cp.relative_to(root_path)
+                is_in_root = True
+            except ValueError:
+                is_in_root = False
+
+            if is_in_root:
+                is_valid_context = cp.exists() or bool(context_file_content) or (live_buffers and str(cp) in live_buffers)
+                if is_valid_context:
+                    ref_indicators = [
+                        "the file", "this file", "current file", "entire file",
+                        "whole file", "all content", "all contents", "all the code",
+                        "from the file", "open file", "active file", "what is in", "how many lines",
+                        "recheck", "rechcek", "rechek", "refresh", "sync", "code", "lines", "write",
+                        "implement", "add", "refactor", "inspect", "review", "examine", "check", "explain", "run"
+                    ]
+                    if any(ind in normalized_query for ind in ref_indicators) or not matched_paths:
+                        matched_paths[str(cp)] = cp
 
         # 4.5. Multi-turn session context fallback: if query did not match any files directly (e.g. "yes give me flowchart", "draw the diagram", "how does it work?", "explain this"), inspect recent history turns to maintain session continuity
         if not matched_paths and history:
@@ -212,14 +222,12 @@ class WorkspaceFileResolver:
 
         # 5. Read matched files directly (always prioritizing fresh disk state and active editor buffers)
         chunks: List[CodeChunk] = []
-        root_path = cls._resolve_root(workspace_root)
 
         for p in matched_paths.values():
-            if security_mode in ("strict", "sandboxed"):
-                try:
-                    p.resolve().relative_to(root_path)
-                except ValueError:
-                    continue
+            try:
+                p.resolve().relative_to(root_path)
+            except ValueError:
+                continue
 
             if SecretMasker.is_file_sensitive(str(p)):
                 continue
