@@ -47,6 +47,21 @@ export class BackendClient {
     constructor() {
         const config = vscode.workspace.getConfiguration('codebaseCopilot');
         this.backendUrl = config.get<string>('backendUrl', 'http://127.0.0.1:8765');
+
+        vscode.workspace.onDidChangeConfiguration((e) => {
+            if (e.affectsConfiguration('codebaseCopilot.backendUrl')) {
+                const updatedConfig = vscode.workspace.getConfiguration('codebaseCopilot');
+                this.backendUrl = updatedConfig.get<string>('backendUrl', 'http://127.0.0.1:8765');
+            }
+        });
+    }
+
+    public getBackendUrl(): string {
+        return this.backendUrl;
+    }
+
+    public setBackendUrl(url: string): void {
+        this.backendUrl = url;
     }
 
     stopStreamChat(): void {

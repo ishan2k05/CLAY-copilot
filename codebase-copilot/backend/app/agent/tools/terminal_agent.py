@@ -5,7 +5,13 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from app.security.guardrails import CommandSafetyGuard
+try:
+    from app.security.guardrails import CommandSafetyGuard
+except ModuleNotFoundError:
+    try:
+        from backend.app.security.guardrails import CommandSafetyGuard
+    except ModuleNotFoundError:
+        from ...security.guardrails import CommandSafetyGuard
 
 class TerminalAgent:
     """

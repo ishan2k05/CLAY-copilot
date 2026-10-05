@@ -1,6 +1,15 @@
 import unittest
 import tempfile
+import sys
 from pathlib import Path
+
+_backend_dir = Path(__file__).resolve().parent.parent
+if str(_backend_dir) not in sys.path:
+    sys.path.insert(0, str(_backend_dir))
+_root_dir = _backend_dir.parent
+if str(_root_dir) not in sys.path:
+    sys.path.insert(0, str(_root_dir))
+
 from fastapi.testclient import TestClient
 
 from app.agent.patch_engine import PatchEngine, SurgicalDiffBuilder
@@ -434,6 +443,62 @@ class TestSurgicalDiffAndMerger(unittest.TestCase):
         self.assertIn('+print("human")', diff)
         valid, healed, err = PatchEngine.validate_and_heal_diff(orig_lines, diff, "app.py")
         self.assertTrue(valid)
+
+    def test_bare_at_at_diff_applies_cleanly(self):
+        orig = [
+            "from fastapi import FastAPI, Depends, HTTPException",
+            "import os",
+            "",
+            "def foo():",
+            "    return 42",
+        ]
+        # Diff with bare @@ header
+        diff_lines = [
+            "--- a/app.py",
+            "+++ b/app.py",
+            "@@",
+            "-from fastapi import FastAPI, Depends, HTTPException",
+            "+from fastapi import FastAPI, Depends",
+        ]
+        applied = PatchEngine._apply_unified_diff(orig, diff_lines)
+        self.assertIn("from fastapi import FastAPI, Depends", applied)
+        self.assertNotIn("from fastapi import FastAPI, Depends, HTTPException", applied)
+        self.assertIn("def foo():", applied)
+        self.assertIn("    return 42", applied)
+
+    def test_unmatched_deletion_does_not_wipe_innocent_functions(self):
+        orig = [
+            "from fastapi import FastAPI",
+            "",
+            "class SimpleCache:",
+            "    pass",
+            "",
+            "async def long_running_computation(task_id: str, payload: dict) -> None:",
+            "    '''heavy work'''",
+            "    return None",
+        ]
+        # Diff with an unmatched deletion hunk at the end
+        diff_lines = [
+            "--- a/app.py",
+            "+++ b/app.py",
+            "@@",
+            "-class ProcessResult(BaseModel):",
+            "-    task_id: str",
+        ]
+        applied = PatchEngine._apply_unified_diff(orig, diff_lines)
+        # Verify innocent functions were NOT deleted
+        self.assertIn("class SimpleCache:", applied)
+        self.assertIn("async def long_running_computation(task_id: str, payload: dict) -> None:", applied)
+        self.assertIn("    '''heavy work'''", applied)
+
+    def test_placeholder_file_refusal(self):
+        with tempfile.TemporaryDirectory() as td:
+            # Attempting to apply a patch to "FILE" when no matching file exists should refuse
+            res = PatchEngine.apply_patch_hunks("FILE", "@@\n+x = 1\n", td)
+            self.assertEqual(res["status"], "error")
+            self.assertIn("Refusing to create", res["message"])
+            # Ensure no extensionless file was created on disk
+            self.assertFalse((Path(td) / "FILE").exists())
 
 if __name__ == "__main__":
     unittest.main()

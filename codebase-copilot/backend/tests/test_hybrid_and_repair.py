@@ -1,6 +1,15 @@
 import unittest
 import asyncio
+import sys
 from pathlib import Path
+
+_backend_dir = Path(__file__).resolve().parent.parent
+if str(_backend_dir) not in sys.path:
+    sys.path.insert(0, str(_backend_dir))
+_root_dir = _backend_dir.parent
+if str(_root_dir) not in sys.path:
+    sys.path.insert(0, str(_root_dir))
+
 from app.parser.symbols import CodeChunk
 from app.index.vector_store import LocalVectorStore
 from app.index.graph_store import SQLiteGraphStore
@@ -132,6 +141,65 @@ class TestAdvancedEngine(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(PatchEngine.validate_python_syntax(valid_code))
         self.assertFalse(PatchEngine.validate_python_syntax(invalid_code))
+
+    def test_patch_engine_validates_typescript_syntax(self):
+        valid_ts = "function calculate(items: number[]): number {\n    return items.reduce((a, b) => a + b, 0);\n}\n"
+        invalid_ts = "function calculate(items: number[]): number {\n    return items.reduce((a, b) => a + b, 0);\n"
+
+        self.assertTrue(PatchEngine.validate_syntax(valid_ts, "math.ts"))
+        self.assertFalse(PatchEngine.validate_syntax(invalid_ts, "math.ts"))
+
+    def test_patch_engine_validates_rust_syntax(self):
+        valid_rust = "pub fn add_numbers<'a>(a: &'a i32, b: &'a i32) -> i32 {\n    *a + *b\n}\n"
+        invalid_rust = "pub fn add_numbers<'a>(a: &'a i32, b: &'a i32) -> i32 {\n    *a + *b\n"
+
+        self.assertTrue(PatchEngine.validate_syntax(valid_rust, "lib.rs"))
+        self.assertFalse(PatchEngine.validate_syntax(invalid_rust, "lib.rs"))
+
+    def test_patch_engine_validates_and_heals_json(self):
+        valid_json = '{\n    "name": "clay",\n    "version": "1.0.0"\n}\n'
+        trailing_comma_json = '{\n    "name": "clay",\n    "version": "1.0.0",\n}\n'
+
+        self.assertTrue(PatchEngine.validate_syntax(valid_json, "package.json"))
+        self.assertFalse(PatchEngine.validate_syntax(trailing_comma_json, "package.json"))
+
+        repaired = PatchEngine._attempt_syntax_repair([], [], trailing_comma_json, filename="package.json")
+        self.assertIsNotNone(repaired)
+        self.assertTrue(PatchEngine.validate_syntax(repaired, "package.json"))
+
+    def test_patch_engine_heals_unclosed_brace_typescript(self):
+        orig = "function greet(name: string): string {\n    return `Hello ${name}`;\n}\n"
+        # Patch snippet missing closing brace
+        bad_patched = "function greet(name: string): string {\n    if (!name) {\n        return 'Hello Guest';\n    return `Hello ${name}`;\n}\n"
+        diff_lines = [
+            "--- a/greet.ts",
+            "+++ b/greet.ts",
+            "@@ -1,3 +1,4 @@",
+            " function greet(name: string): string {",
+            "+    if (!name) {",
+            "+        return 'Hello Guest';",
+            "     return `Hello ${name}`;",
+            " }"
+        ]
+        ok, healed_diff, err = PatchEngine.validate_and_heal_diff(orig, "\n".join(diff_lines), "greet.ts")
+        self.assertTrue(ok)
+        self.assertIsNotNone(healed_diff)
+
+    def test_patch_engine_heals_unclosed_brace_rust(self):
+        orig = "pub fn process(val: i32) -> i32 {\n    val * 2\n}\n"
+        diff_lines = [
+            "--- a/lib.rs",
+            "+++ b/lib.rs",
+            "@@ -1,3 +1,5 @@",
+            " pub fn process(val: i32) -> i32 {",
+            "+    if val > 10 {",
+            "+        return val * 3;",
+            "     val * 2",
+            " }"
+        ]
+        ok, healed_diff, err = PatchEngine.validate_and_heal_diff(orig, "\n".join(diff_lines), "lib.rs")
+        self.assertTrue(ok)
+        self.assertIsNotNone(healed_diff)
 
 if __name__ == "__main__":
     unittest.main()

@@ -45,6 +45,13 @@ class HybridSearchEngine:
             if p.name.lower() in query_words or p.stem.lower() in query_words:
                 direct_file_matches.append(chunk)
 
+        # Build O(1) lookup tables to eliminate quadratic nested linear scanning
+        chunk_by_id: Dict[str, CodeChunk] = {c.chunk_id: c for c in self.vector_store.chunks}
+        chunk_by_symbol: Dict[str, List[CodeChunk]] = {}
+        for c in self.vector_store.chunks:
+            if c.symbol_name:
+                chunk_by_symbol.setdefault(c.symbol_name, []).append(c)
+
         # 5. Compute Unified RRF Scores across all 4 streams
         scores: Dict[str, float] = {}
         chunk_map: Dict[str, CodeChunk] = {}
@@ -58,12 +65,10 @@ class HybridSearchEngine:
         # Stream B: SQLite FTS5 BM25 Full-Text Keyword Matches (weight: 1.5)
         for rank, bm in enumerate(bm25_results, start=1):
             cid = bm.get("chunk_id")
-            if cid:
-                for chunk in self.vector_store.chunks:
-                    if chunk.chunk_id == cid:
-                        chunk_map[cid] = chunk
-                        scores[cid] = scores.get(cid, 0.0) + (1.5 / (k_constant + rank))
-                        break
+            if cid and cid in chunk_by_id:
+                chunk = chunk_by_id[cid]
+                chunk_map[cid] = chunk
+                scores[cid] = scores.get(cid, 0.0) + (1.5 / (k_constant + rank))
 
         # Stream C: Semantic Vector Ranks (weight: 1.0)
         for item in vector_results:
@@ -75,8 +80,9 @@ class HybridSearchEngine:
 
         # Stream D: Symbol Proximity Ranks (weight: 1.0)
         for rank, sym in enumerate(symbol_results, start=1):
-            for chunk in self.vector_store.chunks:
-                if chunk.symbol_name == sym["name"]:
+            sym_name = sym.get("name")
+            if sym_name and sym_name in chunk_by_symbol:
+                for chunk in chunk_by_symbol[sym_name]:
                     cid = chunk.chunk_id
                     chunk_map[cid] = chunk
                     scores[cid] = scores.get(cid, 0.0) + (1.0 / (k_constant + rank))

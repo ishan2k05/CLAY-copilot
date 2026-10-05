@@ -5,7 +5,7 @@
 (function () {
   const isVsCode = typeof acquireVsCodeApi === 'function';
   const vscode = isVsCode ? acquireVsCodeApi() : null;
-  const BACKEND_URL = 'http://127.0.0.1:8765';
+  let BACKEND_URL = (typeof window !== 'undefined' && window.__CLAY_BACKEND_URL__) ? window.__CLAY_BACKEND_URL__ : 'http://127.0.0.1:8765';
 
   // Host OS Autodetection from browser runtime / navigator
   const isHostWin = typeof navigator !== 'undefined' && (/Win/i.test(navigator.platform) || /Windows/i.test(navigator.userAgent));
@@ -57,11 +57,17 @@
     if (isFileInCurrentRepo(activeEditorFile)) {
       return activeEditorFile;
     }
+    if (activeEditorFile && (activeEditorFile.includes('/') || activeEditorFile.includes('\\') || activeEditorFile.includes('.'))) {
+      return activeEditorFile;
+    }
     return null;
   }
 
   function getActiveEditorContentInRepo() {
     if (isFileInCurrentRepo(activeEditorFile)) {
+      return activeEditorContent;
+    }
+    if (activeEditorContent !== undefined && activeEditorContent !== null) {
       return activeEditorContent;
     }
     return null;
@@ -94,27 +100,45 @@
     return null;
   }
 
+  const GENERIC_DIFF_PLACEHOLDERS = new Set([
+    'file', 'unknown', 'filename', 'patch', 'diff',
+    'solution.py', 'patch.diff', 'code', 'script',
+    'untitled', 'path/to/file', 'new_file', 'null', 'example'
+  ]);
+
+  function isPlaceholderFilename(name) {
+    if (!name || typeof name !== 'string') return true;
+    const clean = name.trim().toLowerCase();
+    if (GENERIC_DIFF_PLACEHOLDERS.has(clean)) return true;
+    if (!clean.includes('.') && clean.length <= 15) return true;
+    return false;
+  }
+
   function extractDiffFilename(diffText) {
     if (!diffText) return null;
     const plusMatch = diffText.match(/\+\+\+\s+(?:b\/)?([^\s\n\r]+)/);
     if (plusMatch && plusMatch[1] && plusMatch[1] !== '/dev/null') {
       const parts = plusMatch[1].split(/[\\/]/);
-      return parts[parts.length - 1];
+      const cand = parts[parts.length - 1];
+      if (!isPlaceholderFilename(cand)) return cand;
     }
     const minusMatch = diffText.match(/---\s+(?:a\/)?([^\s\n\r]+)/);
     if (minusMatch && minusMatch[1] && minusMatch[1] !== '/dev/null') {
       const parts = minusMatch[1].split(/[\\/]/);
-      return parts[parts.length - 1];
+      const cand = parts[parts.length - 1];
+      if (!isPlaceholderFilename(cand)) return cand;
     }
     const srMatch = diffText.match(/<{4,}\s*SEARCH(?::|\s+in|\s+for)?\s+([^\s\n\r]+)/i);
     if (srMatch && srMatch[1]) {
       const parts = srMatch[1].split(/[\\/]/);
-      return parts[parts.length - 1];
+      const cand = parts[parts.length - 1];
+      if (!isPlaceholderFilename(cand)) return cand;
     }
     const fileCommentMatch = diffText.match(/^(?:#|\/\/|\/\*)\s*([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+)/m);
     if (fileCommentMatch && fileCommentMatch[1]) {
       const parts = fileCommentMatch[1].split(/[\\/]/);
-      return parts[parts.length - 1];
+      const cand = parts[parts.length - 1];
+      if (!isPlaceholderFilename(cand)) return cand;
     }
     return null;
   }
@@ -1430,15 +1454,41 @@
 
       if (diffMatch) {
         detectedDiff = diffMatch[1].trim();
-        targetFilename = extractDiffFilename(detectedDiff) || getPrimaryRepoFile(lastUserQuery || fullText);
-        stageDiff(targetFilename, detectedDiff);
+        targetFilename = extractDiffFilename(detectedDiff) || (getActiveEditorFileInRepo() ? getActiveEditorFileInRepo().split(/[\\/]/).pop() : null) || getPrimaryRepoFile(lastUserQuery || fullText);
       } else {
         const rawDiffMatch = fullText.match(/(--- (?:a\/|\/dev\/null)[^\n]+\n\+\+\+ (?:b\/|[^\n]+)[^\n]*\n@@[\s\S]*?)(?:```|$)/);
         if (rawDiffMatch) {
           detectedDiff = rawDiffMatch[1].trim();
-          targetFilename = extractDiffFilename(detectedDiff) || getPrimaryRepoFile(lastUserQuery || fullText);
-          stageDiff(targetFilename, detectedDiff);
+          targetFilename = extractDiffFilename(detectedDiff) || (getActiveEditorFileInRepo() ? getActiveEditorFileInRepo().split(/[\\/]/).pop() : null) || getPrimaryRepoFile(lastUserQuery || fullText);
         }
+      }
+
+      if (detectedDiff && targetFilename) {
+        stageDiff(targetFilename, detectedDiff);
+        // Asynchronously heal bare @@ or missing line numbers through compute-diff
+        (async () => {
+          try {
+            const compRes = await fetch(`${BACKEND_URL}/api/agent/compute-diff`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                target_file: targetFilename,
+                code_or_snippet: detectedDiff,
+                workspace_path: currentRepoPath,
+                active_file_content: activeEditorContent || undefined,
+                preferred_line: activeEditorCursorLine || undefined
+              })
+            });
+            if (compRes.ok) {
+              const compData = await compRes.json();
+              if (compData && compData.diff && compData.diff.trim().length > 0) {
+                stageDiff(targetFilename, compData.diff, compData.staged_files);
+              }
+            }
+          } catch (e) {
+            console.warn('[compute-diff in onStreamFinished failed]', e);
+          }
+        })();
       }
 
       // Check if there is a general executable code block if diff wasn't detected (strictly excluding mermaid)
@@ -2890,9 +2940,6 @@
             <span class="guard-pill-title" id="guard-pill-title">Buffer modified in editor</span>
           </div>
           <div class="guard-pill-actions">
-            <button type="button" class="btn-guard-rebase" id="btn-guard-rebase" title="Recalculate line offsets and re-align diff with editor edits">
-              Auto-Rebase Diff
-            </button>
             <button type="button" class="btn-guard-conflicts" id="btn-guard-conflicts" style="display: none;" title="Inspect conflicting line ranges">
               View Conflicts (<span id="conflict-count">0</span>)
             </button>
@@ -2902,7 +2949,7 @@
             <button type="button" class="btn-guard-accept-agent" id="btn-guard-accept-agent" style="display: none;" title="Overwrite conflicting lines with agent code">
               Accept Agent's
             </button>
-            <button type="button" class="btn-guard-dismiss" id="btn-guard-dismiss" title="Dismiss warning and apply as-is">
+            <button type="button" class="btn-guard-dismiss" id="btn-guard-dismiss" title="Dismiss warning and review diff">
               Dismiss
             </button>
           </div>
@@ -5539,6 +5586,12 @@
     if (!msg) return;
 
     switch (msg.command) {
+      case 'setBackendUrl':
+        if (msg.url && typeof msg.url === 'string') {
+          BACKEND_URL = msg.url.replace(/\/+$/, '');
+        }
+        break;
+
       case 'terminalCommandResult': {
         const data = msg.data;
         if (data) {
@@ -5807,7 +5860,7 @@
   function renderDiffLines(diffText) {
     if (!diffText) return '';
     const rawLines = diffText.split('\n');
-    const hunkHeaderRe = /^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/;
+    const hunkHeaderRe = /^@@\s*(?:-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?)?.*?@@?/;
 
     let oldLine = 1;
     let newLine = 1;
@@ -5820,9 +5873,9 @@
     while (idx < rawLines.length) {
       const line = rawLines[idx];
       const hunkMatch = line.match(hunkHeaderRe);
-      if (hunkMatch) {
-        oldLine = parseInt(hunkMatch[1], 10);
-        newLine = parseInt(hunkMatch[2], 10);
+      if (hunkMatch && line.startsWith('@@')) {
+        if (hunkMatch[1]) oldLine = parseInt(hunkMatch[1], 10);
+        if (hunkMatch[2]) newLine = parseInt(hunkMatch[2], 10);
         insideHunk = true;
         parsedItems.push({
           type: 'hunk_header',
@@ -6341,30 +6394,31 @@
     }
 
     let finalDiff = rawText;
-    if (rawText.includes('<<<<<<< SEARCH')) {
-      try {
-        const res = await fetch(`${BACKEND_URL}/api/agent/compute-diff`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            workspace_path: currentRepoPath,
-            target_file: target,
-            code_or_snippet: rawText,
-            preferred_line: activeEditorCursorLine || undefined
-          })
-        });
-        if (res.ok) {
-          const cData = await res.json();
-          if (cData.diff) {
-            finalDiff = cData.diff;
-          }
+    let stagedFiles = null;
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/agent/compute-diff`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspace_path: currentRepoPath,
+          target_file: target,
+          code_or_snippet: rawText,
+          active_file_content: activeEditorContent || undefined,
+          preferred_line: activeEditorCursorLine || undefined
+        })
+      });
+      if (res.ok) {
+        const cData = await res.json();
+        if (cData && cData.diff && cData.diff.trim().length > 0) {
+          finalDiff = cData.diff;
+          stagedFiles = cData.staged_files || null;
         }
-      } catch (err) {
-        // fallback to rawText
       }
+    } catch (err) {
+      // fallback to rawText
     }
 
-    stageDiff(target, finalDiff);
+    stageDiff(target, finalDiff, stagedFiles);
     switchTab('diff');
     showToast(`Staged changes for ${target} in Diff tab`, 'info');
   });

@@ -13,6 +13,7 @@ logger = logging.getLogger("clay")
 
 from .security.secret_masker import SecretMasker
 from .parser.ast_chunker import PythonASTChunker
+from .parser.universal_chunker import UniversalASTChunker
 from .parser.symbols import CodeChunk
 from .index.graph_store import SQLiteGraphStore
 from .index.vector_store import LocalVectorStore
@@ -33,6 +34,7 @@ from .agent.instruction_parser import (
 from .agent.repair_loop import SelfHealingRepairLoop
 from .agent.tools.terminal_agent import TerminalAgent
 from .llm.gemma_provider import OllamaGemmaProvider
+from .llm.history_compactor import HistoryCompactor
 
 app = FastAPI(title="CLAY Copilot", version="0.2.0")
 
@@ -48,7 +50,7 @@ app.add_middleware(
 # Core subsystems
 graph_store = SQLiteGraphStore("code_graph.sqlite")
 vector_store = LocalVectorStore()
-ast_chunker = PythonASTChunker()
+ast_chunker = UniversalASTChunker()
 ollama_provider = OllamaGemmaProvider()
 hybrid_engine = HybridSearchEngine(vector_store, graph_store)
 planner = AgentPlanner(ollama_provider)
@@ -182,28 +184,13 @@ async def auto_index_workspace(workspace_dir: str) -> Dict[str, int]:
         "__pycache__", ".pytest_cache", ".git", ".idea", ".vscode", ".gemini"
     }
 
-    # 2. Parse Python files with AST Chunker
-    for path in root.rglob("*.py"):
-        try:
-            rel_parts = path.relative_to(root).parts
-        except ValueError:
-            rel_parts = path.parts
-        if any(part.startswith(".") or part in EXCLUDED_DIRS for part in rel_parts):
-            continue
-        if SecretMasker.is_file_sensitive(str(path)):
-            continue
-        try:
-            content = path.read_text(encoding="utf-8", errors="ignore")
-            symbols, relationships, chunks = ast_chunker.parse_file(str(path), content)
-            all_symbols.extend(symbols)
-            all_relationships.extend(relationships)
-            all_chunks.extend(chunks)
-            indexed_files += 1
-        except Exception:
-            continue
-
-    # 3. Index additional essential code files for multi-language context (.ts, .js, .json, .md, .html, etc.)
-    code_exts = {".ts", ".js", ".jsx", ".tsx", ".json", ".md", ".html", ".css", ".toml", ".yaml", ".yml", ".sql", ".sh"}
+    # 2. Parse all workspace code files with Universal AST Chunker across all major languages
+    code_exts = {
+        ".py", ".ts", ".js", ".jsx", ".tsx", ".mjs", ".cjs",
+        ".rs", ".go", ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp",
+        ".java", ".cs", ".php", ".rb", ".kt", ".kts", ".swift",
+        ".json", ".md", ".html", ".css", ".toml", ".yaml", ".yml", ".sql", ".sh", ".bash"
+    }
     for path in root.rglob("*"):
         if not path.is_file():
             continue
@@ -219,28 +206,10 @@ async def auto_index_workspace(workspace_dir: str) -> Dict[str, int]:
             continue
         try:
             content = path.read_text(encoding="utf-8", errors="ignore")
-            lines = content.splitlines()
-            if not lines:
-                continue
-            step = 30
-            for i in range(0, min(len(lines), 120), step):
-                chunk_lines = lines[i:i + step]
-                chunk_body = "\n".join(chunk_lines)
-                if not chunk_body.strip():
-                    continue
-                try:
-                    rel_name = str(path.relative_to(root))
-                except Exception:
-                    rel_name = path.name
-                all_chunks.append(CodeChunk(
-                    chunk_id=f"{path}#{i+1}-{i+len(chunk_lines)}",
-                    file_path=str(path),
-                    symbol_type="file_section",
-                    symbol_name=f"{rel_name}:{i+1}",
-                    start_line=i + 1,
-                    end_line=i + len(chunk_lines),
-                    content=chunk_body
-                ))
+            symbols, relationships, chunks = ast_chunker.parse_file(str(path), content)
+            all_symbols.extend(symbols)
+            all_relationships.extend(relationships)
+            all_chunks.extend(chunks)
             indexed_files += 1
         except Exception:
             continue
@@ -290,27 +259,10 @@ async def reindex_file(file_path: str, content: Optional[str] = None) -> bool:
         new_chunks = []
 
         if content and content.strip():
-            if p.suffix == ".py":
-                try:
-                    new_symbols, new_relationships, new_chunks = ast_chunker.parse_file(str(p), content)
-                except Exception:
-                    pass
-            else:
-                lines = content.splitlines()
-                step = 30
-                for i in range(0, min(len(lines), 120), step):
-                    chunk_lines = lines[i:i + step]
-                    chunk_body = "\n".join(chunk_lines)
-                    if chunk_body.strip():
-                        new_chunks.append(CodeChunk(
-                            chunk_id=f"{p}#{i+1}-{i+len(chunk_lines)}",
-                            file_path=str(p),
-                            symbol_type="file_section",
-                            symbol_name=f"{p.name}:{i+1}",
-                            start_line=i + 1,
-                            end_line=i + len(chunk_lines),
-                            content=chunk_body
-                        ))
+            try:
+                new_symbols, new_relationships, new_chunks = ast_chunker.parse_file(str(p), content)
+            except Exception as e:
+                logger.debug(f"Error parsing {p}: {e}")
 
         if new_symbols:
             await graph_store.insert_batch(new_symbols, new_relationships)
@@ -635,9 +587,11 @@ class ChatRequest(BaseModel):
     history: Optional[List[Dict[str, str]]] = None
 
 active_chat_history: List[Dict[str, str]] = []
+active_rolling_summary: Optional[str] = None
 
 @app.post("/api/chat")
 async def chat_endpoint(req: ChatRequest):
+    global active_rolling_summary
     raw_dir = req.workspace_path or runtime_settings.get("repo_path") or DEFAULT_WORKSPACE
     workspace_dir = str(resolve_workspace_path(raw_dir))
     runtime_settings["repo_path"] = workspace_dir
@@ -690,6 +644,14 @@ async def chat_endpoint(req: ChatRequest):
         active_chat_history.extend(effective_history)
     else:
         effective_history = list(active_chat_history)
+
+    # Multi-turn context window rolling compaction (Tier 1 recent + Tier 2 summary)
+    compacted_history, rolling_summary = HistoryCompactor.compact_history(
+        effective_history,
+        num_ctx=ollama_provider.num_ctx,
+        active_summary=active_rolling_summary
+    )
+    active_rolling_summary = rolling_summary
 
     # 1. Direct file resolution via WorkspaceFileResolver (handles typos, exact matches, top-level scripts, active editor file, live in-memory buffers, multi-turn session history)
     direct_file_chunks = WorkspaceFileResolver.resolve_query_files(
@@ -873,7 +835,8 @@ async def chat_endpoint(req: ChatRequest):
             req.query,
             code_context=full_code_context,
             privacy_filter=is_privacy_guard,
-            history=effective_history
+            history=compacted_history,
+            summary=rolling_summary
         ):
             clean_token = token.replace(r'\"\"\"', '"""').replace(r"\'\'\'", "'''")
             accumulated_tokens.append(clean_token)
@@ -884,8 +847,8 @@ async def chat_endpoint(req: ChatRequest):
         full_assistant_reply = "".join(accumulated_tokens)
         active_chat_history.append({"role": "user", "content": req.query})
         active_chat_history.append({"role": "assistant", "content": full_assistant_reply})
-        if len(active_chat_history) > 20:
-            active_chat_history[:] = active_chat_history[-20:]
+        if len(active_chat_history) > 30:
+            active_chat_history[:] = active_chat_history[-30:]
 
         # Send completion with citations
         yield f"data: {json.dumps({'done': True, 'citations': citations})}\n\n"
@@ -896,8 +859,9 @@ async def chat_endpoint(req: ChatRequest):
 @app.post("/api/chat/clear")
 async def clear_chat_context():
     """Clears any active conversation context, query state, and temporary agent tasks."""
-    global active_task
+    global active_task, active_rolling_summary
     active_chat_history.clear()
+    active_rolling_summary = None
     active_task = {
         "id": "TASK #0001",
         "title": "Awaiting Goal",
@@ -1267,13 +1231,19 @@ async def create_plan(req: PlanRequest):
     change_specs = SymbolEntityResolver.extract_change_specs(req.goal)
 
     selected_model = req.model_name or ollama_provider.model_name
-    dynamic_plan = DynamicTaskPlanner.plan_tasks(
+    from .agent.llm_planner import LLMInstructionDecomposer
+    dynamic_plan = await LLMInstructionDecomposer.decompose_goal(
         goal=req.goal,
+        workspace_dir=workspace_dir,
+        active_file=active_in_ws,
+        accessible_files=accessible,
         target_files=target_files,
         change_specs=change_specs,
-        model=selected_model
+        model=selected_model,
+        provider=ollama_provider
     )
     
+    effective_target_files = dynamic_plan.get("target_files") or target_files
     global active_task
     active_task = {
         "id": f"TASK #{abs(hash(req.goal)) % 9000 + 1000}",
@@ -1282,7 +1252,7 @@ async def create_plan(req: PlanRequest):
         "mode": "autonomous",
         "model": selected_model,
         "intent": dynamic_plan.get("intent", intent_info.get("intent", "EDIT_EXISTING")),
-        "targetFiles": target_files,
+        "targetFiles": effective_target_files,
         "ambiguity": ambiguity,
         "changeSpecs": change_specs,
         "totalSteps": dynamic_plan["total_steps"],
@@ -1366,7 +1336,7 @@ async def execute_agent_step(req: StepExecuteRequest):
             target_path_obj = accessible[primary_name]
         elif target_filename in accessible:
             target_path_obj = accessible[target_filename]
-        elif (Path(workspace_dir) / primary_name).exists():
+        elif (Path(workspace_dir) / primary_name).exists() or "/" in primary_name or "\\" in primary_name:
             target_path_obj = Path(workspace_dir) / primary_name
         else:
             target_path_obj = Path(workspace_dir) / target_filename
@@ -1844,7 +1814,7 @@ async def execute_agent_step_stream(req: StepExecuteRequest):
             target_path_obj = accessible[primary_name]
         elif target_filename in accessible:
             target_path_obj = accessible[target_filename]
-        elif (Path(workspace_dir) / primary_name).exists():
+        elif (Path(workspace_dir) / primary_name).exists() or "/" in primary_name or "\\" in primary_name:
             target_path_obj = Path(workspace_dir) / primary_name
         else:
             target_path_obj = Path(workspace_dir) / target_filename
@@ -2208,6 +2178,22 @@ async def parse_instruction(req: ParseInstructionRequest):
     ambiguity = AmbiguityDetector.check_ambiguity(req.goal, target_files)
     change_specs = SymbolEntityResolver.extract_change_specs(req.goal)
 
+    from .agent.llm_planner import LLMInstructionDecomposer
+    decomposed = await LLMInstructionDecomposer.decompose_goal(
+        goal=req.goal,
+        workspace_dir=workspace_dir,
+        accessible_files=accessible,
+        target_files=target_files,
+        change_specs=change_specs,
+        provider=ollama_provider
+    )
+    if decomposed.get("target_files"):
+        for tf in decomposed["target_files"]:
+            if tf not in target_files:
+                target_files.append(tf)
+    if decomposed.get("intent"):
+        intent_info["intent"] = decomposed["intent"]
+
     target_symbols = []
     if target_files:
         primary_path = accessible.get(target_files[0]) or (Path(workspace_dir) / target_files[0])
@@ -2224,7 +2210,8 @@ async def parse_instruction(req: ParseInstructionRequest):
         "target_files": target_files,
         "target_symbols": target_symbols,
         "change_specs": change_specs,
-        "ambiguity": ambiguity
+        "ambiguity": ambiguity,
+        "plan": decomposed
     }
 
 class DiscardHunkRequest(BaseModel):

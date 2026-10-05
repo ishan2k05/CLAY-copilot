@@ -5568,24 +5568,7 @@ body.vscode-native:not(.claude-dark)[data-vscode-theme-kind="vscode-light"] #seq
 }
 
 .btn-guard-rebase {
-  background: #E5A84B;
-  color: #181412;
-  border: none;
-  border-radius: 4px;
-  font-family: var(--font-pixel, monospace);
-  font-size: 8px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  padding: 4px 10px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.btn-guard-rebase:hover {
-  background: #f1b75c;
-  transform: translateY(-1px);
-  box-shadow: 0 2px 6px rgba(229, 168, 75, 0.4);
+  display: none !important;
 }
 
 .btn-guard-conflicts {

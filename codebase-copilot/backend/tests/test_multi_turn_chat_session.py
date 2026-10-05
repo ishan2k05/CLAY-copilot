@@ -1,6 +1,15 @@
 import json
 import unittest
+import sys
 from pathlib import Path
+
+_backend_dir = Path(__file__).resolve().parent.parent
+if str(_backend_dir) not in sys.path:
+    sys.path.insert(0, str(_backend_dir))
+_root_dir = _backend_dir.parent
+if str(_root_dir) not in sys.path:
+    sys.path.insert(0, str(_root_dir))
+
 from unittest.mock import AsyncMock, patch, MagicMock
 from fastapi.testclient import TestClient
 
@@ -12,9 +21,13 @@ class TestMultiTurnChatSession(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
         active_chat_history.clear()
+        import app.main as main_mod
+        main_mod.active_rolling_summary = None
 
     def tearDown(self):
         active_chat_history.clear()
+        import app.main as main_mod
+        main_mod.active_rolling_summary = None
 
     def test_gemma_provider_injects_conversation_history(self):
         """Verify stream_reasoning includes prior turns in the messages payload."""
@@ -107,6 +120,48 @@ class TestMultiTurnChatSession(unittest.TestCase):
             self.assertEqual(res_clear.status_code, 200)
             self.assertEqual(res_clear.json()["status"], "cleared")
             self.assertEqual(len(active_chat_history), 0)
+
+    def test_chat_endpoint_triggers_compaction_and_clears_summary(self):
+        """Verify /api/chat triggers history compaction for long conversations and /api/chat/clear resets rolling summary."""
+        import app.main as main_mod
+
+        long_history = []
+        for i in range(1, 6):
+            long_history.append({"role": "user", "content": f"Update module_{i}.py to use RSA-256 algorithm"})
+            long_history.append({"role": "assistant", "content": f"Updated module_{i}.py with RSA-256."})
+
+        captured_kwargs = {}
+
+        async def fake_stream(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            yield "Understood."
+
+        with patch.object(ollama_provider, "stream_reasoning", side_effect=fake_stream):
+            res = self.client.post("/api/chat", json={
+                "query": "Now check module_6.py",
+                "stream": True,
+                "history": long_history
+            })
+            self.assertEqual(res.status_code, 200)
+
+            # Compacted history sent to provider should be exactly the last 4 turns
+            sent_history = captured_kwargs.get("history")
+            self.assertIsNotNone(sent_history)
+            self.assertEqual(len(sent_history), 4)
+
+            # Rolling summary should be generated and passed to provider
+            sent_summary = captured_kwargs.get("summary")
+            self.assertIsNotNone(sent_summary)
+            self.assertIn("Files discussed", sent_summary)
+            self.assertIn("module_1.py", sent_summary)
+
+            # Rolling summary should be stored on backend
+            self.assertIsNotNone(main_mod.active_rolling_summary)
+
+            # Clearing chat should reset active_rolling_summary
+            clear_res = self.client.post("/api/chat/clear")
+            self.assertEqual(clear_res.status_code, 200)
+            self.assertIsNone(main_mod.active_rolling_summary)
 
     def test_resolve_query_files_with_multi_turn_history(self):
         """Verifies that follow-up prompts like 'yes give me flowchart' pull files from previous conversation turns."""

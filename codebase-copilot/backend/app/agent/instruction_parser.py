@@ -56,20 +56,20 @@ class InstructionClassifier:
             re.compile(r"\b(?:pytest|unittest|test\s+failure|assertionerror|traceback|tests\s+are\s+failing)\b", re.IGNORECASE),
             re.compile(r"\b(?:make\s+tests?\s+pass|failing\s+assertions?)\b", re.IGNORECASE),
         ],
+        "CREATE_FOLDER": [
+            re.compile(r"^\s*(?:create|make|add|new)\s+(?:me\s+)?(?:a\s+)?(?:new\s+)?(?:folder|directory|dir)\s*(?:named|called|titled|name(?:\s+is)?|as|of|:\s*)?\s*['\"`]?([A-Za-z0-9_\-\.\/]+)['\"`]?", re.IGNORECASE),
+            re.compile(r"\b(?:create|make|add|scaffold|new)\s+(?:me\s+)?(?:a\s+)?(?:new\s+)?(?:folder|directory|dir|package)\b", re.IGNORECASE),
+            re.compile(r"\b(?:folder|directory|dir)\s*(?:named|called|titled|name(?:\s+is)?|as|of|:\s*)?\s*['\"`]?([A-Za-z0-9_\-\.\/]+)['\"`]?\s*(?:only)?$", re.IGNORECASE),
+            re.compile(r"\bnew\s+(?:folder|directory)\b", re.IGNORECASE),
+        ],
         "CREATE_NEW": [
             re.compile(r"\b(?:create|scaffold|add|generate|make|author|bootstrap|write|code|implement|put|dump|save)\b.*?\b(?:new\s+file|new\s+script|new\s+module|new\s+component|new\s+helper|new\s+test)\b", re.IGNORECASE),
             re.compile(r"\b(?:in|into|to|as|inside)\s+(?:a\s+)?(?:new\s+)?(?:file|script|module|component)\s*[,:]?\s*['\"`]?([A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)", re.IGNORECASE),
             re.compile(r"\b(?:new\s+file|create\s+file|add\s+file|make\s+file)\s*[,:]?\s*['\"`]?([A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)", re.IGNORECASE),
-            re.compile(r"\b(?:create|make|add|scaffold|new)\s+(?:a\s+)?(?:new\s+)?(?:folder|directory|dir|package)\b", re.IGNORECASE),
             re.compile(r"\bcreate\s+[A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+\b", re.IGNORECASE),
             re.compile(r"\bput\s+(?:it|them|this|code)?\s*(?:in|into|inside)\s+(?:a\s+)?(?:new\s+)?(?:file|folder)?\s*[,:]?\s*['\"`]?([A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)", re.IGNORECASE),
             re.compile(r"\bsave\s+(?:it|them|this|code)?\s*(?:as|in|to|into)\s+['\"`]?([A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)", re.IGNORECASE),
             re.compile(r"\bnew\s+file\b", re.IGNORECASE),
-            re.compile(r"\bnew\s+(?:folder|directory)\b", re.IGNORECASE),
-        ],
-        "CREATE_FOLDER": [
-            re.compile(r"^\s*(?:create|make|add|new)\s+(?:me\s+)?(?:a\s+)?(?:new\s+)?(?:folder|directory|dir)\s*(?:named|called|titled|name(?:\s+is)?|as|of|:\s*)?\s*['\"`]?([A-Za-z0-9_\-\.\/]+)['\"`]?", re.IGNORECASE),
-            re.compile(r"\b(?:folder|directory|dir)\s*(?:named|called|titled|name(?:\s+is)?|as|of|:\s*)?\s*['\"`]?([A-Za-z0-9_\-\.\/]+)['\"`]?\s*(?:only)?$", re.IGNORECASE),
         ],
         "MULTI_FILE_REFACTOR": [
             re.compile(r"\b(?:rename|refactor|update)\s+across\s+(?:all|multiple|both)\s+files\b", re.IGNORECASE),
@@ -885,8 +885,16 @@ class DynamicTaskPlanner:
 
         steps: List[Dict[str, Any]] = []
 
-        # 1. Pure folder creation (2 Steps)
-        if intent == "CREATE_FOLDER" or (folder_name and not any("." in t for t in extracted_targets)):
+        # Determine whether a file creation or target is explicitly requested
+        has_file_target = bool(
+            any("." in t for t in extracted_targets)
+            or (target_files and any("." in t for t in target_files))
+            or (resolved_target and "." in Path(resolved_target).name and (resolved_target != "test.py" or "test.py" in clean_goal))
+            or any(kw in clean_goal.lower() for kw in ("placeholder file", "new file", "make file", "create file", "save file", ".py", ".ts", ".js", ".html", ".css", ".go", ".rs", ".java"))
+        )
+
+        # 1. Pure folder creation (2 Steps) - ONLY if no file was requested
+        if (intent == "CREATE_FOLDER" or folder_name) and not has_file_target:
             f_display = folder_name or resolved_target
             steps = [
                 {
@@ -932,7 +940,7 @@ class DynamicTaskPlanner:
             ]
 
         # 3. Nested folder + file creation (4 Steps)
-        elif folder_name and resolved_target and intent in ("CREATE_NEW", "CREATE_FOLDER"):
+        elif (folder_name or (resolved_target and ("/" in resolved_target or "\\" in resolved_target))) and has_file_target and (intent in ("CREATE_NEW", "CREATE_FOLDER") or folder_name):
             steps = [
                 {
                     "id": 1,
@@ -1136,7 +1144,7 @@ class DynamicTaskPlanner:
             "goal": clean_goal,
             "intent": intent,
             "topic": topic_info["topic"],
-            "complexity": "huge" if is_huge else ("high" if len(steps) >= 4 else "normal"),
+            "complexity": "huge" if (is_huge or len(steps) >= 5) else ("high" if len(steps) == 4 else "normal"),
             "total_steps": len(steps),
             "target_file": resolved_target,
             "folder_name": folder_name,

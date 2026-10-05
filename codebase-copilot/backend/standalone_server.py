@@ -15,6 +15,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # Import local modules
 from app.parser.ast_chunker import PythonASTChunker
+from app.parser.universal_chunker import UniversalASTChunker
 from app.security.secret_masker import SecretMasker
 from app.index.graph_store import SQLiteGraphStore
 from app.agent.patch_engine import PatchEngine
@@ -29,6 +30,7 @@ from app.agent.instruction_parser import (
 )
 from app.retrieval.file_resolver import WorkspaceFileResolver
 from app.retrieval.repo_map import RepoMapGenerator
+from app.llm.history_compactor import HistoryCompactor
 
 OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = "gpt-oss:120b-cloud"
@@ -89,9 +91,10 @@ def is_path_in_workspace(target_path, workspace_dir) -> bool:
 
 graph_store = SQLiteGraphStore("code_graph.sqlite")
 graph_store._sync_init_db()
-ast_chunker = PythonASTChunker()
+ast_chunker = UniversalASTChunker()
 workspace_file_states = {}
 standalone_chat_history = []
+standalone_rolling_summary = None
 
 def _silent_sync_workspace_sync(workspace_dir: str):
     root = Path(workspace_dir).resolve()
@@ -100,7 +103,12 @@ def _silent_sync_workspace_sync(workspace_dir: str):
     if not root.exists() or not root.is_dir():
         return 0, 0
     current_files = set()
-    code_exts = {".py", ".ts", ".js", ".jsx", ".tsx", ".json", ".md", ".html", ".css", ".toml", ".yaml", ".yml", ".sql", ".sh"}
+    code_exts = {
+        ".py", ".ts", ".js", ".jsx", ".tsx", ".mjs", ".cjs",
+        ".rs", ".go", ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp",
+        ".java", ".cs", ".php", ".rb", ".kt", ".kts", ".swift",
+        ".json", ".md", ".html", ".css", ".toml", ".yaml", ".yml", ".sql", ".sh", ".bash"
+    }
     excluded = {"venv", ".venv", "env", "node_modules", "dist", "build", "__pycache__", ".git", ".idea", ".vscode", ".gemini"}
     for p in root.rglob("*"):
         if not p.is_file() or p.suffix.lower() not in code_exts:
@@ -117,7 +125,7 @@ def _silent_sync_workspace_sync(workspace_dir: str):
             if prev_state is None or prev_state != (st.st_mtime, st.st_size):
                 workspace_file_states[p_str] = (st.st_mtime, st.st_size)
                 graph_store._sync_delete_file_symbols(p_str)
-                if st.st_size > 0 and p.suffix == ".py":
+                if st.st_size > 0:
                     content = p.read_text(encoding="utf-8", errors="ignore")
                     syms, rels, chunks = ast_chunker.parse_file(p_str, content)
                     graph_store._sync_insert_batch(syms, rels)
@@ -482,6 +490,16 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             else:
                 effective_history = list(standalone_chat_history)
 
+            # Multi-turn context window rolling compaction (Tier 1 recent + Tier 2 summary)
+            global standalone_rolling_summary
+            ctx_tokens = int(body.get("num_ctx", runtime_settings.get("num_ctx", 32768)))
+            compacted_history, rolling_summary = HistoryCompactor.compact_history(
+                effective_history,
+                num_ctx=ctx_tokens,
+                active_summary=standalone_rolling_summary
+            )
+            standalone_rolling_summary = rolling_summary
+
             # Resolve fresh context directly using WorkspaceFileResolver with multi-turn session awareness
             resolved_chunks = WorkspaceFileResolver.resolve_query_files(
                 query=query,
@@ -609,14 +627,23 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             active_host = runtime_settings.get("host", OLLAMA_URL)
 
             messages = [{"role": "system", "content": system_instruction}]
-            if effective_history:
-                for turn in effective_history[-10:]:
+
+            # Inject rolling conversation summary if present (Tier 2)
+            if standalone_rolling_summary and standalone_rolling_summary.strip():
+                messages.append({
+                    "role": "system",
+                    "content": f"<conversation_summary>\n[Context from earlier turns in this session]:\n{standalone_rolling_summary.strip()}\n</conversation_summary>"
+                })
+
+            # Inject recent conversation turns (Tier 1)
+            if compacted_history:
+                for turn in compacted_history:
                     r = turn.get("role", "user")
                     c = turn.get("content", "")
                     if c and r in ("user", "assistant"):
                         m_c = SecretMasker.mask_text(c, enabled=runtime_settings.get("privacy_filter", True))
-                        if len(m_c) > 2000:
-                            m_c = m_c[:2000] + "..."
+                        if len(m_c) > 3000:
+                            m_c = m_c[:3000] + "..."
                         messages.append({"role": r, "content": m_c})
 
             messages.append({"role": "user", "content": f"Context:\n{sanitized_ctx}\n\nTask: {sanitized_query}"})
@@ -655,7 +682,7 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                             except Exception:
                                 pass
             except Exception as e:
-                err_sse = f"data: {json.dumps({'token': f'\\n⚠️ [Ollama Notice: {str(e)} - Ensure ollama serve is active]' })}\n\n"
+                err_sse = f"data: {json.dumps({'token': f'\\n[Ollama Notice: {str(e)} - Ensure ollama serve is active]' })}\n\n"
                 self.wfile.write(err_sse.encode("utf-8"))
 
             # Update session history with completed turn
@@ -663,14 +690,16 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             if query and full_reply:
                 standalone_chat_history.append({"role": "user", "content": query})
                 standalone_chat_history.append({"role": "assistant", "content": full_reply})
-                if len(standalone_chat_history) > 20:
-                    standalone_chat_history[:] = standalone_chat_history[-20:]
+                if len(standalone_chat_history) > 30:
+                    standalone_chat_history[:] = standalone_chat_history[-30:]
 
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
 
         elif self.path == "/api/chat/clear":
+            global standalone_rolling_summary
             standalone_chat_history.clear()
+            standalone_rolling_summary = None
             self.send_response(200)
             self._set_cors_headers()
             self.send_header("Content-Type", "application/json")
@@ -686,7 +715,15 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             indexed_count = 0
 
             if root.exists():
-                for p in root.rglob("*.py"):
+                code_exts = {
+                    ".py", ".ts", ".js", ".jsx", ".tsx", ".mjs", ".cjs",
+                    ".rs", ".go", ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp",
+                    ".java", ".cs", ".php", ".rb", ".kt", ".kts", ".swift",
+                    ".json", ".md", ".html", ".css", ".toml", ".yaml", ".yml", ".sql", ".sh", ".bash"
+                }
+                for p in root.rglob("*"):
+                    if not p.is_file() or p.suffix.lower() not in code_exts:
+                        continue
                     if any(part.startswith(".") or part in ["venv", "node_modules", "dist"] for part in p.parts):
                         continue
                     if SecretMasker.is_file_sensitive(str(p)):

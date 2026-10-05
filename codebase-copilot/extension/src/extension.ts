@@ -9,9 +9,14 @@ let serverManager: ServerProcessManager | null = null;
 export async function activate(context: vscode.ExtensionContext) {
     // 1. Auto-launch or connect to local Python FastAPI backend sidecar
     serverManager = new ServerProcessManager();
-    await serverManager.startServer(context.extensionPath);
+    const config = vscode.workspace.getConfiguration('codebaseCopilot');
+    const configuredUrl = config.get<string>('backendUrl');
+    await serverManager.startServer(context.extensionPath, configuredUrl);
 
     const backendClient = new BackendClient();
+    if (serverManager.getActiveUrl()) {
+        backendClient.setBackendUrl(serverManager.getActiveUrl());
+    }
 
     // 2. Register Webview View Provider (Primary Sidebar) with retainContextWhenHidden
     // Keeps webview execution context alive when minimized, collapsed, or when switching sidebar views

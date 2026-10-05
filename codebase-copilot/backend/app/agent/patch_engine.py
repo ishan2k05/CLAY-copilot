@@ -1,6 +1,7 @@
 import os
 import re
 import ast
+import json
 import difflib
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -552,6 +553,240 @@ class PatchEngine:
             return False
 
     @classmethod
+    def is_syntax_supported(cls, filename_or_path: str) -> bool:
+        """Returns True if the file extension is supported for syntax validation."""
+        ext = Path(filename_or_path).suffix.lower()
+        return ext in {
+            ".py", ".json",
+            ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+            ".rs", ".go",
+            ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp",
+            ".java", ".cs", ".css", ".scss", ".less"
+        }
+
+    @classmethod
+    def _check_bracket_balance(
+        cls, code: str, filename: str
+    ) -> Tuple[bool, Optional[str], List[str]]:
+        """
+        Lexical delimiter balance checker for C-style and bracketed languages (TS, JS, Rust, Go, C++, etc.).
+        Accurately parses comments (//, /* */) and string literals (", ', `, r#"..."#),
+        tracking balance of {}, (), [].
+        Returns (is_valid, error_message, list_of_missing_closing_delimiters).
+        """
+        ext = Path(filename).suffix.lower()
+        is_rust = ext == ".rs"
+
+        stack: List[Tuple[str, int, int]] = []
+
+        i = 0
+        n = len(code)
+        line = 1
+        col = 1
+
+        in_line_comment = False
+        in_block_comment = False
+        in_string: Optional[str] = None
+        rust_raw_hashes = 0
+        template_depth = 0
+
+        pairs = {"{": "}", "(": ")", "[": "]"}
+        closers = {"}", ")", "]"}
+
+        while i < n:
+            ch = code[i]
+
+            if ch == "\n":
+                line += 1
+                col = 1
+                if in_line_comment:
+                    in_line_comment = False
+                i += 1
+                continue
+
+            if in_line_comment:
+                i += 1
+                col += 1
+                continue
+
+            if in_block_comment:
+                if ch == "*" and i + 1 < n and code[i + 1] == "/":
+                    in_block_comment = False
+                    i += 2
+                    col += 2
+                else:
+                    i += 1
+                    col += 1
+                continue
+
+            if in_string == "rust_raw":
+                if ch == '"':
+                    hashes = 0
+                    while i + 1 + hashes < n and code[i + 1 + hashes] == "#":
+                        hashes += 1
+                    if hashes >= rust_raw_hashes:
+                        in_string = None
+                        adv = 1 + rust_raw_hashes
+                        i += adv
+                        col += adv
+                        continue
+                i += 1
+                col += 1
+                continue
+
+            if in_string is not None:
+                if ch == "\\" and in_string != "`":
+                    i += 2
+                    col += 2
+                    continue
+                elif in_string == "`" and ch == "\\":
+                    i += 2
+                    col += 2
+                    continue
+                elif in_string == "`" and ch == "$" and i + 1 < n and code[i + 1] == "{":
+                    stack.append(("}", line, col))
+                    template_depth += 1
+                    in_string = None
+                    i += 2
+                    col += 2
+                    continue
+                elif ch == in_string:
+                    in_string = None
+                    i += 1
+                    col += 1
+                    continue
+                else:
+                    i += 1
+                    col += 1
+                    continue
+
+            if ch == "/" and i + 1 < n:
+                next_ch = code[i + 1]
+                if next_ch == "/":
+                    in_line_comment = True
+                    i += 2
+                    col += 2
+                    continue
+                elif next_ch == "*":
+                    in_block_comment = True
+                    i += 2
+                    col += 2
+                    continue
+
+            if is_rust and ch == "r" and i + 1 < n and (code[i + 1] == '"' or code[i + 1] == "#"):
+                h_count = 0
+                k = i + 1
+                while k < n and code[k] == "#":
+                    h_count += 1
+                    k += 1
+                if k < n and code[k] == '"':
+                    in_string = "rust_raw"
+                    rust_raw_hashes = h_count
+                    adv = (k + 1) - i
+                    i += adv
+                    col += adv
+                    continue
+
+            if ch in ('"', '`'):
+                in_string = ch
+                i += 1
+                col += 1
+                continue
+            elif ch == "'":
+                if is_rust:
+                    is_char = False
+                    if i + 2 < n and code[i + 2] == "'":
+                        is_char = True
+                    elif i + 3 < n and code[i + 1] == "\\" and code[i + 3] == "'":
+                        is_char = True
+                    elif i + 4 < n and code[i + 1] == "\\" and code[i + 4] == "'":
+                        is_char = True
+                    if is_char:
+                        in_string = "'"
+                else:
+                    in_string = "'"
+                i += 1
+                col += 1
+                continue
+
+            if ch in pairs:
+                stack.append((pairs[ch], line, col))
+                i += 1
+                col += 1
+                continue
+
+            if ch in closers:
+                if not stack:
+                    return False, f"Unmatched '{ch}' at line {line}:{col}", []
+                expected, open_line, open_col = stack.pop()
+                if ch != expected:
+                    return False, f"Mismatched delimiter at line {line}:{col} (expected '{expected}', got '{ch}')", [expected]
+                if template_depth > 0 and expected == "}" and not any(s[0] == "}" for s in stack):
+                    in_string = "`"
+                    template_depth -= 1
+                i += 1
+                col += 1
+                continue
+
+            i += 1
+            col += 1
+
+        if in_block_comment:
+            return False, "Unclosed block comment (/*) at EOF", []
+        if in_string is not None:
+            return False, f"Unclosed string literal ({in_string}) at EOF", []
+        if stack:
+            missing = [s[0] for s in reversed(stack)]
+            last_expected, last_line, last_col = stack[-1]
+            return False, f"Unclosed block (missing '{last_expected}') opened at line {last_line}:{last_col}", missing
+
+        return True, None, []
+
+    @classmethod
+    def validate_syntax_detailed(cls, code: str, filename: str) -> Tuple[bool, Optional[str]]:
+        """Validates code syntax across languages and returns (is_valid, error_detail)."""
+        ext = Path(filename).suffix.lower()
+        if ext == ".py":
+            try:
+                ast.parse(code)
+                return True, None
+            except SyntaxError as se:
+                return False, f"Python SyntaxError at line {se.lineno}: {se.msg}"
+        elif ext == ".json":
+            try:
+                json.loads(code)
+                return True, None
+            except json.JSONDecodeError as jde:
+                return False, f"JSONDecodeError at line {jde.lineno}, col {jde.colno}: {jde.msg}"
+        elif ext in {
+            ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+            ".rs", ".go",
+            ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp",
+            ".java", ".cs", ".css", ".scss", ".less"
+        }:
+            valid, err, _ = cls._check_bracket_balance(code, filename)
+            return valid, err
+        return True, None
+
+    @classmethod
+    def validate_syntax(cls, code: str, filename: str) -> bool:
+        """Verifies if the code is syntactically valid for its language."""
+        valid, _ = cls.validate_syntax_detailed(code, filename)
+        return valid
+
+    @classmethod
+    def get_syntax_error_detail(cls, code: str, filename: str) -> str:
+        """Returns descriptive error details for rejected or broken syntax."""
+        _, err = cls.validate_syntax_detailed(code, filename)
+        return err or "Syntax validation failed."
+
+    GENERIC_PLACEHOLDERS = {
+        "file", "unknown", "filename", "patch", "diff", "solution.py",
+        "patch.diff", "code", "script", "untitled", "path/to/file",
+        "new_file", "test", "target", "example"
+    }
+
+    @classmethod
     def resolve_target_path(cls, file_path: str, workspace_path: Optional[str] = None) -> Path:
         """Resolves target path against workspace if relative."""
         clean_name = file_path.strip()
@@ -559,52 +794,63 @@ class PatchEngine:
             clean_name = clean_name[2:]
         clean_name = clean_name.lstrip("/")
 
+        p_raw = Path(clean_name)
+        is_generic = (
+            clean_name.lower() in cls.GENERIC_PLACEHOLDERS
+            or p_raw.name.lower() in cls.GENERIC_PLACEHOLDERS
+            or (not p_raw.suffix and not p_raw.exists() and not (workspace_path and (Path(workspace_path) / p_raw).exists()))
+        )
+
         if workspace_path:
             from ..retrieval.file_resolver import WorkspaceFileResolver
             ws = WorkspaceFileResolver._resolve_root(workspace_path)
-            
-            p = Path(clean_name)
-            if p.is_absolute():
-                if p.exists() or p.parent.exists():
-                    return p.resolve()
-                try:
-                    p.resolve().relative_to(ws.resolve())
-                    return p.resolve()
-                except ValueError:
-                    p = Path(p.name)
 
-            direct = ws / p
-            if direct.exists():
-                return direct.resolve()
+            if not is_generic:
+                p = Path(clean_name)
+                if p.is_absolute():
+                    if p.exists() or p.parent.exists():
+                        return p.resolve()
+                    try:
+                        p.resolve().relative_to(ws.resolve())
+                        return p.resolve()
+                    except ValueError:
+                        p = Path(p.name)
+
+                direct = ws / p
+                if direct.exists():
+                    return direct.resolve()
+                if ws.exists() and ws.is_dir():
+                    try:
+                        for sub in ws.rglob(p.name):
+                            if sub.is_file():
+                                return sub.resolve()
+                    except Exception:
+                        pass
+
+                p_clean = Path(clean_name)
+                if p_clean.exists():
+                    return p_clean.resolve()
+                p_orig = Path(file_path)
+                if p_orig.exists():
+                    return p_orig.resolve()
+                return (ws / p).resolve()
+
+            # Map generic placeholder or unlocated extensionless target to actual repo file
             if ws.exists() and ws.is_dir():
-                try:
-                    for sub in ws.rglob(p.name):
-                        if sub.is_file():
-                            return sub.resolve()
-                except Exception:
-                    pass
+                accessible = WorkspaceFileResolver.list_accessible_files(str(ws))
+                py_files = [f for f in accessible.values() if f.suffix == ".py"]
+                if py_files:
+                    return py_files[0].resolve()
+                src_files = [f for f in accessible.values() if f.suffix in (".ts", ".js", ".jsx", ".tsx", ".go", ".rs", ".java", ".cpp", ".c", ".html", ".css")]
+                if src_files:
+                    return src_files[0].resolve()
+                if accessible:
+                    return list(accessible.values())[0].resolve()
 
-                # If requested filename is generic (solution.py, patch.diff) and doesn't exist, map to actual repo file
-                if p.name in ("solution.py", "patch.diff", "unknown"):
-                    accessible = WorkspaceFileResolver.list_accessible_files(str(ws))
-                    py_files = [f for f in accessible.values() if f.suffix == ".py"]
-                    if py_files:
-                        return py_files[0].resolve()
-                    if accessible:
-                        return list(accessible.values())[0].resolve()
-            
-            # Check if clean_name exists as absolute path outside ws
-            p_clean = Path(clean_name)
-            if p_clean.exists():
-                return p_clean.resolve()
-            p_orig = Path(file_path)
-            if p_orig.exists():
-                return p_orig.resolve()
-
-            return direct.resolve()
+            return (ws / clean_name).resolve()
 
         p = Path(clean_name)
-        if p.exists():
+        if not is_generic and p.exists():
             return p.resolve()
 
         return (Path.cwd() / p).resolve()
@@ -629,10 +875,20 @@ class PatchEngine:
         header_match = re.search(r"\+\+\+\s+(?:b/)?([^\s\n\r]+)", diff_text)
         if header_match:
             diff_file = header_match.group(1).strip()
-            if diff_file and diff_file != "/dev/null":
+            if (diff_file and diff_file != "/dev/null" 
+                    and diff_file.lower() not in cls.GENERIC_PLACEHOLDERS 
+                    and Path(diff_file).name.lower() not in cls.GENERIC_PLACEHOLDERS):
                 diff_file_path = cls.resolve_target_path(diff_file, workspace_path)
                 if diff_file_path.exists() or not target_path.exists():
                     target_path = diff_file_path
+
+        # Guard against writing to an unresolvable generic placeholder without extension
+        if (target_path.name.lower() in cls.GENERIC_PLACEHOLDERS 
+                or (not target_path.suffix and not target_path.exists())):
+            return {
+                "status": "error",
+                "message": f"Target file '{target_path.name}' is an unrecognized generic placeholder. Refusing to create an unassociated extensionless file. Please select or open an existing source file in the editor."
+            }
 
         # Check if this is a new file creation or populating an empty file
         file_exists = target_path.exists() and target_path.is_file()
@@ -692,25 +948,27 @@ class PatchEngine:
             if not new_content.endswith("\n"):
                 new_content += "\n"
 
-        # AST syntax validation for Python files
-        if target_path.suffix == ".py":
-            orig_is_valid = cls.validate_python_syntax(original_content) if not is_new_file else True
-            if not cls.validate_python_syntax(new_content):
+        # Multi-language syntax validation and self-healing
+        if cls.is_syntax_supported(target_path.name):
+            orig_is_valid = cls.validate_syntax(original_content, target_path.name) if not is_new_file else True
+            if not cls.validate_syntax(new_content, target_path.name):
                 if not is_new_file and orig_lines:
-                    repaired = cls._attempt_syntax_repair(orig_lines, lines_diff, new_content)
-                    if repaired and cls.validate_python_syntax(repaired):
+                    repaired = cls._attempt_syntax_repair(orig_lines, lines_diff, new_content, filename=target_path.name)
+                    if repaired and cls.validate_syntax(repaired, target_path.name):
                         new_content = repaired
                     elif orig_is_valid:
+                        err_detail = cls.get_syntax_error_detail(new_content, target_path.name)
                         return {
                             "status": "error",
-                            "message": f"Patch rejected: Introduced Python syntax error in {target_path.name}."
+                            "message": f"Patch rejected: Introduced syntax error in {target_path.name}. {err_detail}".strip()
                         }
                 elif not orig_is_valid:
                     pass
                 else:
+                    err_detail = cls.get_syntax_error_detail(new_content, target_path.name)
                     return {
                         "status": "error",
-                        "message": f"Patch rejected: Introduced Python syntax error in {target_path.name}."
+                        "message": f"Patch rejected: Introduced syntax error in {target_path.name}. {err_detail}".strip()
                     }
 
         # Safe atomic write
@@ -758,17 +1016,17 @@ class PatchEngine:
         except Exception as e:
             return False, diff_text, f"Diff application failed: {e}"
 
-        # If not Python, basic check is sufficient
-        if not filename.endswith(".py"):
+        # If language is not supported for syntax checking, basic check is sufficient
+        if not cls.is_syntax_supported(filename):
             return True, diff_text, None
 
-        # Check Python AST syntax
-        if cls.validate_python_syntax(patched_content):
+        # Check syntax across supported languages
+        if cls.validate_syntax(patched_content, filename):
             return True, diff_text, None
 
         # Syntax error detected - run self-healing repair loop
-        repaired = cls._attempt_syntax_repair(orig_lines, diff_text.splitlines(), patched_content)
-        if repaired and cls.validate_python_syntax(repaired):
+        repaired = cls._attempt_syntax_repair(orig_lines, diff_text.splitlines(), patched_content, filename=filename)
+        if repaired and cls.validate_syntax(repaired, filename):
             # Regenerate clean unified diff from repaired content
             clean_diff = "\n".join(difflib.unified_diff(
                 orig_lines,
@@ -780,17 +1038,12 @@ class PatchEngine:
             return True, clean_diff, None
 
         # If repair failed, get the exact syntax error detail
-        err_msg = "Introduced Python syntax error"
-        try:
-            ast.parse(patched_content)
-        except SyntaxError as se:
-            err_msg = f"SyntaxError at line {se.lineno}: {se.msg}"
-
+        err_msg = cls.get_syntax_error_detail(patched_content, filename)
         return False, diff_text, err_msg
 
     @classmethod
     def _split_hunk_lines_into_subhunks(
-        cls, hunk_lines: List[str], base_old_start: int
+        cls, hunk_lines: List[str], base_old_start: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """
         Decomposes a unified diff hunk into discrete sub-hunks if it contains
@@ -887,16 +1140,16 @@ class PatchEngine:
         # 1. Parse into distinct hunks and decompose into sub-hunks
         all_subhunks: List[Dict[str, Any]] = []
         curr_hunk_lines: List[str] = []
-        curr_start = preferred_line or 1
+        curr_start = preferred_line or None
 
         for line in diff_lines:
             match = hunk_header_re.match(line)
             if match and line.startswith("@@"):
                 if curr_hunk_lines:
                     all_subhunks.extend(cls._split_hunk_lines_into_subhunks(curr_hunk_lines, curr_start))
-                curr_start = int(match.group(1)) if match.group(1) else (preferred_line or 1)
+                curr_start = int(match.group(1)) if match.group(1) else (preferred_line or None)
                 curr_hunk_lines = []
-            elif curr_start is not None:
+            elif curr_start is not None or not all_subhunks:
                 curr_hunk_lines.append(line)
 
         if curr_hunk_lines:
@@ -910,7 +1163,7 @@ class PatchEngine:
             del_lines = hunk["del_lines"]
             add_lines = hunk["add_lines"]
             suffix_ctx = hunk["suffix_ctx"]
-            suggested_idx = max(cursor, hunk["old_start"] - 1)
+            suggested_idx = cursor if hunk.get("old_start") is None else max(cursor, hunk["old_start"] - 1)
 
             match_start = -1
             match_end = -1
@@ -1003,6 +1256,31 @@ class PatchEngine:
                         matched_indent = target_line[:len(target_line) - len(target_line.lstrip())]
                         diff_base_indent = del_lines[0][:len(del_lines[0]) - len(del_lines[0].lstrip())] if del_lines else ""
 
+            # Strategy 3c: Leading line anchor search from cursor forward
+            if match_start == -1 and del_lines:
+                first_del = next((l.strip() for l in del_lines if l.strip()), None)
+                if first_del:
+                    for cand in range(cursor, len(orig_lines)):
+                        if orig_lines[cand].strip() == first_del:
+                            matched_count = 0
+                            while (cand + matched_count < len(orig_lines) and 
+                                   matched_count < len(del_lines)):
+                                orig_trimmed = orig_lines[cand + matched_count].strip()
+                                del_trimmed = del_lines[matched_count].strip()
+                                if not orig_trimmed and not del_trimmed:
+                                    matched_count += 1
+                                elif orig_trimmed == del_trimmed:
+                                    matched_count += 1
+                                else:
+                                    break
+                            if matched_count >= 1:
+                                match_start = cand
+                                match_end = cand + matched_count
+                                target_line = orig_lines[match_start]
+                                matched_indent = target_line[:len(target_line) - len(target_line.lstrip())]
+                                diff_base_indent = del_lines[0][:len(del_lines[0]) - len(del_lines[0].lstrip())]
+                                break
+
             # Strategy 4: Pure additions with context
             if match_start == -1 and not del_lines:
                 if prefix_ctx:
@@ -1036,8 +1314,16 @@ class PatchEngine:
 
             # Fallback if not matched
             if match_start == -1:
-                match_start = min(len(orig_lines), suggested_idx)
-                match_end = match_start + len(del_lines)
+                if add_lines:
+                    match_start = min(len(orig_lines), suggested_idx)
+                    match_end = match_start
+                    if match_start < len(orig_lines):
+                        target_line = orig_lines[match_start]
+                        matched_indent = target_line[:len(target_line) - len(target_line.lstrip())]
+                else:
+                    # Pure deletion that could not be matched anywhere.
+                    # CRITICAL SAFETY: Never delete arbitrary lines from innocent code!
+                    continue
                 if match_start < len(orig_lines):
                     target_line = orig_lines[match_start]
                     matched_indent = target_line[:len(target_line) - len(target_line.lstrip())]
@@ -1086,29 +1372,71 @@ class PatchEngine:
         cls,
         orig_lines: List[str],
         lines_diff: List[str],
-        bad_content: str
+        bad_content: str,
+        filename: str = ""
     ) -> Optional[str]:
         """
-        Self-healing repair loop when patch introduces syntax errors
+        Self-healing repair loop when patch introduces syntax errors across all supported languages
         (e.g., escaped quotes, unclosed docstrings, mismatched indentation,
-        mismatched try/except blocks, orphaned except, duplicate blocks).
+        missing braces in TS/Rust/Go, trailing commas in JSON, mismatched try/except blocks).
         """
+        def _is_valid(cand: str) -> bool:
+            return cls.validate_syntax(cand, filename) if filename else cls.validate_python_syntax(cand)
+
+        ext = Path(filename).suffix.lower() if filename else ".py"
+        is_python = ext == ".py" or not filename
+        is_json = ext == ".json"
+        is_bracket_lang = ext in {
+            ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+            ".rs", ".go",
+            ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp",
+            ".java", ".cs", ".css", ".scss", ".less"
+        }
+
         # Repair Strategy 0: Unescape escaped quotes from model serialization (e.g. \"\"\" -> """)
         if r'\"' in bad_content or r"\'" in bad_content:
             unescaped = bad_content.replace(r'\"\"\"', '"""').replace(r"\'\'\'", "'''").replace(r'\"', '"')
-            if cls.validate_python_syntax(unescaped):
+            if _is_valid(unescaped):
                 return unescaped
             bad_content = unescaped
 
-        # Repair Strategy 0b: Balance unclosed triple quotes
-        if bad_content.count('"""') % 2 != 0:
-            closed = bad_content + '\n"""\n'
-            if cls.validate_python_syntax(closed):
-                return closed
-        if bad_content.count("'''") % 2 != 0:
-            closed = bad_content + "\n'''\n"
-            if cls.validate_python_syntax(closed):
-                return closed
+        # Repair Strategy 0b: Balance unclosed triple quotes (Python) or backticks (JS/TS)
+        if is_python:
+            if bad_content.count('"""') % 2 != 0:
+                closed = bad_content + '\n"""\n'
+                if _is_valid(closed):
+                    return closed
+            if bad_content.count("'''") % 2 != 0:
+                closed = bad_content + "\n'''\n"
+                if _is_valid(closed):
+                    return closed
+        elif ext in {".ts", ".tsx", ".js", ".jsx"}:
+            if bad_content.count("`") % 2 != 0:
+                closed = bad_content.rstrip() + "`;\n"
+                if _is_valid(closed):
+                    return closed
+
+        # Repair Strategy JSON: JSON specific repairs
+        if is_json:
+            # Trailing comma removal before } or ]
+            cleaned = re.sub(r',\s*([}\]])', r'\1', bad_content)
+            if _is_valid(cleaned):
+                return cleaned
+            # Balance unclosed brackets at EOF
+            open_c = cleaned.count('{') - cleaned.count('}')
+            open_b = cleaned.count('[') - cleaned.count(']')
+            cand = cleaned.rstrip()
+            for _ in range(open_b):
+                cand += "\n]"
+            for _ in range(open_c):
+                cand += "\n}"
+            cand += "\n"
+            if _is_valid(cand):
+                return cand
+            # Quote unquoted property keys: e.g. { foo: "bar" } -> { "foo": "bar" }
+            quoted_keys = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', cleaned)
+            if _is_valid(quoted_keys):
+                return quoted_keys
 
         del_lines = [l[1:] for l in lines_diff if l.startswith("-") and not l.startswith("---")]
         add_lines = [l[1:] for l in lines_diff if l.startswith("+") and not l.startswith("+++")]
@@ -1138,105 +1466,168 @@ class PatchEngine:
 
                     candidate = orig_lines[:idx] + aligned_adds + orig_lines[idx + len(del_lines):]
                     code_cand = "\n".join(candidate) + "\n"
-                    if cls.validate_python_syntax(code_cand):
+                    if _is_valid(code_cand):
                         return code_cand
 
-        # Repair Strategy 2: Specific try/except and block alignment
-        # If an except line is misplaced or orphaned, find the preceding try:
-        for idx, line in enumerate(bad_lines):
-            stripped = line.strip()
-            if stripped.startswith("except") or stripped.startswith("finally:"):
-                for try_idx in range(idx - 1, -1, -1):
-                    if bad_lines[try_idx].strip().startswith("try:"):
-                        try_indent = bad_lines[try_idx][:len(bad_lines[try_idx]) - len(bad_lines[try_idx].lstrip())]
-                        curr_indent = line[:len(line) - len(line.lstrip())]
-                        if try_indent != curr_indent:
-                            modified = list(bad_lines)
-                            shift = len(try_indent) - len(curr_indent)
-                            for k in range(idx, len(bad_lines)):
-                                if k == idx or (bad_lines[k].startswith(" " * (len(curr_indent) + 1))):
-                                    if shift > 0:
-                                        modified[k] = " " * shift + modified[k]
+        # Repair Strategy Non-Python Delimiter Balance: (TS, JS, Rust, Go, C++, etc.)
+        if is_bracket_lang:
+            valid_b, err_msg, missing_stack = cls._check_bracket_balance(bad_content, filename)
+            if not valid_b:
+                if missing_stack:
+                    # Candidate A: Append missing closers at the end of file
+                    cand_tail = bad_content.rstrip() + "\n" + "\n".join(missing_stack) + "\n"
+                    if _is_valid(cand_tail):
+                        return cand_tail
+
+                    # Candidate B: Insert missing closer right after the added block
+                    if add_lines:
+                        last_add = add_lines[-1].strip()
+                        for idx in range(len(bad_lines) - 1, -1, -1):
+                            if bad_lines[idx].strip() == last_add:
+                                cand_lines = bad_lines[:idx + 1] + missing_stack + bad_lines[idx + 1:]
+                                cand = "\n".join(cand_lines) + "\n"
+                                if _is_valid(cand):
+                                    return cand
+                                break
+
+                    # Candidate C: Insert missing closers before subsequent top-level declarations
+                    top_level_prefixes = (
+                        "function ", "export ", "class ", "interface ", "type ",
+                        "fn ", "pub fn ", "pub ", "impl ", "struct ", "enum "
+                    )
+                    for idx, line in enumerate(bad_lines):
+                        stripped = line.lstrip()
+                        if any(stripped.startswith(p) for p in top_level_prefixes) and idx > 0:
+                            cand_lines = bad_lines[:idx] + missing_stack + bad_lines[idx:]
+                            cand = "\n".join(cand_lines) + "\n"
+                            if _is_valid(cand):
+                                return cand
+
+                # Candidate D: If unexpected closer reported, remove orphaned closer line
+                if err_msg and "Unmatched" in err_msg:
+                    line_m = re.search(r'line (\d+)', err_msg)
+                    if line_m:
+                        u_line = int(line_m.group(1)) - 1
+                        if 0 <= u_line < len(bad_lines):
+                            if bad_lines[u_line].strip() in ("}", ")", "]", "};", ");"):
+                                cand_lines = bad_lines[:u_line] + bad_lines[u_line + 1:]
+                                cand = "\n".join(cand_lines) + "\n"
+                                if _is_valid(cand):
+                                    return cand
+
+        # Python-specific AST Diagnostic Repair Strategies
+        if is_python:
+            # Repair Strategy 2: Specific try/except and block alignment
+            for idx, line in enumerate(bad_lines):
+                stripped = line.strip()
+                if stripped.startswith("except") or stripped.startswith("finally:"):
+                    for try_idx in range(idx - 1, -1, -1):
+                        if bad_lines[try_idx].strip().startswith("try:"):
+                            try_indent = bad_lines[try_idx][:len(bad_lines[try_idx]) - len(bad_lines[try_idx].lstrip())]
+                            curr_indent = line[:len(line) - len(line.lstrip())]
+                            if try_indent != curr_indent:
+                                modified = list(bad_lines)
+                                shift = len(try_indent) - len(curr_indent)
+                                for k in range(idx, len(bad_lines)):
+                                    if k == idx or (bad_lines[k].startswith(" " * (len(curr_indent) + 1))):
+                                        if shift > 0:
+                                            modified[k] = " " * shift + modified[k]
+                                        else:
+                                            trim = min(-shift, len(modified[k]) - len(modified[k].lstrip()))
+                                            modified[k] = modified[k][trim:]
                                     else:
-                                        trim = min(-shift, len(modified[k]) - len(modified[k].lstrip()))
-                                        modified[k] = modified[k][trim:]
-                                else:
-                                    break
+                                        break
+                                code_cand = "\n".join(modified) + "\n"
+                                if _is_valid(code_cand):
+                                    return code_cand
+                            break
+
+            # Repair Strategy 3: Duplicate block elimination
+            for idx in range(len(bad_lines) - 1):
+                if bad_lines[idx].strip() and bad_lines[idx].strip() == bad_lines[idx + 1].strip():
+                    candidate = bad_lines[:idx] + bad_lines[idx + 1:]
+                    code_cand = "\n".join(candidate) + "\n"
+                    if _is_valid(code_cand):
+                        return code_cand
+
+            # Repair Strategy 4: AST SyntaxError diagnostic repair
+            try:
+                ast.parse(bad_content)
+            except SyntaxError as e:
+                err_line = (e.lineno or 1) - 1
+
+                # 4a: Check if preceding line was an import at 0 indent inside a block causing unexpected indent
+                if 0 < err_line < len(bad_lines) and (bad_lines[err_line - 1].strip().startswith("import ") or bad_lines[err_line - 1].strip().startswith("from ")):
+                    imp = bad_lines[err_line - 1].strip()
+                    insert_pos = 0
+                    in_doc = False
+                    for k, bl in enumerate(bad_lines):
+                        sbl = bl.strip()
+                        if not in_doc and (sbl.startswith('"""') or sbl.startswith("'''")):
+                            quote = '"""' if sbl.startswith('"""') else "'''"
+                            if sbl.count(quote) >= 2:
+                                insert_pos = k + 1
+                                break
+                            else:
+                                in_doc = True
+                        elif in_doc:
+                            if '"""' in bl or "'''" in bl:
+                                insert_pos = k + 1
+                                in_doc = False
+                                break
+                        elif sbl.startswith("import ") or sbl.startswith("from "):
+                            insert_pos = k + 1
+                        elif sbl and not sbl.startswith("#") and not in_doc:
+                            break
+
+                    cand_lines = bad_lines[:err_line - 1] + bad_lines[err_line:]
+                    cand_lines.insert(insert_pos, imp)
+                    code_cand = "\n".join(cand_lines) + "\n"
+                    if _is_valid(code_cand):
+                        return code_cand
+
+                    curr_indent = bad_lines[err_line][:len(bad_lines[err_line]) - len(bad_lines[err_line].lstrip())]
+                    cand_lines = list(bad_lines)
+                    cand_lines[err_line - 1] = curr_indent + imp
+                    code_cand = "\n".join(cand_lines) + "\n"
+                    if _is_valid(code_cand):
+                        return code_cand
+
+                # 4b: Try adjusting indentation on the error line and immediate block
+                if 0 <= err_line < len(bad_lines):
+                    for target_line_idx in (err_line, max(0, err_line - 1)):
+                        for target_indent in (0, 4, 8, 12, 16):
+                            modified = list(bad_lines)
+                            modified[target_line_idx] = " " * target_indent + modified[target_line_idx].lstrip()
                             code_cand = "\n".join(modified) + "\n"
-                            if cls.validate_python_syntax(code_cand):
+                            if _is_valid(code_cand):
                                 return code_cand
-                        break
 
-        # Repair Strategy 3: Duplicate block elimination (e.g. duplicate except clauses)
-        for idx in range(len(bad_lines) - 1):
-            if bad_lines[idx].strip() and bad_lines[idx].strip() == bad_lines[idx + 1].strip():
-                candidate = bad_lines[:idx] + bad_lines[idx + 1:]
-                code_cand = "\n".join(candidate) + "\n"
-                if cls.validate_python_syntax(code_cand):
-                    return code_cand
+                            if modified[target_line_idx].rstrip().endswith(":"):
+                                for block_offset in range(1, min(5, len(bad_lines) - target_line_idx)):
+                                    modified[target_line_idx + block_offset] = " " * (target_indent + 4) + modified[target_line_idx + block_offset].lstrip()
+                                code_cand = "\n".join(modified) + "\n"
+                                if _is_valid(code_cand):
+                                    return code_cand
 
-        # Repair Strategy 4: AST SyntaxError diagnostic repair
-        try:
-            ast.parse(bad_content)
-        except SyntaxError as e:
-            err_line = (e.lineno or 1) - 1
-
-            # 4a: Check if preceding line was an import at 0 indent inside a block causing unexpected indent
-            if 0 < err_line < len(bad_lines) and (bad_lines[err_line - 1].strip().startswith("import ") or bad_lines[err_line - 1].strip().startswith("from ")):
-                imp = bad_lines[err_line - 1].strip()
-                # Try hoisting import after module docstring or existing module-level imports
-                insert_pos = 0
-                in_doc = False
-                for k, bl in enumerate(bad_lines):
-                    sbl = bl.strip()
-                    if not in_doc and (sbl.startswith('"""') or sbl.startswith("'''")):
-                        quote = '"""' if sbl.startswith('"""') else "'''"
-                        if sbl.count(quote) >= 2:
-                            insert_pos = k + 1
-                            break
-                        else:
-                            in_doc = True
-                    elif in_doc:
-                        if '"""' in bl or "'''" in bl:
-                            insert_pos = k + 1
-                            in_doc = False
-                            break
-                    elif sbl.startswith("import ") or sbl.startswith("from "):
-                        insert_pos = k + 1
-                    elif sbl and not sbl.startswith("#") and not in_doc:
-                        break
-
-                cand_lines = bad_lines[:err_line - 1] + bad_lines[err_line:]
-                cand_lines.insert(insert_pos, imp)
-                code_cand = "\n".join(cand_lines) + "\n"
-                if cls.validate_python_syntax(code_cand):
-                    return code_cand
-
-                # Try indenting the import to match err_line indentation
-                curr_indent = bad_lines[err_line][:len(bad_lines[err_line]) - len(bad_lines[err_line].lstrip())]
-                cand_lines = list(bad_lines)
-                cand_lines[err_line - 1] = curr_indent + imp
-                code_cand = "\n".join(cand_lines) + "\n"
-                if cls.validate_python_syntax(code_cand):
-                    return code_cand
-
-            # 4b: Try adjusting indentation on the error line and immediate block
-            if 0 <= err_line < len(bad_lines):
-                for target_line_idx in (err_line, max(0, err_line - 1)):
-                    for target_indent in (0, 4, 8, 12, 16):
-                        modified = list(bad_lines)
-                        modified[target_line_idx] = " " * target_indent + modified[target_line_idx].lstrip()
-                        code_cand = "\n".join(modified) + "\n"
-                        if cls.validate_python_syntax(code_cand):
+                # 4c: Check for orphaned indented block
+                if 0 <= err_line < len(bad_lines):
+                    line_text = bad_lines[err_line]
+                    if line_text and line_text[:1].isspace():
+                        block_lines = list(bad_lines)
+                        orig_err_indent = len(line_text) - len(line_text.lstrip())
+                        for b_idx in range(err_line, len(block_lines)):
+                            bl = block_lines[b_idx]
+                            if not bl.strip():
+                                continue
+                            bl_indent = len(bl) - len(bl.lstrip())
+                            if bl_indent >= orig_err_indent:
+                                block_lines[b_idx] = bl[orig_err_indent:]
+                            else:
+                                break
+                        code_cand = "\n".join(block_lines) + "\n"
+                        if _is_valid(code_cand):
                             return code_cand
-
-                        # Also try shifting statement header + indented block
-                        if modified[target_line_idx].rstrip().endswith(":"):
-                            for block_offset in range(1, min(5, len(bad_lines) - target_line_idx)):
-                                modified[target_line_idx + block_offset] = " " * (target_indent + 4) + modified[target_line_idx + block_offset].lstrip()
-                            code_cand = "\n".join(modified) + "\n"
-                            if cls.validate_python_syntax(code_cand):
-                                return code_cand
 
         return None
 
@@ -1248,7 +1639,7 @@ class PatchEngine:
         if not diff_text:
             return []
 
-        hunk_header_re = re.compile(r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@")
+        hunk_header_re = re.compile(r"^@@\s*(?:-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?)?\s*@@?")
         lines = diff_text.splitlines()
         hunks = []
         file_header_lines = []
@@ -1256,15 +1647,15 @@ class PatchEngine:
 
         for line in lines:
             hunk_match = hunk_header_re.match(line)
-            if hunk_match:
+            if hunk_match and line.startswith("@@"):
                 if current_hunk:
                     hunks.append(current_hunk)
                 current_hunk = {
                     "index": len(hunks),
                     "header": line,
-                    "old_start": int(hunk_match.group(1)),
+                    "old_start": int(hunk_match.group(1)) if hunk_match.group(1) else 1,
                     "old_count": int(hunk_match.group(2)) if hunk_match.group(2) else 1,
-                    "new_start": int(hunk_match.group(3)),
+                    "new_start": int(hunk_match.group(3)) if hunk_match.group(3) else 1,
                     "new_count": int(hunk_match.group(4)) if hunk_match.group(4) else 1,
                     "lines": []
                 }
@@ -1347,10 +1738,13 @@ class PatchEngine:
             if not chunk.startswith("---"):
                 continue
             target_match = re.search(r"\+\+\+\s+(?:b/)?([^\s\n\r]+)", chunk)
-            file_path = target_match.group(1) if target_match else "unknown"
-            if file_path == "/dev/null":
+            file_path = target_match.group(1).strip() if target_match else ""
+            if file_path == "/dev/null" or not file_path:
                 orig_match = re.search(r"---\s+(?:a/)?([^\s\n\r]+)", chunk)
-                file_path = orig_match.group(1) if orig_match else "unknown"
+                file_path = orig_match.group(1).strip() if orig_match else ""
+
+            if file_path.lower() in cls.GENERIC_PLACEHOLDERS:
+                file_path = ""
 
             result.append({
                 "file_path": file_path,
@@ -1358,7 +1752,11 @@ class PatchEngine:
             })
 
         if not result and diff_text.strip():
-            return [{"file_path": "unknown", "diff": diff_text.strip()}]
+            header_match = re.search(r"\+\+\+\s+(?:b/)?([^\s\n\r]+)", diff_text)
+            extracted = header_match.group(1).strip() if header_match else ""
+            if extracted.lower() in cls.GENERIC_PLACEHOLDERS or extracted == "/dev/null":
+                extracted = ""
+            return [{"file_path": extracted, "diff": diff_text.strip()}]
 
         return result
 

@@ -62,6 +62,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
         });
 
+        vscode.workspace.onDidChangeConfiguration((event) => {
+            if (event.affectsConfiguration('codebaseCopilot.backendUrl')) {
+                const newUrl = this._backendClient.getBackendUrl();
+                this._view?.webview.postMessage({
+                    command: 'setBackendUrl',
+                    url: newUrl
+                });
+            }
+        });
+
         // Domain 2: Incremental single-file AST reindex on file save
         vscode.workspace.onDidSaveTextDocument(async (document) => {
             if (document.uri.scheme === 'file') {
@@ -155,23 +165,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
             // Domain 5: Load encrypted secret from OS Keychain (SecretStorage)
             const SECRET_KEY_NAME = 'clay_cloud_api_key';
-            this._context?.secrets.get(SECRET_KEY_NAME).then(async (storedKey) => {
-                const hasKey = !!(storedKey && storedKey.trim());
-                const cleanKey = hasKey ? storedKey!.trim() : '';
-                const maskedKey = cleanKey.length > 8
-                    ? `${cleanKey.slice(0, 4)}••••••••${cleanKey.slice(-4)}`
-                    : (cleanKey ? '••••••••' : '');
-                
-                if (hasKey) {
-                    await this._backendClient.updateSettings({ api_key: cleanKey } as any);
-                }
+            if (this._context) {
+                Promise.resolve(this._context.secrets.get(SECRET_KEY_NAME)).then(async (storedKey) => {
+                    const hasKey = !!(storedKey && storedKey.trim());
+                    const cleanKey = hasKey ? storedKey!.trim() : '';
+                    const maskedKey = cleanKey.length > 8
+                        ? `${cleanKey.slice(0, 4)}••••••••${cleanKey.slice(-4)}`
+                        : (cleanKey ? '••••••••' : '');
+                    
+                    if (hasKey) {
+                        await this._backendClient.updateSettings({ api_key: cleanKey } as any);
+                    }
 
-                this._view?.webview.postMessage({
-                    command: 'cloudApiKeyLoaded',
-                    hasKey: hasKey,
-                    maskedKey: maskedKey
-                });
-            }).catch(() => {});
+                    this._view?.webview.postMessage({
+                        command: 'cloudApiKeyLoaded',
+                        hasKey: hasKey,
+                        maskedKey: maskedKey
+                    });
+                }).catch(() => {});
+            }
         }, 300);
 
         // Handle messages from Webview
@@ -287,12 +299,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case 'applyPatch': {
                     try {
                         let targetFile = data.file;
-                        if (this._lastActiveDocument && (!path.isAbsolute(targetFile) || !fs.existsSync(targetFile))) {
-                            if (path.basename(this._lastActiveDocument.uri.fsPath) === path.basename(targetFile)) {
+                        const genericPlaceholders = new Set([
+                            'file', 'unknown', 'filename', 'patch', 'diff',
+                            'solution.py', 'patch.diff', 'code', 'script',
+                            'untitled', 'path/to/file', 'new_file', ''
+                        ]);
+                        const isGeneric = !targetFile || genericPlaceholders.has(path.basename(targetFile).toLowerCase()) || (!path.extname(targetFile) && !fs.existsSync(targetFile));
+                        if (this._lastActiveDocument && (!path.isAbsolute(targetFile) || !fs.existsSync(targetFile) || isGeneric)) {
+                            if (isGeneric || path.basename(this._lastActiveDocument.uri.fsPath) === path.basename(targetFile)) {
                                 targetFile = this._lastActiveDocument.uri.fsPath;
                             }
                         }
-                        const targetWorkspace = data.workspacePath || (this._lastActiveDocument ? path.dirname(this._lastActiveDocument.uri.fsPath) : vscode.workspace.workspaceFolders?.[0]?.uri.fsPath);
+                        const targetWorkspace = (this._lastActiveDocument ? path.dirname(this._lastActiveDocument.uri.fsPath) : undefined) || data.workspacePath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
                         const res = await this._backendClient.applyPatch(targetFile, data.diff, targetWorkspace);
                         const finalName = res?.filename || targetFile;
                         vscode.window.showInformationMessage(`CLAY Copilot: Patch applied cleanly to ${finalName}`);
@@ -300,17 +318,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`Failed to apply patch: ${err.message}`);
                     }
-                    break;
-                }
                 case 'rebaseDiff': {
                     try {
                         let targetFile = data.file;
-                        if (this._lastActiveDocument && (!path.isAbsolute(targetFile) || !fs.existsSync(targetFile))) {
-                            if (path.basename(this._lastActiveDocument.uri.fsPath) === path.basename(targetFile)) {
+                        const genericPlaceholders = new Set([
+                            'file', 'unknown', 'filename', 'patch', 'diff',
+                            'solution.py', 'patch.diff', 'code', 'script',
+                            'untitled', 'path/to/file', 'new_file', ''
+                        ]);
+                        const isGeneric = !targetFile || genericPlaceholders.has(path.basename(targetFile).toLowerCase()) || (!path.extname(targetFile) && !fs.existsSync(targetFile));
+                        if (this._lastActiveDocument && (!path.isAbsolute(targetFile) || !fs.existsSync(targetFile) || isGeneric)) {
+                            if (isGeneric || path.basename(this._lastActiveDocument.uri.fsPath) === path.basename(targetFile)) {
                                 targetFile = this._lastActiveDocument.uri.fsPath;
                             }
                         }
-                        const targetWorkspace = data.workspacePath || (this._lastActiveDocument ? path.dirname(this._lastActiveDocument.uri.fsPath) : vscode.workspace.workspaceFolders?.[0]?.uri.fsPath);
+                        const targetWorkspace = (this._lastActiveDocument ? path.dirname(this._lastActiveDocument.uri.fsPath) : undefined) || data.workspacePath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
                         const res = await this._backendClient.rebaseDiff(targetFile, data.baseContent, data.diff, data.currentContent, targetWorkspace, data.forceResolution);
                         this._view?.webview.postMessage({
                             command: 'diffRebased',
@@ -327,6 +349,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     }
                     break;
                 }
+
                 case 'loadMermaid': {
                     const mermaidSyntax = await this._backendClient.getMermaidGraph(data.path);
                     this._view?.webview.postMessage({ command: 'renderMermaid', mermaid: mermaidSyntax });
@@ -400,6 +423,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 ? ['dir', 'python --version', 'git status', 'pytest']
                                 : ['ls -la', 'python3 --version', 'git status', 'pytest']
                         }
+                    });
+                    this._view?.webview.postMessage({
+                        command: 'setBackendUrl',
+                        url: this._backendClient.getBackendUrl()
                     });
                     break;
                 }
@@ -761,13 +788,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'src', 'webview', 'media', 'main.js'));
 
         const nonce = getNonce();
+        const activeBackendUrl = this._backendClient.getBackendUrl() || 'http://127.0.0.1:8765';
 
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src http://127.0.0.1:8765 http://localhost:8765 https://ollama.com; style-src ${webview.cspSource} 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'nonce-${nonce}';">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src ${activeBackendUrl} http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:* https://ollama.com; style-src ${webview.cspSource} 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'nonce-${nonce}';">
     <link href="${styleUri}" rel="stylesheet">
     <title>CLAY Copilot</title>
 </head>
@@ -939,13 +967,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 <span class="guard-pill-title" id="guard-pill-title">Buffer modified in editor</span>
             </div>
             <div class="guard-pill-actions">
-                <button type="button" class="btn-guard-rebase" id="btn-guard-rebase" title="Recalculate line offsets and re-align diff with editor edits">
-                    Auto-Rebase Diff
-                </button>
                 <button type="button" class="btn-guard-conflicts" id="btn-guard-conflicts" style="display: none;" title="Inspect conflicting line ranges">
                     View Conflicts (<span id="conflict-count">0</span>)
                 </button>
-                <button type="button" class="btn-guard-dismiss" id="btn-guard-dismiss" title="Dismiss warning and apply as-is">
+                <button type="button" class="btn-guard-dismiss" id="btn-guard-dismiss" title="Dismiss warning and review diff">
                     Dismiss
                 </button>
             </div>
@@ -1290,6 +1315,9 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
     </nav>
     </div> <!-- /.app-frame -->
 
+    <script nonce="${nonce}">
+        window.__CLAY_BACKEND_URL__ = "${activeBackendUrl}";
+    </script>
     <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

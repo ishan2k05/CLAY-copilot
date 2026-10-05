@@ -1,6 +1,15 @@
 import unittest
+import sys
 from pathlib import Path
-from backend.app.agent.instruction_parser import (
+
+_backend_dir = Path(__file__).resolve().parent.parent
+if str(_backend_dir) not in sys.path:
+    sys.path.insert(0, str(_backend_dir))
+_root_dir = _backend_dir.parent
+if str(_root_dir) not in sys.path:
+    sys.path.insert(0, str(_root_dir))
+
+from app.agent.instruction_parser import (
     InstructionClassifier,
     SymbolEntityResolver,
     AmbiguityDetector,
@@ -9,7 +18,8 @@ from backend.app.agent.instruction_parser import (
     TopicDomainResolver,
     normalize_prompt_text,
 )
-from backend.app.agent.patch_engine import PatchEngine
+from app.agent.patch_engine import PatchEngine
+from app.agent.llm_planner import LLMInstructionDecomposer
 
 class TestInstructionParserAndSmarterContext(unittest.TestCase):
 
@@ -422,6 +432,52 @@ class TestInstructionParserAndSmarterContext(unittest.TestCase):
         # Ensure all 5 titles are completely unique
         titles = [s["title"] for s in plan["steps"]]
         self.assertEqual(len(titles), len(set(titles)))
+
+    def test_dynamic_task_planner_compound_folder_and_placeholder_file(self):
+        # Prompt exactly as shown in user screenshot with typo: "create a new folder docs , and makea placeholder file inside it script.py"
+        user_prompt = "create a new folder docs , and makea placeholder file inside it script.py"
+        plan = DynamicTaskPlanner.plan_tasks(
+            goal=user_prompt
+        )
+        self.assertEqual(plan["total_steps"], 4)
+        actions = [s["action"] for s in plan["steps"]]
+        self.assertEqual(actions, ["scan", "prep", "synthesize", "verify"])
+        self.assertIn("docs", plan["folder_name"])
+        self.assertTrue(any("script.py" in t for t in (plan["target_file"], plan.get("steps", [{}])[2].get("title", ""))))
+        self.assertIn("docs", plan["steps"][1]["title"])
+
+    def test_llm_instruction_decomposer_json_parsing(self):
+        # 1. Markdown code fences
+        md_json = "```json\n{\"primary_intent\": \"CREATE_FOLDER_AND_FILE\", \"steps\": [{\"id\": 1, \"action\": \"scan\"}, {\"id\": 2, \"action\": \"prep\"}]}\n```"
+        parsed = LLMInstructionDecomposer._extract_json(md_json)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["primary_intent"], "CREATE_FOLDER_AND_FILE")
+
+        # 2. Trailing commas cleaning
+        trailing_comma_json = "{\"primary_intent\": \"CREATE_NEW\", \"steps\": [{\"id\": 1, \"action\": \"scan\"}, ], }"
+        parsed2 = LLMInstructionDecomposer._extract_json(trailing_comma_json)
+        self.assertIsNotNone(parsed2)
+        self.assertEqual(parsed2["primary_intent"], "CREATE_NEW")
+
+    def test_llm_instruction_decomposer_fallback_execution(self):
+        import asyncio
+        user_prompt = "create a new folder docs , and makea placeholder file inside it script.py"
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            plan = loop.run_until_complete(
+                LLMInstructionDecomposer.decompose_goal(
+                    goal=user_prompt,
+                    workspace_dir=".",
+                    provider=None
+                )
+            )
+            self.assertEqual(plan["total_steps"], 4)
+            self.assertEqual(plan["source"], "heuristic_fallback")
+            actions = [s["action"] for s in plan["steps"]]
+            self.assertEqual(actions, ["scan", "prep", "synthesize", "verify"])
+        finally:
+            loop.close()
 
 if __name__ == "__main__":
     unittest.main()

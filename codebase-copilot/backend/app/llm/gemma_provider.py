@@ -49,7 +49,8 @@ class OllamaGemmaProvider:
         prompt: str,
         code_context: Optional[str] = None,
         privacy_filter: bool = True,
-        history: Optional[List[Dict[str, str]]] = None
+        history: Optional[List[Dict[str, str]]] = None,
+        summary: Optional[str] = None
     ) -> AsyncGenerator[str, None]:
         # 1. Privacy Masking (Respects Zero-Leak Privacy Guard toggle)
         sanitized_context = SecretMasker.mask_text(code_context, enabled=privacy_filter) if code_context else ""
@@ -93,8 +94,8 @@ class OllamaGemmaProvider:
             "     Omit filler, pleasantries, or platitudes (do NOT say 'Sure!', 'I would be happy to help', or 'Here is the solution'). "
             "     Begin directly with the technical summary or [plan] followed immediately by the code block or unified diff.\n"
             "   - STRICT ZERO EMOJIS: Regardless of interaction mode, strictly adhere to Directive 1 (zero emojis under all circumstances).\n"
-            "3. EXACT LINE NUMBER INTEGRITY & ANTI-HALLUCINATION: When suggesting code changes, you MUST use the exact 1-indexed line numbers displayed in the provided code snippets (e.g. if a line is shown prefixed with '42: speed = 0.1', the hunk header must anchor at line 42, e.g. '@@ -42,3 +42,3 @@'). NEVER hallucinate, guess, or invent line numbers from memory. Line number desynchronization causes syntax errors and patch application failures.\n"
-            "4. SURGICAL CONTEXT ANCHORING: Every unified diff hunk MUST include 2 to 3 lines of unchanged context above and below the modified lines ('-' and '+'). Never output orphaned, floating additions or deletions without surrounding anchor lines, as the patch engine relies on anchors to locate the exact modification site.\n"
+            "3. EXACT LINE NUMBER INTEGRITY & NO BARE @@ HEADERS: When generating unified diffs, hunk headers MUST always specify numeric line anchors: '@@ -<start>,<count> +<start>,<count> @@' based on the line numbers displayed in the context. NEVER emit bare '@@' headers without line numbers. For refactorings or large multi-region changes where exact line ranges are complex, provide either standard complete ```python (or language) code blocks or SEARCH/REPLACE blocks (<<<<<<< SEARCH ... ======= ... >>>>>>>) which the engine splices with 100% precision.\n"
+            "4. SURGICAL CONTEXT ANCHORING & REPLACEMENT INTEGRITY: Every unified diff hunk MUST include 2 to 3 lines of unchanged context above and below the modified lines ('-' and '+'). Every deletion block ('-') must have corresponding addition lines ('+') unless you intend to completely remove that block. Never output partial or truncated deletions that cut off mid-class or mid-function.\n"
             "5. NO LAZY TRUNCATIONS OR OMISSIONS: Never emit placeholder comments like '// ... rest of code unchanged ...', '/* existing logic */', or '# ... same as before ...' inside code or diff blocks. When generating a diff, output all added/deleted lines in full. When generating a complete script or function, output complete, runnable code.\n"
             "6. EXACT INDENTATION & SYNTAX INTEGRITY: Strictly preserve the target file's indentation style (spaces vs tabs, exact number of leading spaces). For Python files, ensure replacement lines align perfectly with the enclosing scope to prevent IndentationError. Do not alter indentation in unchanged lines.\n"
             "7. GAMEPLAY, TIMING & REAL-TIME LOGIC: When asked to adjust game mechanics, physics, timings, speeds, frame rates, or intervals (such as in curses, pygame, or animation loops like test1.py or test2.py):\n"
@@ -132,15 +133,22 @@ class OllamaGemmaProvider:
 
         messages = [{"role": "system", "content": system_prompt}]
 
-        # Inject multi-turn conversation session history if provided
+        # Inject rolling conversation summary if present
+        if summary and summary.strip():
+            messages.append({
+                "role": "system",
+                "content": f"<conversation_summary>\n[Context from earlier turns in this session]:\n{summary.strip()}\n</conversation_summary>"
+            })
+
+        # Inject multi-turn conversation session history if provided (compacted Tier 1 turns)
         if history:
-            for turn in history[-10:]:
+            for turn in history:
                 role = turn.get("role", "user")
                 content = turn.get("content", "")
                 if content and role in ("user", "assistant"):
                     sanitized_turn = SecretMasker.mask_text(content, enabled=privacy_filter)
-                    if len(sanitized_turn) > 2000:
-                        sanitized_turn = sanitized_turn[:2000] + "..."
+                    if len(sanitized_turn) > 3000:
+                        sanitized_turn = sanitized_turn[:3000] + "..."
                     messages.append({"role": role, "content": sanitized_turn})
 
         messages.append({"role": "user", "content": user_content})
