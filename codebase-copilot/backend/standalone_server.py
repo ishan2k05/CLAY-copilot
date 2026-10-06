@@ -256,18 +256,34 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                 diagram_lines = ["graph TD"]
                 seen_edges = set()
 
+                nodes_meta = {}
                 with sqlite3.connect(graph_store.db_path) as db:
+                    try:
+                        sym_all = db.execute("SELECT name, symbol_type, file_path, start_line FROM symbols LIMIT 300").fetchall()
+                        for sname, stype, sfpath, sline in sym_all:
+                            clean = sname.split("#")[-1].replace(".", "_")
+                            meta_entry = {
+                                "file": sfpath,
+                                "line": sline or 1,
+                                "type": stype,
+                                "name": sname.split("#")[-1]
+                            }
+                            nodes_meta[clean] = meta_entry
+                            nodes_meta[sname] = meta_entry
+                    except Exception:
+                        pass
+
                     if selected_file_norm:
                         sel_filename = Path(selected_file_norm).name.lower()
                         cursor = db.execute(
-                            "SELECT source_symbol, target_symbol, relation_type, file_path FROM relationships "
+                            "SELECT source_symbol, target_symbol, relation_type, file_path, line_number FROM relationships "
                             "WHERE LOWER(file_path) LIKE ? OR LOWER(file_path) LIKE ? LIMIT 60",
                             (f"%{selected_file_norm}%", f"%{sel_filename}%")
                         )
                     else:
-                        cursor = db.execute("SELECT source_symbol, target_symbol, relation_type, file_path FROM relationships LIMIT 60")
+                        cursor = db.execute("SELECT source_symbol, target_symbol, relation_type, file_path, line_number FROM relationships LIMIT 60")
 
-                    for src, tgt, rel, fpath in cursor.fetchall():
+                    for src, tgt, rel, fpath, lnum in cursor.fetchall():
                         if fpath:
                             try:
                                 resolved_fpath = str(Path(fpath).resolve()).lower()
@@ -286,17 +302,32 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                             seen_edges.add(edge)
                             diagram_lines.append(edge)
 
+                        if clean_src not in nodes_meta and fpath:
+                            nodes_meta[clean_src] = {
+                                "file": fpath,
+                                "line": lnum or 1,
+                                "type": "function",
+                                "name": src.split("#")[-1]
+                            }
+                        if clean_tgt not in nodes_meta and fpath:
+                            nodes_meta[clean_tgt] = {
+                                "file": fpath,
+                                "line": lnum or 1,
+                                "type": "function",
+                                "name": tgt.split("#")[-1]
+                            }
+
                     if len(diagram_lines) == 1:
                         if selected_file_norm:
                             sym_cursor = db.execute(
-                                "SELECT name, symbol_type, file_path FROM symbols "
+                                "SELECT name, symbol_type, file_path, start_line FROM symbols "
                                 "WHERE LOWER(file_path) LIKE ? OR LOWER(file_path) LIKE ? LIMIT 35",
                                 (f"%{selected_file_norm}%", f"%{sel_filename}%")
                             )
                         else:
-                            sym_cursor = db.execute("SELECT name, symbol_type, file_path FROM symbols LIMIT 30")
+                            sym_cursor = db.execute("SELECT name, symbol_type, file_path, start_line FROM symbols LIMIT 30")
 
-                        for sname, stype, sfpath in sym_cursor.fetchall():
+                        for sname, stype, sfpath, sline in sym_cursor.fetchall():
                             if sfpath:
                                 try:
                                     resolved_sfpath = str(Path(sfpath).resolve()).lower()
@@ -313,16 +344,23 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                             if node_line not in seen_edges:
                                 seen_edges.add(node_line)
                                 diagram_lines.append(node_line)
+                            if clean_name not in nodes_meta:
+                                nodes_meta[clean_name] = {
+                                    "file": sfpath,
+                                    "line": sline or 1,
+                                    "type": stype,
+                                    "name": sname.split("#")[-1]
+                                }
 
                 if len(diagram_lines) > 1:
-                    data = {"mermaid": "\n".join(diagram_lines), "available": True, "focused_file": target_file}
+                    data = {"mermaid": "\n".join(diagram_lines), "available": True, "focused_file": target_file, "nodes_meta": nodes_meta}
                 else:
                     msg = (
                         f"No call relationships or symbols found for '{target_file}'.\nClick 'Scan & Index Workspace' to analyze this file or select another file."
                         if target_file
                         else "No SQLite code graph available for this repository.\nClick 'Scan & Index Workspace' to analyze codebase structure."
                     )
-                    data = {"mermaid": "", "available": False, "message": msg}
+                    data = {"mermaid": "", "available": False, "message": msg, "nodes_meta": {}}
             except Exception as e:
                 data = {"mermaid": "", "available": False, "message": f"Graph query error: {str(e)}"}
             self.wfile.write(json.dumps(data).encode("utf-8"))
@@ -468,17 +506,20 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             query = body.get("query", "")
             context_file = body.get("context_file")
             active_file_content = body.get("active_file_content")
-            ws_path = body.get("workspace_path") or runtime_settings.get("repo_path", ".")
-            ws_resolved = Path(ws_path).resolve()
-            if context_file and not is_path_in_workspace(context_file, ws_resolved):
+            raw_ws = (body.get("workspace_path") or "").strip()
+            has_workspace = bool(raw_ws and raw_ws != ".")
+            ws_path = raw_ws if has_workspace else ""
+            ws_resolved = Path(ws_path).resolve() if has_workspace else None
+            if context_file and ws_resolved and not is_path_in_workspace(context_file, ws_resolved):
                 context_file = None
                 active_file_content = None
-            
+
             # Silent zero-token background sync check before resolving context
-            try:
-                _silent_sync_workspace_sync(ws_path)
-            except Exception:
-                pass
+            if has_workspace:
+                try:
+                    _silent_sync_workspace_sync(ws_path)
+                except Exception:
+                    pass
             
             # Resolve conversation history: prefer request history, fallback to server session
             req_history = body.get("history")
@@ -555,13 +596,14 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             else:
                 code_ctx = ""
 
-            # Generate Global Repo Map for whole-codebase architectural awareness
-            try:
-                repo_map = RepoMapGenerator.generate_repo_map(ws_path, graph_store=graph_store, max_chars=4000)
-                if repo_map:
-                    code_ctx = f"<repository_map>\n{repo_map}\n</repository_map>\n\n" + (code_ctx or "")
-            except Exception:
-                pass
+            # Generate Global Repo Map for whole-codebase architectural awareness (only when repository is active)
+            if has_workspace:
+                try:
+                    repo_map = RepoMapGenerator.generate_repo_map(ws_path, graph_store=graph_store, max_chars=4000)
+                    if repo_map:
+                        code_ctx = f"<repository_map>\n{repo_map}\n</repository_map>\n\n" + (code_ctx or "")
+                except Exception:
+                    pass
 
             # Target creation directive if user requested writing/creating new files or folders
             extracted_targets = SymbolEntityResolver.extract_target_filepaths(query)
@@ -707,7 +749,13 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"status": "cleared", "message": "Chat context reset successfully."}).encode("utf-8"))
 
         elif self.path == "/api/index/scan":
-            root_dir = body.get("workspace_path", ".")
+            root_dir = (body.get("workspace_path") or "").strip()
+            if not root_dir or root_dir == ".":
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Please select a repository."}).encode("utf-8"))
+                return
             root = Path(root_dir)
             all_syms = []
             all_rels = []

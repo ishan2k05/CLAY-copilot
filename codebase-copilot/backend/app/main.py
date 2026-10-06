@@ -325,6 +325,15 @@ async def silent_sync_workspace(workspace_dir: str) -> Tuple[int, int]:
                 await graph_store.delete_file_symbols(tracked)
                 vector_store.remove_chunks_for_file(tracked)
                 deleted_count += 1
+
+        if len(current_files) == 0:
+            # Workspace is completely empty on disk: purge all residual in-memory state
+            for k in list(live_file_buffers.keys()):
+                if k.startswith(str(root)) or not Path(k).is_absolute():
+                    live_file_buffers.pop(k, None)
+            vector_store.chunks = []
+            vector_store.chunk_embeddings = None
+            await graph_store.clear_all()
     except Exception as e:
         logger.debug(f"Silent sync error: {e}")
     return changed_count, deleted_count
@@ -592,9 +601,15 @@ active_rolling_summary: Optional[str] = None
 @app.post("/api/chat")
 async def chat_endpoint(req: ChatRequest):
     global active_rolling_summary
-    raw_dir = req.workspace_path or runtime_settings.get("repo_path") or DEFAULT_WORKSPACE
-    workspace_dir = str(resolve_workspace_path(raw_dir))
-    runtime_settings["repo_path"] = workspace_dir
+    raw_req_ws = (req.workspace_path or "").strip()
+    has_workspace = bool(raw_req_ws and raw_req_ws != ".")
+    if has_workspace:
+        workspace_dir = str(resolve_workspace_path(raw_req_ws))
+        runtime_settings["repo_path"] = workspace_dir
+    else:
+        workspace_dir = None
+        runtime_settings["repo_path"] = ""
+
     sec_mode = req.security_mode or runtime_settings.get("security_mode", "sandboxed")
     if req.security_mode:
         runtime_settings["security_mode"] = req.security_mode
@@ -607,33 +622,47 @@ async def chat_endpoint(req: ChatRequest):
     if req.num_predict is not None:
         ollama_provider.num_predict = req.num_predict
 
-    # Silent background sync: microsecond stat() check on workspace files to capture any manual edits, deletions, or emptyings
-    await silent_sync_workspace(workspace_dir)
+    # Silent background sync: only run if a repository workspace is actively selected
+    if workspace_dir:
+        await silent_sync_workspace(workspace_dir)
 
-    # Sync live active file buffer and open files from VS Code in real-time (strictly within workspace)
+    # Sync live active file buffer and open files from VS Code in real-time
     if req.context_file:
         p_res = Path(req.context_file).resolve()
-        if is_path_in_workspace(p_res, workspace_dir):
-            if req.active_file_content is not None:
+        if not workspace_dir or is_path_in_workspace(p_res, workspace_dir):
+            if not p_res.exists() and (req.active_file_content is None or not req.active_file_content.strip()):
+                req.context_file = None
+                req.active_file_content = None
+                live_file_buffers.pop(str(p_res), None)
+                live_file_buffers.pop(p_res.name, None)
+            elif req.active_file_content is not None:
                 live_file_buffers[str(p_res)] = req.active_file_content
                 live_file_buffers[p_res.name] = req.active_file_content
-                await reindex_file(str(p_res), req.active_file_content)
+                if workspace_dir:
+                    await reindex_file(str(p_res), req.active_file_content)
         else:
             req.context_file = None
             req.active_file_content = None
 
     if req.open_files:
+        clean_open_files = []
         for of in req.open_files:
             op = of.get("path")
             oc = of.get("content")
             if op and oc is not None:
                 opr = Path(op).resolve()
-                if is_path_in_workspace(opr, workspace_dir):
-                    live_file_buffers[str(opr)] = oc
-                    live_file_buffers[opr.name] = oc
+                if not workspace_dir or is_path_in_workspace(opr, workspace_dir):
+                    if opr.exists() or oc.strip():
+                        live_file_buffers[str(opr)] = oc
+                        live_file_buffers[opr.name] = oc
+                        clean_open_files.append(of)
+                    else:
+                        live_file_buffers.pop(str(opr), None)
+                        live_file_buffers.pop(opr.name, None)
+        req.open_files = clean_open_files
 
-    # If index is empty or workspace changed, re-index workspace
-    if current_indexed_workspace != workspace_dir or len(vector_store.chunks) == 0:
+    # If workspace is active and index is empty or workspace changed, re-index workspace
+    if workspace_dir and (current_indexed_workspace != workspace_dir or len(vector_store.chunks) == 0):
         await auto_index_workspace(workspace_dir)
 
     # Determine conversation history: prefer req.history from client, fallback to backend session
@@ -653,50 +682,54 @@ async def chat_endpoint(req: ChatRequest):
     )
     active_rolling_summary = rolling_summary
 
-    # 1. Direct file resolution via WorkspaceFileResolver (handles typos, exact matches, top-level scripts, active editor file, live in-memory buffers, multi-turn session history)
-    direct_file_chunks = WorkspaceFileResolver.resolve_query_files(
-        query=req.query,
-        workspace_root=workspace_dir,
-        security_mode=sec_mode,
-        max_chars_per_file=50000,
-        context_file=req.context_file,
-        context_file_content=req.active_file_content,
-        live_buffers=live_file_buffers,
-        history=effective_history
-    )
-
-    # 2. Retrieve top relevant code chunks via Hybrid Search
-    retrieved_chunks = await hybrid_engine.search(
-        req.query,
-        top_k=4,
-        security_mode=sec_mode,
-        workspace_root=workspace_dir
-    )
-
-    # Prioritize direct file chunks over generic search results
-    seen_paths = set()
+    # 1. Direct file resolution & Hybrid Search (only when an active repository workspace is selected)
+    direct_file_chunks = []
+    retrieved_chunks = []
     combined_chunks = []
-    for chunk in direct_file_chunks:
-        combined_chunks.append(chunk)
-        seen_paths.add(chunk.file_path)
+    hybrid_context = ""
+    catalog_context = ""
 
-    for chunk in retrieved_chunks:
-        if chunk.file_path not in seen_paths:
+    if workspace_dir:
+        direct_file_chunks = WorkspaceFileResolver.resolve_query_files(
+            query=req.query,
+            workspace_root=workspace_dir,
+            security_mode=sec_mode,
+            max_chars_per_file=50000,
+            context_file=req.context_file,
+            context_file_content=req.active_file_content,
+            live_buffers=live_file_buffers,
+            history=effective_history
+        )
+
+        retrieved_chunks = await hybrid_engine.search(
+            req.query,
+            top_k=4,
+            security_mode=sec_mode,
+            workspace_root=workspace_dir
+        )
+
+        # Prioritize direct file chunks over generic search results
+        seen_paths = set()
+        for chunk in direct_file_chunks:
             combined_chunks.append(chunk)
             seen_paths.add(chunk.file_path)
-            if len(combined_chunks) >= 6:
-                break
 
-    hybrid_context = HybridSearchEngine.build_context_prompt(
-        combined_chunks,
-        max_chars=35000,
-        workspace_root=workspace_dir
-    )
+        for chunk in retrieved_chunks:
+            if chunk.file_path not in seen_paths:
+                combined_chunks.append(chunk)
+                seen_paths.add(chunk.file_path)
+                if len(combined_chunks) >= 6:
+                    break
 
-    # 3. Add workspace catalog/access summary if user is asking about repo access, file list, or security permissions
-    catalog_context = ""
-    if WorkspaceFileResolver.is_access_or_catalog_query(req.query):
-        catalog_context = WorkspaceFileResolver.get_workspace_catalog_summary(workspace_dir, sec_mode)
+        hybrid_context = HybridSearchEngine.build_context_prompt(
+            combined_chunks,
+            max_chars=35000,
+            workspace_root=workspace_dir
+        )
+
+        # 3. Add workspace catalog/access summary if user is asking about repo access, file list, or security permissions
+        if WorkspaceFileResolver.is_access_or_catalog_query(req.query):
+            catalog_context = WorkspaceFileResolver.get_workspace_catalog_summary(workspace_dir, sec_mode)
 
     # 4. Add active editor file context if provided, not already in combined_chunks, and compliant with security mode
     file_context = ""
@@ -709,7 +742,7 @@ async def chat_endpoint(req: ChatRequest):
     if target_fpath and (target_fpath.exists() or req.active_file_content):
         fpath = target_fpath
         is_allowed = True
-        if sec_mode in ("strict", "sandboxed") and target_fpath.exists():
+        if workspace_dir and sec_mode in ("strict", "sandboxed") and target_fpath.exists():
             try:
                 fpath.relative_to(Path(workspace_dir).resolve())
             except ValueError:
@@ -736,15 +769,18 @@ async def chat_endpoint(req: ChatRequest):
                 lines = content.splitlines()
                 total_lines = len(lines)
                 try:
-                    rel_name = str(fpath.relative_to(Path(workspace_dir).resolve()))
+                    rel_name = str(fpath.relative_to(Path(workspace_dir).resolve())) if workspace_dir else fpath.name
                 except Exception:
                     rel_name = fpath.name
 
                 if not content.strip() or total_lines == 0:
-                    file_context = (
-                        f"[Active File: {rel_name} (0 lines, empty file)]\n"
-                        f"[Status: This file is currently empty on disk. When asked to write, implement, or generate code for this file or repository, provide the complete new code implementation.]\n"
-                    )
+                    if fpath.exists():
+                        file_context = (
+                            f"[Active File: {rel_name} (0 lines, empty file)]\n"
+                            f"[Status: This file is currently empty on disk. When asked to write, implement, or generate code for this file or repository, provide the complete new code implementation.]\n"
+                        )
+                    else:
+                        file_context = ""
                 else:
                     if total_lines <= 600:
                         numbered_lines = [f"{i+1:3d}: {line}" for i, line in enumerate(lines)]
@@ -764,13 +800,15 @@ async def chat_endpoint(req: ChatRequest):
                         f"{file_body}\n"
                     )
 
-    # 2b. Global Repository Map for whole-codebase architectural awareness
-    repo_map = RepoMapGenerator.generate_repo_map(
-        workspace_dir,
-        graph_store=graph_store,
-        max_chars=4000,
-        security_mode=sec_mode
-    )
+    # 2b. Global Repository Map for whole-codebase architectural awareness (only when repository is selected)
+    repo_map = ""
+    if workspace_dir:
+        repo_map = RepoMapGenerator.generate_repo_map(
+            workspace_dir,
+            graph_store=graph_store,
+            max_chars=4000,
+            security_mode=sec_mode
+        )
 
     # 2c. Target creation directive if user requested writing/creating new files or folders
     extracted_targets = SymbolEntityResolver.extract_target_filepaths(req.query)
@@ -818,12 +856,13 @@ async def chat_endpoint(req: ChatRequest):
 
     # Clean short relative citations to avoid UI clutter
     citations = []
-    for c in combined_chunks:
-        try:
-            rel = str(Path(c.file_path).resolve().relative_to(Path(workspace_dir).resolve()))
-        except Exception:
-            rel = Path(c.file_path).name
-        citations.append(f"{rel}:{c.start_line}-{c.end_line}")
+    if workspace_dir:
+        for c in combined_chunks:
+            try:
+                rel = str(Path(c.file_path).resolve().relative_to(Path(workspace_dir).resolve()))
+            except Exception:
+                rel = Path(c.file_path).name
+            citations.append(f"{rel}:{c.start_line}-{c.end_line}")
 
     accumulated_tokens: List[str] = []
 
@@ -883,6 +922,8 @@ class ScanRequest(BaseModel):
 
 @app.post("/api/index/scan")
 async def scan_repository(req: ScanRequest):
+    if not req.workspace_path or not req.workspace_path.strip() or req.workspace_path.strip() == ".":
+        raise HTTPException(status_code=400, detail="Please select a repository.")
     root = resolve_workspace_path(req.workspace_path)
     if not root.exists():
         raise HTTPException(status_code=404, detail="Workspace directory does not exist.")
@@ -902,24 +943,50 @@ async def get_mermaid_graph(path: Optional[str] = None, file: Optional[str] = No
     import sqlite3
     diagram_lines = ["graph TD"]
     seen_edges = set()
+    nodes_meta: Dict[str, Any] = {}
     target_norm = str(resolve_workspace_path(path or runtime_settings.get("repo_path"))).lower()
     selected_file_norm = file.strip().replace("\\", "/").lower() if file and file.strip() else None
 
     try:
         with sqlite3.connect(graph_store.db_path) as db:
+            # Build symbol metadata lookup
+            try:
+                if selected_file_norm:
+                    sel_filename = Path(selected_file_norm).name.lower()
+                    sym_all = db.execute(
+                        "SELECT name, symbol_type, file_path, start_line FROM symbols "
+                        "WHERE LOWER(file_path) LIKE ? OR LOWER(file_path) LIKE ?",
+                        (f"%{selected_file_norm}%", f"%{sel_filename}%")
+                    ).fetchall()
+                else:
+                    sym_all = db.execute("SELECT name, symbol_type, file_path, start_line FROM symbols LIMIT 300").fetchall()
+
+                for sname, stype, sfpath, sline in sym_all:
+                    clean = sname.split("#")[-1].replace(".", "_")
+                    meta_entry = {
+                        "file": sfpath,
+                        "line": sline or 1,
+                        "type": stype,
+                        "name": sname.split("#")[-1]
+                    }
+                    nodes_meta[clean] = meta_entry
+                    nodes_meta[sname] = meta_entry
+            except Exception:
+                pass
+
             if selected_file_norm:
                 sel_filename = Path(selected_file_norm).name.lower()
                 cursor = db.execute(
-                    "SELECT source_symbol, target_symbol, relation_type, file_path FROM relationships "
+                    "SELECT source_symbol, target_symbol, relation_type, file_path, line_number FROM relationships "
                     "WHERE LOWER(file_path) LIKE ? OR LOWER(file_path) LIKE ? LIMIT 60",
                     (f"%{selected_file_norm}%", f"%{sel_filename}%")
                 )
             else:
                 cursor = db.execute(
-                    "SELECT source_symbol, target_symbol, relation_type, file_path FROM relationships LIMIT 60"
+                    "SELECT source_symbol, target_symbol, relation_type, file_path, line_number FROM relationships LIMIT 60"
                 )
             rows = cursor.fetchall()
-            for src, tgt, rel, fpath in rows:
+            for src, tgt, rel, fpath, lnum in rows:
                 if fpath:
                     try:
                         resolved_fpath = str(Path(fpath).resolve()).lower()
@@ -938,19 +1005,34 @@ async def get_mermaid_graph(path: Optional[str] = None, file: Optional[str] = No
                     seen_edges.add(edge)
                     diagram_lines.append(edge)
 
+                if clean_src not in nodes_meta and fpath:
+                    nodes_meta[clean_src] = {
+                        "file": fpath,
+                        "line": lnum or 1,
+                        "type": "function",
+                        "name": src.split("#")[-1]
+                    }
+                if clean_tgt not in nodes_meta and fpath:
+                    nodes_meta[clean_tgt] = {
+                        "file": fpath,
+                        "line": lnum or 1,
+                        "type": "function",
+                        "name": tgt.split("#")[-1]
+                    }
+
             # If no call relationships exist, fallback to displaying indexed functions & classes
             if len(diagram_lines) == 1:
                 if selected_file_norm:
                     sym_cursor = db.execute(
-                        "SELECT name, symbol_type, file_path FROM symbols "
+                        "SELECT name, symbol_type, file_path, start_line FROM symbols "
                         "WHERE LOWER(file_path) LIKE ? OR LOWER(file_path) LIKE ? LIMIT 35",
                         (f"%{selected_file_norm}%", f"%{sel_filename}%")
                     )
                 else:
                     sym_cursor = db.execute(
-                        "SELECT name, symbol_type, file_path FROM symbols LIMIT 30"
+                        "SELECT name, symbol_type, file_path, start_line FROM symbols LIMIT 30"
                     )
-                for sname, stype, sfpath in sym_cursor.fetchall():
+                for sname, stype, sfpath, sline in sym_cursor.fetchall():
                     if sfpath:
                         try:
                             resolved_sfpath = str(Path(sfpath).resolve()).lower()
@@ -967,6 +1049,13 @@ async def get_mermaid_graph(path: Optional[str] = None, file: Optional[str] = No
                     if node_line not in seen_edges:
                         seen_edges.add(node_line)
                         diagram_lines.append(node_line)
+                    if clean_name not in nodes_meta:
+                        nodes_meta[clean_name] = {
+                            "file": sfpath,
+                            "line": sline or 1,
+                            "type": stype,
+                            "name": sname.split("#")[-1]
+                        }
     except Exception:
         pass
 
@@ -979,10 +1068,11 @@ async def get_mermaid_graph(path: Optional[str] = None, file: Optional[str] = No
         return {
             "mermaid": "",
             "available": False,
-            "message": msg
+            "message": msg,
+            "nodes_meta": {}
         }
 
-    return {"mermaid": "\n".join(diagram_lines), "available": True, "focused_file": file}
+    return {"mermaid": "\n".join(diagram_lines), "available": True, "focused_file": file, "nodes_meta": nodes_meta}
 
 
 # ---------------------------------------------------------

@@ -774,6 +774,11 @@ class UniversalASTChunker:
         self.rust_parser = RustSemanticParser()
         self.go_parser = GoSemanticParser()
         self.cstyle_parser = GenericCStyleSemanticParser()
+        try:
+            from .tree_sitter_adapter import TreeSitterAdapter
+            self.tree_sitter_adapter = TreeSitterAdapter() if TreeSitterAdapter.is_available() else None
+        except Exception:
+            self.tree_sitter_adapter = None
 
     def parse_file(
         self, file_path: str, source_code: str
@@ -784,20 +789,29 @@ class UniversalASTChunker:
         if ext == ".py":
             return self.python_chunker.parse_file(file_path, source_code)
 
+        # 2. High-precision Tree-Sitter accelerated tier (when grammar is available)
+        if self.tree_sitter_adapter and self.tree_sitter_adapter.supports_extension(ext):
+            try:
+                ts_res = self.tree_sitter_adapter.parse(file_path, source_code)
+                if ts_res is not None:
+                    return ts_res
+            except Exception:
+                pass  # Graceful fallback to lexical parsers below
+
         try:
-            # 2. TypeScript and JavaScript
+            # 3. TypeScript and JavaScript (Lexical Delimiter Fallback)
             if ext in {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}:
                 return self.ts_parser.parse(file_path, source_code)
 
-            # 3. Rust
+            # 4. Rust (Lexical Delimiter Fallback)
             if ext == ".rs":
                 return self.rust_parser.parse(file_path, source_code)
 
-            # 4. Go
+            # 5. Go (Lexical Delimiter Fallback)
             if ext == ".go":
                 return self.go_parser.parse(file_path, source_code)
 
-            # 5. C/C++, Java, C#, PHP, Ruby, Kotlin, Swift
+            # 6. C/C++, Java, C#, PHP, Ruby, Kotlin, Swift (Lexical Delimiter Fallback)
             if ext in {
                 ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx",
                 ".java", ".cs", ".php", ".rb", ".kt", ".kts", ".swift"
@@ -808,7 +822,7 @@ class UniversalASTChunker:
             # Graceful degradation on malformed code
             pass
 
-        # 6. Fallback bounded chunker for documentation, configs, and other formats
+        # 7. Fallback bounded chunker for documentation, configs, and other formats
         return self._fallback_bounded_chunking(file_path, source_code)
 
     def _fallback_bounded_chunking(

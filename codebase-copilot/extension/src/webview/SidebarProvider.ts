@@ -172,7 +172,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const maskedKey = cleanKey.length > 8
                         ? `${cleanKey.slice(0, 4)}••••••••${cleanKey.slice(-4)}`
                         : (cleanKey ? '••••••••' : '');
-                    
+
                     if (hasKey) {
                         await this._backendClient.updateSettings({ api_key: cleanKey } as any);
                     }
@@ -182,7 +182,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         hasKey: hasKey,
                         maskedKey: maskedKey
                     });
-                }).catch(() => {});
+                }).catch(() => { });
             }
         }, 300);
 
@@ -224,14 +224,29 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 case 'scanWorkspace': {
-                    const workspaceFolder = data.path || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+                    const workspaceFolder = (data.path || '').trim();
+                    if (!workspaceFolder || workspaceFolder === '.') {
+                        vscode.window.showWarningMessage('CLAY Copilot: Please select a repository.');
+                        this._view?.webview.postMessage({
+                            command: 'scanError',
+                            error: 'Please select a repository'
+                        });
+                        break;
+                    }
                     const selectedFile = data.file || data.filePath;
                     try {
                         await vscode.workspace.saveAll(false);
                         const status = await this._backendClient.triggerIndexing(workspaceFolder);
-                        const mermaid = await this._backendClient.getMermaidGraph(workspaceFolder, selectedFile);
+                        const graphData = await this._backendClient.getMermaidGraph(workspaceFolder, selectedFile);
                         const security = await this._backendClient.getSecurityAudit(workspaceFolder);
-                        this._view?.webview.postMessage({ command: 'scanResult', status, mermaid, security, file: selectedFile });
+                        this._view?.webview.postMessage({
+                            command: 'scanResult',
+                            status,
+                            mermaid: graphData.mermaid,
+                            nodes_meta: graphData.nodes_meta,
+                            security,
+                            file: selectedFile
+                        });
                         vscode.window.showInformationMessage(`Indexed ${status.filesCount} files and ${status.symbolsCount} symbols.`);
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`Scanning failed: ${err.message}`);
@@ -240,17 +255,36 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 case 'getMermaidGraph': {
-                    const workspaceFolder = data.path || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+                    const workspaceFolder = (data.path || '').trim();
+                    if (!workspaceFolder || workspaceFolder === '.') {
+                        this._view?.webview.postMessage({
+                            command: 'mermaidResult',
+                            mermaid: '',
+                            nodes_meta: {},
+                            file: data.file,
+                            error: 'No repository selected.'
+                        });
+                        break;
+                    }
                     try {
-                        const mermaid = await this._backendClient.getMermaidGraph(workspaceFolder, data.file);
-                        this._view?.webview.postMessage({ command: 'mermaidResult', mermaid, file: data.file });
+                        const graphData = await this._backendClient.getMermaidGraph(workspaceFolder, data.file);
+                        this._view?.webview.postMessage({
+                            command: 'mermaidResult',
+                            mermaid: graphData.mermaid,
+                            nodes_meta: graphData.nodes_meta,
+                            file: data.file
+                        });
                     } catch (err: any) {
-                        this._view?.webview.postMessage({ command: 'mermaidResult', mermaid: '', file: data.file, error: err.message });
+                        this._view?.webview.postMessage({ command: 'mermaidResult', mermaid: '', nodes_meta: {}, file: data.file, error: err.message });
                     }
                     break;
                 }
                 case 'getSecurityAudit': {
-                    const workspaceFolder = data.path || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+                    const workspaceFolder = (data.path || '').trim();
+                    if (!workspaceFolder || workspaceFolder === '.') {
+                        this._view?.webview.postMessage({ command: 'securityAuditResult', error: 'No repository selected.' });
+                        break;
+                    }
                     try {
                         const security = await this._backendClient.getSecurityAudit(workspaceFolder);
                         this._view?.webview.postMessage({ command: 'securityAuditResult', security });
@@ -299,18 +333,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case 'applyPatch': {
                     try {
                         let targetFile = data.file;
+                        const targetWorkspace = data.workspacePath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || (this._lastActiveDocument ? path.dirname(this._lastActiveDocument.uri.fsPath) : undefined);
                         const genericPlaceholders = new Set([
                             'file', 'unknown', 'filename', 'patch', 'diff',
                             'solution.py', 'patch.diff', 'code', 'script',
                             'untitled', 'path/to/file', 'new_file', ''
                         ]);
                         const isGeneric = !targetFile || genericPlaceholders.has(path.basename(targetFile).toLowerCase()) || (!path.extname(targetFile) && !fs.existsSync(targetFile));
-                        if (this._lastActiveDocument && (!path.isAbsolute(targetFile) || !fs.existsSync(targetFile) || isGeneric)) {
-                            if (isGeneric || path.basename(this._lastActiveDocument.uri.fsPath) === path.basename(targetFile)) {
-                                targetFile = this._lastActiveDocument.uri.fsPath;
-                            }
+                        if (isGeneric && this._lastActiveDocument) {
+                            targetFile = this._lastActiveDocument.uri.fsPath;
+                        } else if (targetWorkspace && !path.isAbsolute(targetFile)) {
+                            targetFile = path.resolve(targetWorkspace, targetFile);
                         }
-                        const targetWorkspace = (this._lastActiveDocument ? path.dirname(this._lastActiveDocument.uri.fsPath) : undefined) || data.workspacePath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
                         const res = await this._backendClient.applyPatch(targetFile, data.diff, targetWorkspace);
                         const finalName = res?.filename || targetFile;
                         vscode.window.showInformationMessage(`CLAY Copilot: Patch applied cleanly to ${finalName}`);
@@ -318,21 +352,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`Failed to apply patch: ${err.message}`);
                     }
+                    break;
+                }
                 case 'rebaseDiff': {
                     try {
                         let targetFile = data.file;
+                        const targetWorkspace = data.workspacePath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || (this._lastActiveDocument ? path.dirname(this._lastActiveDocument.uri.fsPath) : undefined);
                         const genericPlaceholders = new Set([
                             'file', 'unknown', 'filename', 'patch', 'diff',
                             'solution.py', 'patch.diff', 'code', 'script',
                             'untitled', 'path/to/file', 'new_file', ''
                         ]);
                         const isGeneric = !targetFile || genericPlaceholders.has(path.basename(targetFile).toLowerCase()) || (!path.extname(targetFile) && !fs.existsSync(targetFile));
-                        if (this._lastActiveDocument && (!path.isAbsolute(targetFile) || !fs.existsSync(targetFile) || isGeneric)) {
-                            if (isGeneric || path.basename(this._lastActiveDocument.uri.fsPath) === path.basename(targetFile)) {
-                                targetFile = this._lastActiveDocument.uri.fsPath;
-                            }
+                        if (isGeneric && this._lastActiveDocument) {
+                            targetFile = this._lastActiveDocument.uri.fsPath;
+                        } else if (targetWorkspace && !path.isAbsolute(targetFile)) {
+                            targetFile = path.resolve(targetWorkspace, targetFile);
                         }
-                        const targetWorkspace = (this._lastActiveDocument ? path.dirname(this._lastActiveDocument.uri.fsPath) : undefined) || data.workspacePath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
                         const res = await this._backendClient.rebaseDiff(targetFile, data.baseContent, data.diff, data.currentContent, targetWorkspace, data.forceResolution);
                         this._view?.webview.postMessage({
                             command: 'diffRebased',
@@ -476,7 +512,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 case 'openFile': {
                     let filePath = (data.path || data.file_path || '').trim();
-                    if (!filePath) {
+                    const symbolName = (data.symbol || '').trim();
+                    const requestedLine = typeof data.line === 'number' && data.line > 0 ? data.line : 0;
+                    if (!filePath && !symbolName) {
                         break;
                     }
                     try {
@@ -485,45 +523,190 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
 
                         let candidate = filePath;
-                        if (!path.isAbsolute(candidate) || !fs.existsSync(candidate)) {
-                            if (repoHint && fs.existsSync(path.resolve(repoHint, filePath))) {
-                                candidate = path.resolve(repoHint, filePath);
-                            } else if (wsFolder && fs.existsSync(path.resolve(wsFolder, filePath))) {
-                                candidate = path.resolve(wsFolder, filePath);
+                        if (!candidate && repoHint) {
+                            if (this._lastActiveDocument) {
+                                candidate = this._lastActiveDocument.uri.fsPath;
                             }
                         }
 
-                        const targetUri = vscode.Uri.file(candidate);
-                        let opened = false;
-                        try {
-                            await vscode.commands.executeCommand('vscode.open', targetUri);
-                            opened = true;
-                        } catch (_cmdErr) {
-                            try {
-                                const doc = await vscode.workspace.openTextDocument(targetUri);
-                                await vscode.window.showTextDocument(doc, { preview: false });
-                                opened = true;
-                            } catch (_docErr) {
-                                const isWin = process.platform === 'win32';
-                                if (isWin) {
-                                    cp.exec(`start "" "${candidate}"`);
-                                    opened = true;
-                                } else if (process.platform === 'darwin') {
-                                    cp.exec(`open "${candidate}"`);
-                                    opened = true;
-                                } else {
-                                    cp.exec(`xdg-open "${candidate}"`);
-                                    opened = true;
+                        if (candidate && (!path.isAbsolute(candidate) || !fs.existsSync(candidate))) {
+                            if (repoHint && fs.existsSync(path.resolve(repoHint, candidate))) {
+                                candidate = path.resolve(repoHint, candidate);
+                            } else if (wsFolder && fs.existsSync(path.resolve(wsFolder, candidate))) {
+                                candidate = path.resolve(wsFolder, candidate);
+                            }
+                        }
+
+                        if (!candidate || !fs.existsSync(candidate)) {
+                            if (symbolName) {
+                                const searchDir = repoHint || wsFolder;
+                                if (searchDir) {
+                                    const files = await vscode.workspace.findFiles('**/*.{py,ts,js,jsx,tsx,go,rs,java,c,cpp}', '**/node_modules/**', 25);
+                                    for (const f of files) {
+                                        try {
+                                            const content = (await vscode.workspace.fs.readFile(f)).toString();
+                                            if (content.includes(symbolName)) {
+                                                candidate = f.fsPath;
+                                                break;
+                                            }
+                                        } catch { }
+                                    }
                                 }
                             }
                         }
 
-                        if (opened) {
-                            this._view?.webview.postMessage({
-                                command: 'fileOpened',
-                                file: candidate
-                            });
+                        if (!candidate || !fs.existsSync(candidate)) {
+                            vscode.window.showWarningMessage(`CLAY Copilot: Could not locate source file for ${symbolName || filePath}`);
+                            break;
                         }
+
+                        const targetUri = vscode.Uri.file(candidate);
+                        const doc = await vscode.workspace.openTextDocument(targetUri);
+                        const text = doc.getText();
+                        const lines = text.split(/\r?\n/);
+                        let targetLine = requestedLine > 0 ? requestedLine - 1 : 0;
+                        let foundBySymbol = false;
+                        let matchedSymWord = symbolName;
+
+                        if (symbolName) {
+                            const symCandidates = [symbolName];
+                            if (symbolName.includes('_')) {
+                                symCandidates.push(symbolName.replace(/_/g, '.'));
+                                const subParts = symbolName.split('_');
+                                if (subParts.length > 1 && subParts[subParts.length - 1].length > 1) {
+                                    symCandidates.push(subParts[subParts.length - 1]);
+                                }
+                            }
+
+                            // 1. Check if requested line from SQLite already matches the symbol
+                            if (requestedLine > 0 && targetLine >= 0 && targetLine < lines.length) {
+                                const candLine = lines[targetLine];
+                                for (const sc of symCandidates) {
+                                    const esc = sc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                                    if (new RegExp(`\\b${esc}\\b`).test(candLine)) {
+                                        foundBySymbol = true;
+                                        matchedSymWord = sc;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // 2. Strict function/class/method definition patterns (e.g. def main, class Calculator)
+                            if (!foundBySymbol) {
+                                for (const sc of symCandidates) {
+                                    const esc = sc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                                    const defPattern = new RegExp(`^\\s*(?:def|async\\s+def|class|function|fn|pub\\s+fn)\\s+${esc}\\b`);
+                                    for (let i = 0; i < lines.length; i++) {
+                                        if (defPattern.test(lines[i])) {
+                                            targetLine = i;
+                                            foundBySymbol = true;
+                                            matchedSymWord = sc;
+                                            break;
+                                        }
+                                    }
+                                    if (foundBySymbol) break;
+                                }
+                            }
+
+                            // 3. Variable/constant assignment or export pattern
+                            if (!foundBySymbol) {
+                                for (const sc of symCandidates) {
+                                    const esc = sc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                                    const assignPattern = new RegExp(`^\\s*(?:export\\s+)?(?:const|let|var)\\s+${esc}\\b`);
+                                    for (let i = 0; i < lines.length; i++) {
+                                        if (assignPattern.test(lines[i])) {
+                                            targetLine = i;
+                                            foundBySymbol = true;
+                                            matchedSymWord = sc;
+                                            break;
+                                        }
+                                    }
+                                    if (foundBySymbol) break;
+                                }
+                            }
+
+                            // 4. Function call or invocation site: symbol(...)
+                            if (!foundBySymbol) {
+                                for (const sc of symCandidates) {
+                                    const esc = sc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                                    const callPattern = new RegExp(`\\b${esc}\\s*\\(`);
+                                    for (let i = 0; i < lines.length; i++) {
+                                        if (callPattern.test(lines[i])) {
+                                            targetLine = i;
+                                            foundBySymbol = true;
+                                            matchedSymWord = sc;
+                                            break;
+                                        }
+                                    }
+                                    if (foundBySymbol) break;
+                                }
+                            }
+
+                            // 5. Any standalone word match
+                            if (!foundBySymbol) {
+                                for (const sc of symCandidates) {
+                                    const esc = sc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                                    const wordPattern = new RegExp(`\\b${esc}\\b`);
+                                    for (let i = 0; i < lines.length; i++) {
+                                        if (wordPattern.test(lines[i])) {
+                                            targetLine = i;
+                                            foundBySymbol = true;
+                                            matchedSymWord = sc;
+                                            break;
+                                        }
+                                    }
+                                    if (foundBySymbol) break;
+                                }
+                            }
+                        }
+
+                        // Bound check
+                        if (targetLine < 0) targetLine = 0;
+                        if (targetLine >= lines.length) targetLine = Math.max(0, lines.length - 1);
+
+                        // Calculate exact character column offset for the symbol token
+                        const targetLineText = lines[targetLine] || '';
+                        let charStart = 0;
+                        let charEnd = 0;
+                        let tokenToFind = matchedSymWord || symbolName || '';
+                        let symIdx = tokenToFind ? targetLineText.indexOf(tokenToFind) : -1;
+                        if (symIdx < 0 && symbolName) {
+                            symIdx = targetLineText.indexOf(symbolName);
+                            tokenToFind = symbolName;
+                        }
+                        if (symIdx >= 0) {
+                            charStart = symIdx;
+                            charEnd = symIdx + tokenToFind.length;
+                        } else {
+                            const nonWs = targetLineText.search(/\S/);
+                            charStart = nonWs >= 0 ? nonWs : 0;
+                            charEnd = charStart;
+                        }
+
+                        const startPos = new vscode.Position(targetLine, charStart);
+                        const endPos = new vscode.Position(targetLine, charEnd);
+                        const range = new vscode.Range(startPos, endPos);
+
+                        const targetColumn = vscode.window.visibleTextEditors[0]?.viewColumn || vscode.ViewColumn.One;
+
+                        const editor = await vscode.window.showTextDocument(doc, {
+                            viewColumn: targetColumn,
+                            preserveFocus: false,
+                            preview: false,
+                            selection: range
+                        });
+
+                        // Explicitly set selection, reveal in center, and command editor group focus to guarantee cursor jump and keyboard focus
+                        editor.selection = new vscode.Selection(startPos, endPos);
+                        editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+                        await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+
+                        this._view?.webview.postMessage({
+                            command: 'fileOpened',
+                            file: candidate,
+                            line: targetLine + 1,
+                            symbol: symbolName
+                        });
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`CLAY: Could not open file ${filePath}: ${err.message}`);
                     }
@@ -738,16 +921,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (visible) activeDoc = visible.document;
         }
 
-        const effectiveWorkspace = workspacePath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        const isDocInWorkspace = (doc?: vscode.TextDocument) => doc && this._isFileInWorkspace(doc.fileName, effectiveWorkspace);
+        const effectiveWorkspace = workspacePath && workspacePath.trim() !== '.' ? workspacePath.trim() : undefined;
+        const isDocInWorkspace = (doc?: vscode.TextDocument) => {
+            if (!effectiveWorkspace) return true;
+            return doc && this._isFileInWorkspace(doc.fileName, effectiveWorkspace);
+        };
+        const isDocReal = (doc?: vscode.TextDocument) => {
+            if (!doc || !isDocInWorkspace(doc)) return false;
+            if (fs.existsSync(doc.fileName)) return true;
+            return doc.isDirty && doc.getText().trim().length > 0;
+        };
 
-        const activeFileContext = (activeDoc && isDocInWorkspace(activeDoc)) ? activeDoc.fileName : undefined;
-        const activeFileContent = (activeDoc && isDocInWorkspace(activeDoc)) ? activeDoc.getText() : undefined;
+        const activeFileContext = (activeDoc && isDocReal(activeDoc)) ? activeDoc.fileName : undefined;
+        const activeFileContent = (activeDoc && isDocReal(activeDoc)) ? activeDoc.getText() : undefined;
 
-        // Collect all open text documents to sync in-memory state with backend (strictly within workspace)
+        // Collect all open text documents to sync in-memory state with backend (strictly within workspace if one is active)
         const openFiles: Array<{ path: string; content: string; is_dirty?: boolean }> = [];
         for (const doc of vscode.workspace.textDocuments) {
-            if (doc.uri.scheme === 'file' && isDocInWorkspace(doc) && !doc.fileName.includes('node_modules') && !doc.fileName.includes('.git')) {
+            if (doc.uri.scheme === 'file' && isDocReal(doc) && !doc.fileName.includes('node_modules') && !doc.fileName.includes('.git')) {
                 openFiles.push({
                     path: doc.fileName,
                     content: doc.getText(),
@@ -773,7 +964,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     token: `\n\n[Error: ${err}]`
                 });
             },
-            workspacePath,
+            effectiveWorkspace,
             securityMode,
             activeFileContent,
             openFiles,
@@ -838,6 +1029,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 <span class="theme-switch-text" id="theme-switch-text">Dark</span>
             </button>
             <span class="pill pill-teal" id="crumb-status"><span class="pill-dot"></span>Live</span>
+        </div>
+    </div>
+
+    <!-- Global 3-Way Merge Conflict Header Notification -->
+    <div class="header-conflict-banner" id="header-conflict-banner" style="display: none;">
+        <div class="header-conflict-badge">
+            <span class="header-conflict-title" id="header-conflict-title">WARNING: 3-WAY MERGE CONFLICT DETECTED</span>
+        </div>
+        <div class="header-conflict-actions">
+            <button type="button" class="btn-header-dismiss-conflict" id="btn-header-dismiss-conflict" title="Dismiss warning">
+                Dismiss
+            </button>
         </div>
     </div>
 
@@ -963,14 +1166,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         <!-- 3-Way Merge Conflict Guard Status Pill -->
         <div class="diff-conflict-guard-pill" id="diff-conflict-pill" style="display: none;">
             <div class="guard-pill-badge">
-                <span class="guard-pulse-dot"></span>
-                <span class="guard-pill-title" id="guard-pill-title">Buffer modified in editor</span>
+                <span class="guard-pill-title" id="guard-pill-title">WARNING: 3-WAY MERGE CONFLICT DETECTED</span>
             </div>
             <div class="guard-pill-actions">
-                <button type="button" class="btn-guard-conflicts" id="btn-guard-conflicts" style="display: none;" title="Inspect conflicting line ranges">
-                    View Conflicts (<span id="conflict-count">0</span>)
-                </button>
-                <button type="button" class="btn-guard-dismiss" id="btn-guard-dismiss" title="Dismiss warning and review diff">
+                <button type="button" class="btn-guard-dismiss" id="btn-guard-dismiss" title="Dismiss warning">
                     Dismiss
                 </button>
             </div>
@@ -1059,7 +1258,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             <div class="task-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                 <div class="task-title" style="margin-bottom: 0;" id="hierarchy-card-title">Call Hierarchy & Relationships</div>
             </div>
-            <pre style="font-family: var(--font-mono); font-size: 10.5px; line-height: 1.4; color: var(--text-secondary); background: var(--surface-subtle); padding: 8px; border-radius: 10px; overflow-x: auto; white-space: pre;" id="mermaid-code">No SQLite code graph available for this repository.
+            <pre style="font-family: var(--font-mono); font-size: 10.5px; line-height: 1.4; color: var(--text-secondary); background: var(--surface-subtle); padding: 8px; border-radius: 10px; overflow-x: auto; white-space: normal;" id="mermaid-code">No SQLite code graph available for this repository.
 Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
         </div>
 

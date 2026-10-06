@@ -186,6 +186,8 @@
         for (let i = fileMatches.length - 1; i >= 0; i--) {
           let token = fileMatches[i].trim().replace(/^['"`<(\[]+|['"`>)\]]+$/g, '');
           if (token && token.includes('.') && !token.startsWith('.') && !/^(https?:\/\/|www\.)/i.test(token)) {
+            // Strip repeated extensions like .py.py -> .py
+            token = token.replace(/(\.[a-zA-Z0-9]+)\1+$/gi, '$1');
             const ext = token.split('.').pop().toLowerCase();
             // Valid code/data extension
             if (ext && /^[a-zA-Z0-9]{1,10}$/.test(ext) && !['com', 'org', 'net', 'io', 'ai'].includes(ext)) {
@@ -195,6 +197,17 @@
               }
               return token;
             }
+          }
+        }
+      }
+
+      // Check for filename without extension if language/format is indicated in text
+      const nameMatch = trimmed.match(/\b(?:file|script)\s+(?:named|called|titled|as)?\s*['"`]?([a-zA-Z0-9_-]+)['"`]?/i);
+      if (nameMatch) {
+        const base = nameMatch[1].trim();
+        if (base && !stopWords.has(base.toLowerCase()) && base.length > 1) {
+          if (/\b(?:python|py)\b/i.test(trimmed)) {
+            return (folderPrefix && !base.includes('/') ? folderPrefix : '') + base + '.py';
           }
         }
       }
@@ -222,7 +235,7 @@
       if (srcFile) return srcFile.name;
       return currentRepoFilesList[0].name;
     }
-    return 'test_c.py';
+    return '';
   }
 
 
@@ -309,7 +322,7 @@
     if (!views[target]) return;
     try {
       localStorage.setItem('clay_active_tab', target);
-    } catch (e) {}
+    } catch (e) { }
 
     navTabs.forEach((t) => t.classList.remove('active-tab'));
     const activeTabBtn = document.querySelector(`.nav-tab[data-target="${target}"]`);
@@ -351,7 +364,7 @@
     if (savedActiveTab && views[savedActiveTab] && savedActiveTab !== 'chat') {
       switchTab(savedActiveTab);
     }
-  } catch (e) {}
+  } catch (e) { }
 
   // ==========================================
   // 2. Settings: Reference-Styled Architecture & OS Detection
@@ -388,7 +401,7 @@
   // Domain 5: Purge any legacy unencrypted API keys left in localStorage
   try {
     localStorage.removeItem('clay_api_key');
-  } catch (e) {}
+  } catch (e) { }
   let currentSecurityMode = localStorage.getItem('clay_security_mode') || 'sandboxed';
   let currentAllowNetwork = localStorage.getItem('clay_allow_net') !== 'false';
 
@@ -794,7 +807,7 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
-        }).catch(() => {});
+        }).catch(() => { });
       }
     });
   }
@@ -968,12 +981,12 @@
     if (savedChat) {
       chatSessionHistory = JSON.parse(savedChat);
     }
-  } catch {}
+  } catch { }
 
   function saveChatSessionHistory() {
     try {
       sessionStorage.setItem('clay_chat_session_history', JSON.stringify(chatSessionHistory));
-    } catch {}
+    } catch { }
   }
 
   function updateAssistantCursorStates(activeCard = null, isProcessing = false) {
@@ -1075,7 +1088,7 @@
     if (chatAbortController) {
       try {
         chatAbortController.abort();
-      } catch {}
+      } catch { }
       chatAbortController = null;
     }
 
@@ -1260,7 +1273,7 @@
     chatSessionHistory = [];
     try {
       sessionStorage.removeItem('clay_chat_session_history');
-    } catch {}
+    } catch { }
 
     // Clear staged diff / review bar if present
     clearStagedDiff();
@@ -1452,15 +1465,24 @@
       let detectedDiff = null;
       let targetFilename = null;
 
+      const isCreationQuery = /\b(create|new\s+file|put\s+.*in|write\s+.*in|save\s+as|in\s+a\s+new\s+file|make\s+(?:a\s+)?(?:new\s+)?file)\b/i.test(lastUserQuery || '');
+      const queryFile = getPrimaryRepoFile(lastUserQuery || '');
+      const streamActiveFile = getActiveEditorFileInRepo();
+      const repoActiveFilename = streamActiveFile ? streamActiveFile.replace(/\\/g, '/').split('/').pop() : null;
+
       if (diffMatch) {
         detectedDiff = diffMatch[1].trim();
-        targetFilename = extractDiffFilename(detectedDiff) || (getActiveEditorFileInRepo() ? getActiveEditorFileInRepo().split(/[\\/]/).pop() : null) || getPrimaryRepoFile(lastUserQuery || fullText);
+        targetFilename = extractDiffFilename(detectedDiff) || (isCreationQuery && queryFile ? queryFile : null) || repoActiveFilename || queryFile || getPrimaryRepoFile(fullText);
       } else {
         const rawDiffMatch = fullText.match(/(--- (?:a\/|\/dev\/null)[^\n]+\n\+\+\+ (?:b\/|[^\n]+)[^\n]*\n@@[\s\S]*?)(?:```|$)/);
         if (rawDiffMatch) {
           detectedDiff = rawDiffMatch[1].trim();
-          targetFilename = extractDiffFilename(detectedDiff) || (getActiveEditorFileInRepo() ? getActiveEditorFileInRepo().split(/[\\/]/).pop() : null) || getPrimaryRepoFile(lastUserQuery || fullText);
+          targetFilename = extractDiffFilename(detectedDiff) || (isCreationQuery && queryFile ? queryFile : null) || repoActiveFilename || queryFile || getPrimaryRepoFile(fullText);
         }
+      }
+
+      if (targetFilename) {
+        targetFilename = targetFilename.replace(/(\.[a-zA-Z0-9]+)\1+$/gi, '$1');
       }
 
       if (detectedDiff && targetFilename) {
@@ -1468,6 +1490,7 @@
         // Asynchronously heal bare @@ or missing line numbers through compute-diff
         (async () => {
           try {
+            const isTargetActive = streamActiveFile && isSameFileReference(streamActiveFile, targetFilename);
             const compRes = await fetch(`${BACKEND_URL}/api/agent/compute-diff`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -1475,8 +1498,8 @@
                 target_file: targetFilename,
                 code_or_snippet: detectedDiff,
                 workspace_path: currentRepoPath,
-                active_file_content: activeEditorContent || undefined,
-                preferred_line: activeEditorCursorLine || undefined
+                active_file_content: isTargetActive ? (activeEditorContent || undefined) : undefined,
+                preferred_line: isTargetActive ? (activeEditorCursorLine || undefined) : undefined
               })
             });
             if (compRes.ok) {
@@ -2535,7 +2558,7 @@
                   if (parsed.done) {
                     finalStepData = parsed;
                   }
-                } catch {}
+                } catch { }
               }
             }
           }
@@ -2651,7 +2674,7 @@
         agentGoalInput.value = savedGoal;
         setTimeout(resizeAgentGoalInput, 20);
       }
-    } catch (e) {}
+    } catch (e) { }
 
     agentGoalInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
@@ -2664,7 +2687,7 @@
       resizeAgentGoalInput();
       try {
         localStorage.setItem('clay_agent_goal', agentGoalInput.value);
-      } catch (e) {}
+      } catch (e) { }
     });
   }
 
@@ -2678,7 +2701,7 @@
           terminalStream.textContent = lines.slice(-250).join('\n');
         }
         localStorage.setItem('clay_terminal_logs', terminalStream.textContent);
-      } catch (e) {}
+      } catch (e) { }
     }
   }
 
@@ -2692,7 +2715,7 @@
           terminalStream.textContent = lines.slice(-250).join('\n');
         }
         localStorage.setItem('clay_terminal_logs', terminalStream.textContent);
-      } catch (e) {}
+      } catch (e) { }
     }
   }
 
@@ -2704,7 +2727,7 @@
         terminalStream.textContent = savedLogs;
         terminalStream.scrollTop = terminalStream.scrollHeight;
       }
-    } catch (e) {}
+    } catch (e) { }
   }
 
   // Interactive CLI Terminal in Agent Tab
@@ -2753,7 +2776,7 @@
       if (terminalStream) {
         terminalStream.textContent = '$ console cleared\n';
       }
-      try { localStorage.removeItem('clay_terminal_logs'); } catch (e) {}
+      try { localStorage.removeItem('clay_terminal_logs'); } catch (e) { }
     });
   }
 
@@ -2905,10 +2928,10 @@
   // Domain 4: 3-Way Merge Conflict Guard Elements
   const diffConflictPill = document.getElementById('diff-conflict-pill');
   const guardPillTitle = document.getElementById('guard-pill-title');
-  const btnGuardRebase = document.getElementById('btn-guard-rebase');
-  const btnGuardConflicts = document.getElementById('btn-guard-conflicts');
   const btnGuardDismiss = document.getElementById('btn-guard-dismiss');
-  const conflictCountSpan = document.getElementById('conflict-count');
+  const headerConflictBanner = document.getElementById('header-conflict-banner');
+  const headerConflictTitle = document.getElementById('header-conflict-title');
+  const btnHeaderDismissConflict = document.getElementById('btn-header-dismiss-conflict');
 
   let diffViewMode = 'unified';
   let stagedMultiFiles = [];
@@ -2936,20 +2959,10 @@
         pill.style.display = 'none';
         pill.innerHTML = `
           <div class="guard-pill-badge">
-            <span class="guard-pulse-dot"></span>
-            <span class="guard-pill-title" id="guard-pill-title">Buffer modified in editor</span>
+            <span class="guard-pill-title" id="guard-pill-title">WARNING: 3-WAY MERGE CONFLICT DETECTED</span>
           </div>
           <div class="guard-pill-actions">
-            <button type="button" class="btn-guard-conflicts" id="btn-guard-conflicts" style="display: none;" title="Inspect conflicting line ranges">
-              View Conflicts (<span id="conflict-count">0</span>)
-            </button>
-            <button type="button" class="btn-guard-keep-mine" id="btn-guard-keep-mine" style="display: none;" title="Keep editor changes and discard agent diff">
-              Keep Mine
-            </button>
-            <button type="button" class="btn-guard-accept-agent" id="btn-guard-accept-agent" style="display: none;" title="Overwrite conflicting lines with agent code">
-              Accept Agent's
-            </button>
-            <button type="button" class="btn-guard-dismiss" id="btn-guard-dismiss" title="Dismiss warning and review diff">
+            <button type="button" class="btn-guard-dismiss" id="btn-guard-dismiss" title="Dismiss warning">
               Dismiss
             </button>
           </div>
@@ -2959,23 +2972,10 @@
         } else {
           viewDiff.appendChild(pill);
         }
-        pill.querySelector('#btn-guard-rebase')?.addEventListener('click', () => triggerAutoRebase());
-        pill.querySelector('#btn-guard-conflicts')?.addEventListener('click', () => {
-          const conflictEl = document.getElementById('diff-staged-container')?.querySelector('.diff-line-del, .diff-line-add, .diff-box');
-          if (conflictEl) conflictEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          showToast('Inspect conflicting hunk markers in diff viewer below', 'info');
-        });
-        pill.querySelector('#btn-guard-keep-mine')?.addEventListener('click', () => {
-          clearStagedDiff();
-          showToast('Discarded agent staged diff. Kept your editor changes.', 'info', 2500);
-        });
-        pill.querySelector('#btn-guard-accept-agent')?.addEventListener('click', () => {
-          triggerAutoRebase('agent_wins');
-        });
         pill.querySelector('#btn-guard-dismiss')?.addEventListener('click', () => {
           if (stagedDiffData) stagedDiffData.isDismissed = true;
           hideConflictGuardPill();
-          showToast('Conflict warning dismissed. Diff can be applied as-is.', 'info', 2000);
+          showToast('Conflict warning dismissed. Review diff before applying.', 'info', 2000);
         });
       }
     }
@@ -2984,43 +2984,49 @@
 
   function showConflictGuardPill(state, titleText) {
     const pill = ensureConflictGuardPill();
-    if (!pill) return;
-    pill.style.display = 'flex';
-    pill.className = 'diff-conflict-guard-pill';
-    if (state === 'rebased') {
-      pill.classList.add('status-rebased');
-    } else if (state === 'conflict') {
-      pill.classList.add('status-conflict');
+    if (pill) {
+      pill.style.display = 'flex';
+      pill.className = 'diff-conflict-guard-pill';
+      if (state === 'rebased') {
+        pill.classList.add('status-rebased');
+      } else if (state === 'conflict') {
+        pill.classList.add('status-conflict');
+      }
+      const titleEl = pill.querySelector('#guard-pill-title') || document.getElementById('guard-pill-title');
+      if (titleEl && titleText) {
+        titleEl.textContent = titleText;
+      }
     }
-    const titleEl = pill.querySelector('#guard-pill-title') || document.getElementById('guard-pill-title');
-    if (titleEl && titleText) {
-      titleEl.textContent = titleText;
-    }
-    const btnConflicts = pill.querySelector('#btn-guard-conflicts') || document.getElementById('btn-guard-conflicts');
-    const btnKeepMine = pill.querySelector('#btn-guard-keep-mine') || document.getElementById('btn-guard-keep-mine');
-    const btnAcceptAgent = pill.querySelector('#btn-guard-accept-agent') || document.getElementById('btn-guard-accept-agent');
-    if (state === 'conflict') {
-      if (btnConflicts) btnConflicts.style.display = 'inline-block';
-      if (btnKeepMine) btnKeepMine.style.display = 'inline-block';
-      if (btnAcceptAgent) btnAcceptAgent.style.display = 'inline-block';
-    } else {
-      if (btnConflicts) btnConflicts.style.display = 'none';
-      if (btnKeepMine) btnKeepMine.style.display = 'none';
-      if (btnAcceptAgent) btnAcceptAgent.style.display = 'none';
+
+    const headerBanner = document.getElementById('header-conflict-banner');
+    if (headerBanner) {
+      if (state === 'conflict') {
+        headerBanner.style.display = 'flex';
+        const hTitle = document.getElementById('header-conflict-title');
+        if (hTitle && titleText) {
+          hTitle.textContent = titleText;
+        }
+      } else {
+        headerBanner.style.display = 'none';
+      }
     }
   }
 
   function hideConflictGuardPill() {
     const pill = document.getElementById('diff-conflict-pill');
-    if (!pill) return;
-    pill.style.display = 'none';
-    pill.className = 'diff-conflict-guard-pill';
-    const btnConflicts = pill.querySelector('#btn-guard-conflicts') || document.getElementById('btn-guard-conflicts');
-    const btnKeepMine = pill.querySelector('#btn-guard-keep-mine') || document.getElementById('btn-guard-keep-mine');
-    const btnAcceptAgent = pill.querySelector('#btn-guard-accept-agent') || document.getElementById('btn-guard-accept-agent');
-    if (btnConflicts) btnConflicts.style.display = 'none';
-    if (btnKeepMine) btnKeepMine.style.display = 'none';
-    if (btnAcceptAgent) btnAcceptAgent.style.display = 'none';
+    if (pill) {
+      pill.style.display = 'none';
+      pill.className = 'diff-conflict-guard-pill';
+    }
+    const headerBanner = document.getElementById('header-conflict-banner');
+    if (headerBanner) {
+      headerBanner.style.display = 'none';
+    }
+  }
+
+  function hasConflictMarkers(text) {
+    if (!text || typeof text !== 'string') return false;
+    return text.includes('<<<<<<<') || text.includes('=======') || text.includes('>>>>>>>') || text.includes('(CONFLICT)');
   }
 
   function isSameFileReference(f1, f2) {
@@ -3040,6 +3046,16 @@
     const currentHash = computeFastHash(currentBufferContent);
     stagedDiffData.currentBufferContent = currentBufferContent;
 
+    if (hasConflictMarkers(stagedDiffData.diff)) {
+      const matchCount = (stagedDiffData.diff.match(/<<<<<<</g) || []).length || (stagedDiffData.conflicts ? stagedDiffData.conflicts.length : 1);
+      showConflictGuardPill('conflict', `WARNING: 3-WAY MERGE CONFLICT DETECTED (${matchCount})`);
+      const countEl = document.getElementById('conflict-count');
+      if (countEl) countEl.textContent = matchCount;
+      const hCount = document.getElementById('header-conflict-count');
+      if (hCount) hCount.textContent = matchCount;
+      return;
+    }
+
     if (!stagedDiffData.baseContent && currentBufferContent) {
       stagedDiffData.baseContent = currentBufferContent;
       stagedDiffData.baseHash = currentHash;
@@ -3050,7 +3066,11 @@
 
     if (stagedDiffData.baseHash && currentHash !== stagedDiffData.baseHash) {
       stagedDiffData.isDiverged = true;
-      showConflictGuardPill('diverged', 'Buffer modified in editor');
+      showConflictGuardPill('conflict', 'WARNING: 3-WAY MERGE CONFLICT (BUFFER DIVERGED)');
+      const countEl = document.getElementById('conflict-count');
+      if (countEl) countEl.textContent = '1';
+      const hCount = document.getElementById('header-conflict-count');
+      if (hCount) hCount.textContent = '1';
     } else {
       stagedDiffData.isDiverged = false;
       hideConflictGuardPill();
@@ -3129,6 +3149,8 @@
       showConflictGuardPill('conflict', `${conflictCount} collision(s) detected`);
       const conflictCountSpan = document.getElementById('conflict-count');
       if (conflictCountSpan) conflictCountSpan.textContent = conflictCount;
+      const hCount = document.getElementById('header-conflict-count');
+      if (hCount) hCount.textContent = conflictCount;
       if (res.diff) {
         stageDiff(stagedDiffData.file, res.diff, stagedMultiFiles, false, stagedDiffData.baseContent);
       }
@@ -3138,28 +3160,21 @@
     }
   }
 
-  if (btnGuardRebase) {
-    btnGuardRebase.addEventListener('click', () => {
-      triggerAutoRebase();
-    });
-  }
 
-  if (btnGuardConflicts) {
-    btnGuardConflicts.addEventListener('click', () => {
-      const diffContainer = document.getElementById('diff-staged-container');
-      const conflictEl = diffContainer?.querySelector('.diff-line-del, .diff-line-add, .diff-box');
-      if (conflictEl) {
-        conflictEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }
-      showToast('Inspect conflicting hunk markers in diff viewer below', 'info');
-    });
-  }
 
   if (btnGuardDismiss) {
     btnGuardDismiss.addEventListener('click', () => {
       if (stagedDiffData) stagedDiffData.isDismissed = true;
       hideConflictGuardPill();
       showToast('Conflict warning dismissed. Diff can be applied as-is.', 'info', 2000);
+    });
+  }
+
+  if (btnHeaderDismissConflict) {
+    btnHeaderDismissConflict.addEventListener('click', () => {
+      if (stagedDiffData) stagedDiffData.isDismissed = true;
+      hideConflictGuardPill();
+      showToast('Conflict warning dismissed. Review diff before applying.', 'info', 2000);
     });
   }
 
@@ -3241,7 +3256,25 @@
       currentBufferContent: resolvedBaseContent,
       conflicts: (stagedDiffData && isSameFileReference(stagedDiffData.file, filename)) ? stagedDiffData.conflicts || [] : []
     };
-    hideConflictGuardPill();
+
+    const hasConflicts = Boolean(
+      hasConflictMarkers(diffText) ||
+      (stagedDiffData && stagedDiffData.conflicts && stagedDiffData.conflicts.length > 0)
+    );
+
+    if (hasConflicts) {
+      const matchCount = (diffText.match(/<<<<<<</g) || []).length || (stagedDiffData && stagedDiffData.conflicts ? stagedDiffData.conflicts.length : 1);
+      showConflictGuardPill('conflict', `WARNING: 3-WAY MERGE CONFLICT DETECTED (${matchCount})`);
+      const countEl = document.getElementById('conflict-count');
+      if (countEl) countEl.textContent = matchCount;
+    } else if (resolvedBaseContent && activeEditorContent && isSameFileReference(filename, activeEditorFile) && computeFastHash(resolvedBaseContent) !== computeFastHash(activeEditorContent)) {
+      stagedDiffData.isDiverged = true;
+      showConflictGuardPill('conflict', 'WARNING: 3-WAY MERGE CONFLICT (BUFFER DIVERGED)');
+      const countEl = document.getElementById('conflict-count');
+      if (countEl) countEl.textContent = '1';
+    } else {
+      hideConflictGuardPill();
+    }
 
     try {
       localStorage.setItem('clay_staged_diff', JSON.stringify({
@@ -3249,7 +3282,7 @@
         diff: diffText,
         stagedFiles: (stagedFiles && stagedFiles.length > 0) ? stagedFiles : [{ file_path: filename, diff: diffText }]
       }));
-    } catch (e) {}
+    } catch (e) { }
     if (stagedFiles && stagedFiles.length > 0) {
       stagedMultiFiles = stagedFiles;
     } else if (!stagedMultiFiles || stagedMultiFiles.length === 0) {
@@ -3381,7 +3414,7 @@
                 diff: stagedDiffData.diff,
                 stagedFiles: stagedMultiFiles
               }));
-            } catch (e) {}
+            } catch (e) { }
 
             const badge = document.getElementById('diff-edited-badge');
             if (badge) badge.style.display = 'inline-block';
@@ -3444,7 +3477,7 @@
     hideConflictGuardPill();
     try {
       localStorage.removeItem('clay_staged_diff');
-    } catch (e) {}
+    } catch (e) { }
     const diffTabBtn = document.querySelector('.nav-tab[data-target="diff"]');
     const dot = diffTabBtn?.querySelector('.diff-staged-dot');
     if (dot) dot.remove();
@@ -3502,7 +3535,7 @@
         stageDiff(parsed.file, parsed.diff, parsed.stagedFiles);
       }
     }
-  } catch (e) {}
+  } catch (e) { }
 
   // ==========================================
   // 6. Repo Intelligence: Configurable Local Path
@@ -3864,7 +3897,7 @@
     allTasks.forEach((task, idx) => {
       const y = headerH + idx * rowH;
       const rowBg = idx % 2 === 0 ? rowBgEven : 'transparent';
-      
+
       const startCol = idx % numCols;
       const barSpan = Math.min(numCols - startCol, Math.max(1, parseInt(task.duration, 10) || 1));
       const barX = padX + labelColW + startCol * colStepW + 4;
@@ -4807,19 +4840,66 @@
     `;
   }
 
-  function renderMermaidGraph(mermaid, targetFile = null) {
+  let currentGraphNodesMeta = {};
+
+  function renderInteractiveHierarchyLine(line, nodesMeta) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed === 'graph TD' || trimmed === 'graph LR') {
+      return `<div class="hierarchy-header-line">${escapeHtml(trimmed || '')}</div>`;
+    }
+
+    // 1. Edge with relation label: A -->|calls| B
+    const labeledEdgeMatch = trimmed.match(/^([^\s\-\>\|\[\]]+)\s*(?:-->|---\>)\s*\|([^|]+)\|\s*([^\s\-\>\|\[\]]+)$/);
+    if (labeledEdgeMatch) {
+      const [_, src, rel, tgt] = labeledEdgeMatch;
+      const srcMeta = (nodesMeta && nodesMeta[src]) || null;
+      const tgtMeta = (nodesMeta && nodesMeta[tgt]) || null;
+      const srcTitle = srcMeta && srcMeta.file ? `Jump to definition: ${srcMeta.file.split(/[\\/]/).pop() || srcMeta.file}:${srcMeta.line}` : `Click to jump to definition of ${src}`;
+      const tgtTitle = tgtMeta && tgtMeta.file ? `Jump to definition: ${tgtMeta.file.split(/[\\/]/).pop() || tgtMeta.file}:${tgtMeta.line}` : `Click to jump to definition of ${tgt}`;
+      return `<div class="hierarchy-row"><span class="hierarchy-sym-btn" data-symbol="${escapeHtml(src)}" title="${escapeHtml(srcTitle)}">${escapeHtml(src)}</span><span class="hierarchy-arrow">&rarr; ${escapeHtml(rel)} &rarr;</span><span class="hierarchy-sym-btn" data-symbol="${escapeHtml(tgt)}" title="${escapeHtml(tgtTitle)}">${escapeHtml(tgt)}</span></div>`;
+    }
+
+    // 2. Unlabeled edge: A --> B
+    const unlabeledEdgeMatch = trimmed.match(/^([^\s\-\>\|\[\]]+)\s*(?:-->|---\>)\s*([^\s\-\>\|\[\]]+)$/);
+    if (unlabeledEdgeMatch) {
+      const [_, src, tgt] = unlabeledEdgeMatch;
+      const srcMeta = (nodesMeta && nodesMeta[src]) || null;
+      const tgtMeta = (nodesMeta && nodesMeta[tgt]) || null;
+      const srcTitle = srcMeta && srcMeta.file ? `Jump to definition: ${srcMeta.file.split(/[\\/]/).pop() || srcMeta.file}:${srcMeta.line}` : `Click to jump to definition of ${src}`;
+      const tgtTitle = tgtMeta && tgtMeta.file ? `Jump to definition: ${tgtMeta.file.split(/[\\/]/).pop() || tgtMeta.file}:${tgtMeta.line}` : `Click to jump to definition of ${tgt}`;
+      return `<div class="hierarchy-row"><span class="hierarchy-sym-btn" data-symbol="${escapeHtml(src)}" title="${escapeHtml(srcTitle)}">${escapeHtml(src)}</span><span class="hierarchy-arrow">&rarr;</span><span class="hierarchy-sym-btn" data-symbol="${escapeHtml(tgt)}" title="${escapeHtml(tgtTitle)}">${escapeHtml(tgt)}</span></div>`;
+    }
+
+    // 3. Node definition: A["function: A"] or A[A]
+    const nodeMatch = trimmed.match(/^([^\s\[\]]+)\s*\[(?:"|')?([^"'\]]+)(?:"|')?\]$/);
+    if (nodeMatch) {
+      const [_, sym, label] = nodeMatch;
+      const meta = (nodesMeta && nodesMeta[sym]) || null;
+      const title = meta && meta.file ? `Jump to definition: ${meta.file.split(/[\\/]/).pop() || meta.file}:${meta.line}` : `Click to jump to definition of ${sym}`;
+      return `<div class="hierarchy-row"><span class="hierarchy-sym-btn" data-symbol="${escapeHtml(sym)}" title="${escapeHtml(title)}">${escapeHtml(label || sym)}</span></div>`;
+    }
+
+    return `<div class="hierarchy-raw-line">${escapeHtml(line)}</div>`;
+  }
+
+  function renderMermaidGraph(mermaid, targetFile = null, nodesMeta = null) {
     if (!mermaidCode) return;
+    if (nodesMeta) {
+      currentGraphNodesMeta = { ...currentGraphNodesMeta, ...nodesMeta };
+    }
     const activeTarget = targetFile !== undefined ? targetFile : selectedRepoFile;
     if (mermaid && mermaid.trim() && mermaid.trim() !== 'graph TD') {
-      mermaidCode.textContent = mermaid;
+      const lines = mermaid.split(/\r?\n/);
+      const rowsHtml = lines.map(l => renderInteractiveHierarchyLine(l, currentGraphNodesMeta)).join('');
+      mermaidCode.innerHTML = rowsHtml;
       mermaidCode.style.display = 'block';
     } else {
       mermaidCode.style.display = 'block';
       if (activeTarget) {
         const shortName = activeTarget.split(/[\\/]/).pop() || activeTarget;
-        mermaidCode.textContent = `No call relationships or symbols found for '${shortName}'.\nClick 'Scan & Index Workspace' to analyze this file or select another file.`;
+        mermaidCode.innerHTML = `<div class="tree-empty-state">No call relationships or symbols found for '${escapeHtml(shortName)}'.<br>Click 'Scan & Index Workspace' to analyze this file or select another file.</div>`;
       } else {
-        mermaidCode.textContent = "No SQLite code graph available for this repository.\nClick 'Scan & Index Workspace' to analyze codebase structure.";
+        mermaidCode.innerHTML = `<div class="tree-empty-state">No SQLite code graph available for this repository.<br>Click 'Scan & Index Workspace' to analyze codebase structure.</div>`;
       }
     }
   }
@@ -4836,9 +4916,9 @@
         const graphRes = await fetch(`${BACKEND_URL}/api/graph/mermaid?path=${encodeURIComponent(path)}${fileQuery}`);
         if (graphRes.ok) {
           const graphData = await graphRes.json();
-          renderMermaidGraph(graphData.mermaid, activeTarget);
+          renderMermaidGraph(graphData.mermaid, activeTarget, graphData.nodes_meta);
         }
-      } catch (err) {}
+      } catch (err) { }
     }
   }
 
@@ -5197,55 +5277,37 @@
 
   let pendingFileOpenTimer = null;
 
-  function openFileInIdeOrSystem(fullPath) {
-    if (!fullPath) return;
+  function openFileInIdeOrSystem(fullPath, line = 0, symbol = '') {
     const repoHint = (inputRepoPath ? inputRepoPath.value.trim() : '') || currentRepoPath || '';
-    let targetPath = fullPath;
+    let targetPath = fullPath || '';
     if (targetPath && !/^[a-zA-Z]:[\\\/]/.test(targetPath) && !targetPath.startsWith('/') && repoHint) {
       const sep = repoHint.includes('/') && !repoHint.includes('\\') ? '/' : '\\';
       targetPath = `${repoHint.replace(/[\\\/]+$/, '')}${sep}${targetPath.replace(/^[\\\/]+/, '')}`;
     }
-    const fileName = targetPath.split(/[\\/]/).pop() || targetPath;
+    const fileName = targetPath ? (targetPath.split(/[\\/]/).pop() || targetPath) : (symbol || 'file');
+    const toastMsg = line > 0 ? `Opening ${fileName}:${line}...` : `Opening ${fileName}...`;
 
-    showToast(`Opening ${fileName}...`, 'info');
+    showToast(toastMsg, 'info');
 
     if (isVsCode) {
-      vscode.postMessage({ command: 'openFile', path: targetPath, repo_path: repoHint });
-
-      // Fallback: If extension host hasn't acknowledged in 500ms, call backend /api/file/open
-      if (pendingFileOpenTimer) clearTimeout(pendingFileOpenTimer);
-      pendingFileOpenTimer = setTimeout(() => {
-        pendingFileOpenTimer = null;
-        fetch(`${BACKEND_URL}/api/file/open`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ file_path: targetPath, repo_path: repoHint })
-        })
-        .then(res => res.json())
-        .then(data => {
-          if (data.status === 'success') {
-            showToast(`Opened: ${fileName}`, 'success');
-          }
-        })
-        .catch(() => {});
-      }, 500);
+      vscode.postMessage({ command: 'openFile', path: targetPath, line: line || 0, symbol: symbol || '', repo_path: repoHint });
     } else {
       fetch(`${BACKEND_URL}/api/file/open`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ file_path: targetPath, repo_path: repoHint })
       })
-      .then(res => res.json())
-      .then(data => {
-        if (data.status === 'success') {
-          showToast(`Opened: ${fileName}`, 'success');
-        } else {
-          showToast(`Could not open file: ${data.detail || data.error || 'Unknown error'}`, 'error');
-        }
-      })
-      .catch(err => {
-        showToast(`Error opening file: ${err.message}`, 'error');
-      });
+        .then(res => res.json())
+        .then(data => {
+          if (data.status === 'success') {
+            showToast(`Opened: ${fileName}`, 'success');
+          } else {
+            showToast(`Could not open file: ${data.detail || data.error || 'Unknown error'}`, 'error');
+          }
+        })
+        .catch(err => {
+          showToast(`Error opening file: ${err.message}`, 'error');
+        });
     }
   }
 
@@ -5429,6 +5491,12 @@
 
   if (btnRefreshTree) {
     btnRefreshTree.addEventListener('click', () => {
+      const rawInput = inputRepoPath ? inputRepoPath.value.trim() : '';
+      const path = rawInput || (inputRepoPath ? '' : currentRepoPath);
+      if (!path || path === '.') {
+        showToast('Please select a repository', 'warning');
+        return;
+      }
       loadRepoTree();
       showToast('Refreshing repository files tree...', 'info');
     });
@@ -5485,7 +5553,15 @@
   }
 
   async function loadSecurityAudit(targetPath) {
-    const path = targetPath || (inputRepoPath ? inputRepoPath.value.trim() : currentRepoPath);
+    const rawInput = inputRepoPath ? inputRepoPath.value.trim() : '';
+    const path = targetPath || rawInput || (inputRepoPath ? '' : currentRepoPath);
+    if (!path || path === '.') {
+      if (repoSecurityLabel) {
+        repoSecurityLabel.textContent = 'No repository selected';
+        repoSecurityLabel.style.color = 'var(--text-muted)';
+      }
+      return;
+    }
     if (repoSecurityLabel) {
       repoSecurityLabel.textContent = 'Auditing secrets...';
       repoSecurityLabel.style.color = 'var(--text-muted)';
@@ -5513,17 +5589,33 @@
 
   if (btnSecurityScan) {
     btnSecurityScan.addEventListener('click', () => {
+      const rawInput = inputRepoPath ? inputRepoPath.value.trim() : '';
+      const path = rawInput || (inputRepoPath ? '' : currentRepoPath);
+      if (!path || path === '.') {
+        showToast('Please select a repository', 'warning');
+        if (repoSecurityLabel) {
+          repoSecurityLabel.textContent = 'No repository selected';
+          repoSecurityLabel.style.color = 'var(--text-muted)';
+        }
+        return;
+      }
       showToast('Running security secret audit...', 'info');
-      loadSecurityAudit();
+      loadSecurityAudit(path);
     });
   }
 
   async function scanRepository() {
-    const path = inputRepoPath ? inputRepoPath.value.trim() : currentRepoPath;
-    if (path) {
-      currentRepoPath = path;
-      localStorage.setItem('codebase_copilot_repo_path', currentRepoPath);
+    const rawInput = inputRepoPath ? inputRepoPath.value.trim() : '';
+    const path = rawInput || (inputRepoPath ? '' : currentRepoPath);
+    if (!path || path === '.') {
+      showToast('Please select a repository', 'warning');
+      if (repoStatusLabel) {
+        repoStatusLabel.textContent = 'No repository selected';
+      }
+      return;
     }
+    currentRepoPath = path;
+    localStorage.setItem('codebase_copilot_repo_path', currentRepoPath);
     if (repoStatusLabel) {
       const activeFileShort = selectedRepoFile ? (selectedRepoFile.split(/[\\/]/).pop() || selectedRepoFile) : null;
       repoStatusLabel.textContent = activeFileShort
@@ -5562,7 +5654,7 @@
     }
   }
 
-  function applyScanResults(scanData, mermaid, security, focusedFile = null) {
+  function applyScanResults(scanData, mermaid, security, focusedFile = null, nodesMeta = null) {
     if (btnScanRepo) btnScanRepo.disabled = false;
     if (repoStatsText && scanData) {
       repoStatsText.textContent = `Indexed: ${scanData.filesCount ?? 0} Files // ${scanData.symbolsCount ?? 0} Functions & Classes // ${scanData.chunksCount ?? 0} Vector Chunks`;
@@ -5570,7 +5662,7 @@
     if (repoStatusLabel) {
       repoStatusLabel.textContent = 'Indexed & Synced (SQLite Graph Active)';
     }
-    renderMermaidGraph(mermaid, focusedFile !== undefined ? focusedFile : selectedRepoFile);
+    renderMermaidGraph(mermaid, focusedFile !== undefined ? focusedFile : selectedRepoFile, nodesMeta);
     if (security) {
       applySecurityResults(security);
     }
@@ -5651,19 +5743,32 @@
         loadRepoTree(currentRepoPath);
         break;
 
+      case 'fileOpened':
+        if (msg.symbol) {
+          showToast(`Jumped to ${msg.symbol} (line ${msg.line || 1})`, 'info', 1600);
+        }
+        break;
+
       case 'scanResult':
         if (btnScanRepo) btnScanRepo.disabled = false;
-        applyScanResults(msg.status, msg.mermaid, msg.security, msg.file);
+        applyScanResults(msg.status, msg.mermaid, msg.security, msg.file, msg.nodes_meta);
         loadRepoTree(currentRepoPath);
         break;
 
       case 'mermaidResult':
-        renderMermaidGraph(msg.mermaid, msg.file);
+        renderMermaidGraph(msg.mermaid, msg.file, msg.nodes_meta);
         break;
 
       case 'scanError':
         if (btnScanRepo) btnScanRepo.disabled = false;
-        if (repoStatusLabel) repoStatusLabel.textContent = `Scan failed: ${msg.error || 'Unknown error'}`;
+        if (repoStatusLabel) {
+          repoStatusLabel.textContent = msg.error && msg.error.toLowerCase().includes('please select')
+            ? 'No repository selected'
+            : `Scan failed: ${msg.error || 'Unknown error'}`;
+        }
+        if (msg.error && msg.error.toLowerCase().includes('please select')) {
+          showToast(msg.error, 'warning');
+        }
         break;
 
       case 'securityAuditResult':
@@ -5750,9 +5855,9 @@
       case 'renderMermaid':
         if (mermaidCode) {
           if (msg.mermaid && msg.mermaid.trim() && msg.mermaid.trim() !== 'graph TD') {
-            mermaidCode.textContent = msg.mermaid;
+            renderMermaidGraph(msg.mermaid, null, msg.nodes_meta);
           } else {
-            mermaidCode.textContent = "No SQLite code graph available for this repository.\nClick 'Scan & Index Workspace' to analyze codebase structure.";
+            mermaidCode.innerHTML = `<div class="tree-empty-state">No SQLite code graph available for this repository.<br>Click 'Scan & Index Workspace' to analyze codebase structure.</div>`;
           }
         }
         break;
@@ -5888,6 +5993,12 @@
 
       if (line.startsWith('---') || line.startsWith('+++')) {
         parsedItems.push({ type: 'meta', text: line, rawIdx: idx });
+        idx++;
+        continue;
+      }
+
+      if (line.startsWith('<<<<<<<') || line.startsWith('=======') || line.startsWith('>>>>>>>')) {
+        parsedItems.push({ type: 'conflict_marker', text: line, rawIdx: idx });
         idx++;
         continue;
       }
@@ -6033,6 +6144,14 @@
               <td class="diff-split-col diff-add">${rightGutter}<span class="diff-marker">+</span><span class="diff-line-code editable-diff-line" contenteditable="true" spellcheck="false" data-raw-idx="${item.rawIdx}" title="Click to edit line before accepting">${rightContent}</span></td>
             </tr>
           `;
+        } else if (item.type === 'conflict_marker') {
+          splitHtml += `
+            <tr class="diff-split-row diff-conflict-marker">
+              <td colspan="2" style="padding: 3px 8px; font-weight: 700; color: #EF4444; background: rgba(239, 68, 68, 0.16); border-left: 3px solid #EF4444;">
+                <span class="diff-marker">!</span> <span class="diff-line-code">${escapeHtml(item.text)}</span>
+              </td>
+            </tr>
+          `;
         } else {
           const content = escapeHtml(item.text.startsWith(' ') ? item.text.slice(1) : item.text);
           const leftGutter = `<span class="diff-split-gutter">${item.oldNum}</span>`;
@@ -6068,6 +6187,10 @@
         return `<div class="diff-line diff-meta"><span class="diff-line-gutter"><span></span><span></span></span><span>${escapeHtml(item.text)}</span></div>`;
       }
 
+      if (item.type === 'conflict_marker') {
+        return `<div class="diff-line diff-conflict-marker"><span class="diff-line-gutter"><span>!</span><span>!</span></span><span class="diff-line-content"><span class="diff-marker">!</span><span class="diff-line-code">${escapeHtml(item.text)}</span></span></div>`;
+      }
+
       if (item.type === 'del') {
         const innerContent = item.spans ? renderWordDiffSpans(item.spans) : escapeHtml(item.text.slice(1));
         return `<div class="diff-line diff-del"><span class="diff-line-gutter"><span>${item.oldNum}</span><span></span></span><span class="diff-line-content"><span class="diff-marker">-</span><span class="diff-line-code">${innerContent}</span></span></div>`;
@@ -6091,19 +6214,19 @@
 
     function createCodeBlockHtml(displayLang, code) {
       const isMermaid = displayLang === 'mermaid' ||
-                        displayLang === 'flowchart' ||
-                        displayLang === 'diagram' ||
-                        displayLang === 'architecture' ||
-                        (/^\s*(?:graph|flowchart)\s+(?:TD|TB|LR|BT|RL)\b/i.test(code)) ||
-                        (/^\s*(?:sequenceDiagram|classDiagram)\b/i.test(code));
+        displayLang === 'flowchart' ||
+        displayLang === 'diagram' ||
+        displayLang === 'architecture' ||
+        (/^\s*(?:graph|flowchart)\s+(?:TD|TB|LR|BT|RL)\b/i.test(code)) ||
+        (/^\s*(?:sequenceDiagram|classDiagram)\b/i.test(code));
       if (isMermaid) {
         return createMermaidDiagramHtml(code.trim());
       }
 
       const isDiff = displayLang === 'diff' ||
-                     displayLang === 'patch' ||
-                     code.includes('<<<<<<< SEARCH') ||
-                     (code.includes('--- ') && code.includes('+++ ') && code.includes('@@'));
+        displayLang === 'patch' ||
+        code.includes('<<<<<<< SEARCH') ||
+        (code.includes('--- ') && code.includes('+++ ') && code.includes('@@'));
 
       const diffBtnHtml = isDiff ? (
         `<button class="btn-chat-apply-diff" type="button" title="View & apply in Diff tab">` +
@@ -6384,38 +6507,66 @@
 
     const rawText = codeEl.innerText || codeEl.textContent || '';
     let target = extractDiffFilename(rawText);
+
+    const isCreationIntent = /\b(create|new\s+file|put\s+.*in|write\s+.*in|save\s+as|in\s+a\s+new\s+file|make\s+(?:a\s+)?(?:new\s+)?file)\b/i.test(lastUserQuery || '');
+    const queryTarget = getPrimaryRepoFile(lastUserQuery || '');
     const repoActive = getActiveEditorFileInRepo();
-    if (!target && repoActive) {
-      const parts = repoActive.split(/[\\/]/);
-      target = parts[parts.length - 1];
-    }
+    const activeEditorFile = repoActive ? repoActive.replace(/\\/g, '/').split('/').pop() : null;
+
     if (!target) {
-      target = getPrimaryRepoFile(lastUserQuery || rawText);
+      if (isCreationIntent && queryTarget) {
+        target = queryTarget;
+      } else if (queryTarget && (!repoActive || !isSameFileReference(queryTarget, activeEditorFile))) {
+        target = queryTarget;
+      } else if (repoActive) {
+        target = activeEditorFile;
+      } else {
+        target = queryTarget || getPrimaryRepoFile(rawText);
+      }
     }
+
+    if (target) {
+      target = target.replace(/(\.[a-zA-Z0-9]+)\1+$/gi, '$1');
+    }
+
+    if (!target) {
+      target = 'new_file.py';
+    }
+
+    const isTargetActive = activeEditorFile && isSameFileReference(target, activeEditorFile);
+    const activeContentToSend = isTargetActive ? activeEditorContent : undefined;
+    const isUnifiedDiff = rawText.startsWith('---') || rawText.includes('@@');
+    const fileExists = currentRepoFilesList && currentRepoFilesList.some(f => f.name && f.name.toLowerCase() === target.toLowerCase());
 
     let finalDiff = rawText;
     let stagedFiles = null;
-    try {
-      const res = await fetch(`${BACKEND_URL}/api/agent/compute-diff`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workspace_path: currentRepoPath,
-          target_file: target,
-          code_or_snippet: rawText,
-          active_file_content: activeEditorContent || undefined,
-          preferred_line: activeEditorCursorLine || undefined
-        })
-      });
-      if (res.ok) {
-        const cData = await res.json();
-        if (cData && cData.diff && cData.diff.trim().length > 0) {
-          finalDiff = cData.diff;
-          stagedFiles = cData.staged_files || null;
+
+    if (!isUnifiedDiff && (isCreationIntent || !fileExists || (isTargetActive && (!activeEditorContent || !activeEditorContent.trim())))) {
+      const rawLines = rawText.split('\n');
+      finalDiff = `--- /dev/null\n+++ b/${target}\n@@ -0,0 +1,${rawLines.length} @@\n` + rawLines.map(l => `+${l}`).join('\n');
+    } else {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/agent/compute-diff`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            workspace_path: currentRepoPath,
+            target_file: target,
+            code_or_snippet: rawText,
+            active_file_content: activeContentToSend,
+            preferred_line: isTargetActive ? activeEditorCursorLine : undefined
+          })
+        });
+        if (res.ok) {
+          const cData = await res.json();
+          if (cData && cData.diff && cData.diff.trim().length > 0) {
+            finalDiff = cData.diff;
+            stagedFiles = cData.staged_files || null;
+          }
         }
+      } catch (err) {
+        // fallback to rawText
       }
-    } catch (err) {
-      // fallback to rawText
     }
 
     stageDiff(target, finalDiff, stagedFiles);
@@ -6600,6 +6751,23 @@
     const dy = e.pageY - panStartY;
     activePanViewport.scrollLeft = panStartScrollLeft - dx;
     activePanViewport.scrollTop = panStartScrollTop - dy;
+  });
+
+  // Delegated click listener for interactive Call Hierarchy symbols in Repo tab
+  document.addEventListener('click', (e) => {
+    const symBtn = e.target.closest('.hierarchy-sym-btn');
+    if (!symBtn) return;
+    e.stopPropagation();
+
+    const sym = symBtn.getAttribute('data-symbol');
+    if (!sym) return;
+
+    const meta = currentGraphNodesMeta ? currentGraphNodesMeta[sym] : null;
+    const targetFile = meta && meta.file ? meta.file : (selectedRepoFile || activeEditorFile || '');
+    const targetLine = meta && meta.line ? meta.line : 0;
+    const displayName = meta && meta.name ? meta.name : sym;
+
+    openFileInIdeOrSystem(targetFile, targetLine, displayName);
   });
 
   window.addEventListener('mouseup', () => {

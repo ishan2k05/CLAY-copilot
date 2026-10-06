@@ -165,7 +165,7 @@ export class BackendClient {
         let citations: string[] = [];
 
         try {
-            const workspaceFolder = workspacePathOverride || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            const workspaceFolder = workspacePathOverride && workspacePathOverride.trim() !== '.' ? workspacePathOverride.trim() : undefined;
             const payload: any = {
                 query,
                 context_file: activeFileContext,
@@ -274,7 +274,7 @@ export class BackendClient {
         return await response.json() as IndexStatus;
     }
 
-    async getMermaidGraph(workspacePath?: string, filePath?: string): Promise<string> {
+    async getMermaidGraph(workspacePath?: string, filePath?: string): Promise<{ mermaid: string; nodes_meta: Record<string, any> }> {
         try {
             const params = new URLSearchParams();
             if (workspacePath) params.set('path', workspacePath);
@@ -284,10 +284,13 @@ export class BackendClient {
             const res = await fetch(url);
             if (res.ok) {
                 const data = await res.json() as any;
-                return data.mermaid || '';
+                return {
+                    mermaid: data.mermaid || '',
+                    nodes_meta: data.nodes_meta || {}
+                };
             }
         } catch {}
-        return '';
+        return { mermaid: '', nodes_meta: {} };
     }
 
     async getSecurityAudit(workspacePath?: string): Promise<{
