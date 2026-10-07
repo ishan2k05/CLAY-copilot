@@ -1,4 +1,5 @@
 import os
+import time
 import difflib
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
@@ -18,6 +19,16 @@ class WorkspaceFileResolver:
         "venv", ".venv", "node_modules", ".git", "__pycache__",
         "dist", "build", ".pytest_cache", ".vscode", "egg-info"
     }
+
+    _cached_files: Dict[str, Tuple[float, Dict[str, Path]]] = {}
+    _CACHE_TTL_SEC: float = 20.0
+
+    @classmethod
+    def invalidate_cache(cls, workspace_root: Optional[str] = None) -> None:
+        if workspace_root:
+            cls._cached_files.pop(str(workspace_root), None)
+        else:
+            cls._cached_files.clear()
 
     @classmethod
     def _resolve_root(cls, workspace_root: Optional[str]) -> Path:
@@ -55,10 +66,17 @@ class WorkspaceFileResolver:
 
     @classmethod
     def list_accessible_files(cls, workspace_root: str) -> Dict[str, Path]:
-        """Returns a mapping of relative paths and basenames to Path objects."""
+        """Returns a mapping of relative paths and basenames to Path objects with TTL caching."""
         root = cls._resolve_root(workspace_root)
         if not root.exists():
             return {}
+
+        now = time.time()
+        cache_key = str(root)
+        if cache_key in cls._cached_files:
+            cached_time, cached_map = cls._cached_files[cache_key]
+            if now - cached_time < cls._CACHE_TTL_SEC:
+                return cached_map
 
         file_map: Dict[str, Path] = {}
         for path in root.rglob("*"):
@@ -80,6 +98,7 @@ class WorkspaceFileResolver:
             file_map[rel_str] = path
             file_map[path.name] = path
 
+        cls._cached_files[cache_key] = (now, file_map)
         return file_map
 
     @classmethod

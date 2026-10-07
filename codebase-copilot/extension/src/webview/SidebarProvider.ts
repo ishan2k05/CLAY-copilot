@@ -36,6 +36,31 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     line: cursorLine,
                     content: editor.document.getText()
                 });
+
+                // Auto-sync workspace if active editor belongs to an open workspace folder
+                const wsFolder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
+                if (wsFolder && wsFolder.uri.fsPath) {
+                    const currentFolder = wsFolder.uri.fsPath;
+                    const lastKnown = this._context?.globalState.get<string>('lastRepoPath');
+                    if (currentFolder !== lastKnown) {
+                        this._context?.globalState.update('lastRepoPath', currentFolder);
+                        this._view?.webview.postMessage({
+                            command: 'repoPathSelected',
+                            path: currentFolder
+                        });
+                    }
+                }
+            }
+        });
+
+        vscode.workspace.onDidChangeWorkspaceFolders(() => {
+            const currentFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (currentFolder) {
+                this._context?.globalState.update('lastRepoPath', currentFolder);
+                this._view?.webview.postMessage({
+                    command: 'repoPathSelected',
+                    path: currentFolder
+                });
             }
         });
 
@@ -137,11 +162,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
-        // Notify Webview of system info and saved repo path on startup
-        const savedRepo = this._context?.globalState.get<string>('lastRepoPath');
+        // Notify Webview of system info and current workspace path on startup
         const activeFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        // Only provide initial repo path if a saved repo exists or if first run with activeFolder
-        const initialRepo = savedRepo !== undefined ? savedRepo : (activeFolder || '');
+        const savedRepo = this._context?.globalState.get<string>('lastRepoPath');
+        // Always prioritize the active workspace folder currently open in VS Code!
+        const initialRepo = activeFolder || savedRepo || '';
 
         setTimeout(() => {
             if (initialRepo) {
@@ -199,7 +224,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             num_ctx: data.num_ctx,
                             num_predict: data.num_predict
                         } : undefined,
-                        data.history
+                        data.history,
+                        data.pinned_mentions
                     );
                     break;
                 }
@@ -910,7 +936,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         workspacePath?: string,
         securityMode?: string,
         inferenceOptions?: { temperature?: number; num_ctx?: number; num_predict?: number },
-        history?: Array<{ role: string; content: string }>
+        history?: Array<{ role: string; content: string }>,
+        pinnedMentions?: Array<Record<string, any>>
     ) {
         let activeDoc = vscode.window.activeTextEditor?.document;
         if ((!activeDoc || activeDoc.uri.scheme !== 'file') && this._lastActiveDocument && !this._lastActiveDocument.isClosed) {
@@ -970,7 +997,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             openFiles,
             inferenceOptions,
             cursorLine,
-            history
+            history,
+            pinnedMentions
         );
     }
 
@@ -996,19 +1024,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         <div class="context-bar">
         <div class="brand-crumb">
             <div class="clay-brand-badge">
-                <svg viewBox="0 0 512 512" class="clay-cube-icon" shape-rendering="crispEdges">
-                    <g transform="translate(64, 148) scale(24)">
-                        <rect x="1" y="1" width="2" height="1" fill="#C15C3D"/>
-                        <rect x="2" y="2" width="2" height="1" fill="#C15C3D"/>
-                        <rect x="3" y="3" width="2" height="1" fill="#C15C3D"/>
-                        <rect x="4" y="4" width="2" height="1" fill="#C15C3D"/>
-                        <rect x="5" y="5" width="2" height="1" fill="#C15C3D"/>
-                        <rect x="4" y="6" width="2" height="1" fill="#C15C3D"/>
-                        <rect x="3" y="7" width="2" height="1" fill="#C15C3D"/>
-                        <rect x="2" y="8" width="2" height="1" fill="#C15C3D"/>
-                        <rect x="1" y="9" width="2" height="1" fill="#C15C3D"/>
-                        <rect x="8" y="8" width="6" height="2" fill="#C15C3D"/>
-                    </g>
+                <svg viewBox="1 1 13 9" class="clay-cube-icon" shape-rendering="crispEdges">
+                    <rect x="1" y="1" width="2" height="1" fill="#C15C3D"/>
+                    <rect x="2" y="2" width="2" height="1" fill="#C15C3D"/>
+                    <rect x="3" y="3" width="2" height="1" fill="#C15C3D"/>
+                    <rect x="4" y="4" width="2" height="1" fill="#C15C3D"/>
+                    <rect x="5" y="5" width="2" height="1" fill="#C15C3D"/>
+                    <rect x="4" y="6" width="2" height="1" fill="#C15C3D"/>
+                    <rect x="3" y="7" width="2" height="1" fill="#C15C3D"/>
+                    <rect x="2" y="8" width="2" height="1" fill="#C15C3D"/>
+                    <rect x="1" y="9" width="2" height="1" fill="#C15C3D"/>
+                    <rect x="8" y="8" width="6" height="2" fill="#C15C3D"/>
                 </svg>
                 <span class="brand-title">CLAY</span>
             </div>
@@ -1078,7 +1104,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             <div class="terminal-header">
                 <span class="console-title">agent-console</span>
                 <div class="terminal-actions">
-                    <span style="color: #4CAF50; font-weight: 600;" id="agent-terminal-status">READY</span>
+                    <span class="terminal-status-badge" id="agent-terminal-status">READY</span>
                     <button class="terminal-action-btn" id="btn-clear-terminal" title="Clear Console">clear</button>
                     <button class="terminal-action-btn" id="btn-copy-terminal" title="Copy Log">copy</button>
                 </div>
@@ -1468,6 +1494,15 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
 
     <!-- Chat Input Dock (Rounder, Cleared) -->
     <div class="input-dock">
+        <!-- Floating Mention Autocomplete Popup -->
+        <div class="mention-autocomplete-popup" id="mention-autocomplete-popup" style="display: none;">
+            <div class="mention-autocomplete-header">
+                <span class="mention-autocomplete-title">MENTION CONTEXT</span>
+                <span class="mention-autocomplete-hint">ARROWS NAVIGATE // ENTER TO PIN</span>
+            </div>
+            <div class="mention-autocomplete-list" id="mention-autocomplete-list"></div>
+        </div>
+
         <!-- Pixel Style Transparent Jump Down Button (Centered) -->
         <button class="chat-jump-down-btn" id="btn-chat-jump-down" title="Jump to bottom" aria-label="Jump to latest message">
             <svg viewBox="0 0 10 10" width="10" height="10" fill="currentColor" shape-rendering="crispEdges">
@@ -1475,7 +1510,9 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
             </svg>
         </button>
         <div class="input-container">
-            <textarea class="chat-textarea" id="chat-input" placeholder="Start typing to mold CLAY"></textarea>
+            <!-- Pinned Mentions Chips Tray (Option B) -->
+            <div class="mention-chips-tray" id="mention-chips-tray" style="display: none;"></div>
+            <textarea class="chat-textarea" id="chat-input" placeholder="Start typing to mold CLAY (@ to mention file or symbol)"></textarea>
             <div class="input-toolbar">
                 <div class="input-meta-hint">
                     <span class="pill-dot"></span> <span id="input-model-hint">CLAY // gemma4:31b-cloud</span>

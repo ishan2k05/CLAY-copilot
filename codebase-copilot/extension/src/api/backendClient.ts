@@ -152,7 +152,8 @@ export class BackendClient {
         openFiles?: Array<{ path: string; content: string; is_dirty?: boolean }>,
         inferenceOptions?: { temperature?: number; num_ctx?: number; num_predict?: number },
         cursorLine?: number,
-        history?: Array<{ role: string; content: string }>
+        history?: Array<{ role: string; content: string }>,
+        pinnedMentions?: Array<Record<string, any>>
     ): Promise<void> {
         if (this.activeChatAbortController) {
             try { this.activeChatAbortController.abort(); } catch {}
@@ -175,6 +176,9 @@ export class BackendClient {
                 cursor_line: cursorLine,
                 stream: true
             };
+            if (pinnedMentions && pinnedMentions.length > 0) {
+                payload.pinned_mentions = pinnedMentions;
+            }
             if (history && history.length > 0) {
                 payload.history = history;
             }

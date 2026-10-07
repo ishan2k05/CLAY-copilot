@@ -594,9 +594,105 @@ class ChatRequest(BaseModel):
     stream: bool = True
     cursor_line: Optional[int] = None
     history: Optional[List[Dict[str, str]]] = None
+    pinned_mentions: Optional[List[Dict[str, Any]]] = None
 
 active_chat_history: List[Dict[str, str]] = []
 active_rolling_summary: Optional[str] = None
+
+@app.get("/api/context/mentions")
+async def get_context_mentions(
+    query: str = "",
+    limit: int = 15,
+    workspace_path: Optional[str] = None
+):
+    """
+    Returns ranked autocomplete candidates for @ mentions across workspace files,
+    folders, and AST symbols (classes, functions, methods).
+    """
+    raw_ws = (workspace_path or runtime_settings.get("repo_path", "")).strip()
+    ws_dir = str(resolve_workspace_path(raw_ws)) if raw_ws and raw_ws != "." else None
+    results = []
+    q_clean = query.strip().lstrip("@").lower()
+
+    # 1. Matching accessible files and directories
+    if ws_dir and Path(ws_dir).exists():
+        try:
+            accessible = WorkspaceFileResolver.list_accessible_files(ws_dir)
+            file_matches = []
+            folder_set = set()
+
+            for rel_path, full_path in accessible.items():
+                rel_clean = rel_path.replace("\\", "/")
+                if not q_clean or q_clean in rel_clean.lower() or q_clean in full_path.name.lower():
+                    file_matches.append({
+                        "type": "file",
+                        "name": full_path.name,
+                        "path": rel_clean,
+                        "icon": "file"
+                    })
+
+                parent = str(Path(rel_clean).parent).replace("\\", "/")
+                if parent and parent != ".":
+                    parts = parent.split("/")
+                    for i in range(1, len(parts) + 1):
+                        folder_set.add("/".join(parts[:i]))
+
+            # Sort file matches: exact and prefix matches first (e.g. app.py for query 'app')
+            def file_sort_score(f):
+                fn = f["name"].lower()
+                if fn == q_clean or fn.startswith(q_clean + "."):
+                    return 0
+                if fn.startswith(q_clean):
+                    return 1
+                if q_clean in fn:
+                    return 2
+                return 3
+            file_matches.sort(key=file_sort_score)
+
+            for fld in sorted(folder_set):
+                if not q_clean or q_clean in fld.lower():
+                    results.append({
+                        "type": "folder",
+                        "name": fld.split("/")[-1] + "/",
+                        "path": fld,
+                        "icon": "folder"
+                    })
+                    if len(results) >= 3:
+                        break
+
+            results.extend(file_matches[:10])
+        except Exception as e:
+            logger.debug(f"File mention resolver error: {e}")
+
+    # 2. Matching AST symbols from SQLite Graph Store (skip if user typed a file extension like .py)
+    has_file_ext = any(q_clean.endswith(ext) for ext in [".py", ".ts", ".js", ".json", ".html", ".css", ".md", ".sh", ".sql", ".yaml", ".yml", ".toml", ".txt"])
+    if not has_file_ext and q_clean and len(q_clean) >= 2:
+        try:
+            symbols = await graph_store.find_symbols(q_clean, limit=12)
+            for s in symbols:
+                rel_f = s.get("file_path", "")
+                if ws_dir:
+                    try:
+                        resolved_path = Path(rel_f).resolve()
+                        resolved_ws = Path(ws_dir).resolve()
+                        # Strictly verify symbol file is inside current workspace
+                        rel_f = str(resolved_path.relative_to(resolved_ws))
+                    except (ValueError, Exception):
+                        # Symbol belongs to another repo or outside workspace: strictly skip!
+                        continue
+                results.append({
+                    "type": "symbol",
+                    "name": s["name"],
+                    "path": rel_f.replace("\\", "/"),
+                    "kind": s.get("symbol_type", "symbol"),
+                    "line": s.get("start_line", 1),
+                    "icon": "symbol"
+                })
+        except Exception as e:
+            logger.debug(f"Symbol mention query error: {e}")
+
+    return {"results": results[:limit]}
+
 
 @app.post("/api/chat")
 async def chat_endpoint(req: ChatRequest):
@@ -832,8 +928,52 @@ async def chat_endpoint(req: ChatRequest):
             f"</target_creation>"
         )
 
+    # 2b. Grounded context from user-pinned mentions (@file, @symbol, @folder)
+    pinned_context = ""
+    if req.pinned_mentions:
+        p_blocks = []
+        for pm in req.pinned_mentions:
+            m_type = pm.get("type", "file")
+            m_name = pm.get("name", "")
+            m_path = pm.get("path", "")
+            if m_type == "file" and m_path:
+                full_p = Path(m_path)
+                if not full_p.is_absolute() and workspace_dir:
+                    full_p = Path(workspace_dir) / full_p
+                if full_p.exists() and full_p.is_file():
+                    content = full_p.read_text(encoding="utf-8", errors="ignore")
+                    p_blocks.append(f"<pinned_file path=\"{m_path}\">\n{content}\n</pinned_file>")
+            elif m_type == "symbol" and m_name:
+                sym_matches = await graph_store.find_symbols(m_name, limit=3)
+                if sym_matches:
+                    sym = sym_matches[0]
+                    f_path = Path(sym["file_path"])
+                    if not f_path.is_absolute() and workspace_dir:
+                        f_path = Path(workspace_dir) / f_path
+                    if f_path.exists() and f_path.is_file():
+                        lines = f_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+                        s_line = max(0, (sym.get("start_line") or 1) - 1)
+                        e_line = min(len(lines), sym.get("end_line") or len(lines))
+                        code_slice = "\n".join(lines[s_line:e_line])
+                        p_blocks.append(
+                            f"<pinned_symbol name=\"{m_name}\" kind=\"{sym.get('symbol_type', 'symbol')}\" file=\"{m_path}\" lines=\"{s_line+1}-{e_line}\">\n"
+                            f"{code_slice}\n"
+                            f"</pinned_symbol>"
+                        )
+            elif m_type == "folder" and m_path:
+                full_fld = Path(m_path)
+                if not full_fld.is_absolute() and workspace_dir:
+                    full_fld = Path(workspace_dir) / full_fld
+                if full_fld.exists() and full_fld.is_dir():
+                    dir_files = [f.name for f in full_fld.iterdir() if not f.name.startswith(".")]
+                    p_blocks.append(f"<pinned_folder path=\"{m_path}\">\nFiles: {', '.join(dir_files[:30])}\n</pinned_folder>")
+        if p_blocks:
+            pinned_context = "<user_pinned_context>\n" + "\n\n".join(p_blocks) + "\n</user_pinned_context>"
+
     # Combine contexts with context-window token budgeting
     parts = []
+    if pinned_context:
+        parts.append(pinned_context)
     if target_creation_directive:
         parts.append(target_creation_directive)
     if repo_map:

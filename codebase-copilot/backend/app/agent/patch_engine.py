@@ -1331,16 +1331,42 @@ class PatchEngine:
             # Adjust added lines indentation to preserve Python block scoping
             if del_lines:
                 diff_base_indent = del_lines[0][:len(del_lines[0]) - len(del_lines[0].lstrip())]
+                indent_delta = len(matched_indent) - len(diff_base_indent)
             elif add_lines:
-                first_add = next((al for al in add_lines if al.strip()), "")
-                diff_base_indent = first_add[:len(first_add) - len(first_add.lstrip())]
-                if not matched_indent and prefix_ctx:
-                    pref_last = prefix_ctx[-1]
-                    matched_indent = pref_last[:len(pref_last) - len(pref_last.lstrip())]
-            else:
-                diff_base_indent = ""
+                # Context-relative indentation synchronization:
+                # Align added lines relative to matched surrounding context rather than
+                # falsely equating added clause keywords (e.g. except:) to inner block statements.
+                ctx_delta: Optional[int] = None
+                if prefix_ctx:
+                    non_empty_prefs = [(idx, l) for idx, l in enumerate(prefix_ctx) if l.strip()]
+                    if non_empty_prefs:
+                        p_rel_idx, pref_diff = non_empty_prefs[-1]
+                        orig_p_idx = match_start - len(prefix_ctx) + p_rel_idx
+                        if 0 <= orig_p_idx < len(orig_lines) and orig_lines[orig_p_idx].strip() == pref_diff.strip():
+                            diff_ctx_indent = len(pref_diff) - len(pref_diff.lstrip())
+                            orig_ctx_indent = len(orig_lines[orig_p_idx]) - len(orig_lines[orig_p_idx].lstrip())
+                            ctx_delta = orig_ctx_indent - diff_ctx_indent
 
-            indent_delta = len(matched_indent) - len(diff_base_indent)
+                if ctx_delta is None and suffix_ctx:
+                    non_empty_suffs = [(idx, l) for idx, l in enumerate(suffix_ctx) if l.strip()]
+                    if non_empty_suffs:
+                        s_rel_idx, suff_diff = non_empty_suffs[0]
+                        orig_s_idx = match_end + s_rel_idx
+                        if 0 <= orig_s_idx < len(orig_lines) and orig_lines[orig_s_idx].strip() == suff_diff.strip():
+                            diff_ctx_indent = len(suff_diff) - len(suff_diff.lstrip())
+                            orig_ctx_indent = len(orig_lines[orig_s_idx]) - len(orig_lines[orig_s_idx].lstrip())
+                            ctx_delta = orig_ctx_indent - diff_ctx_indent
+
+                if ctx_delta is not None:
+                    indent_delta = ctx_delta
+                elif matched_indent:
+                    first_add = next((al for al in add_lines if al.strip()), "")
+                    diff_base_indent = first_add[:len(first_add) - len(first_add.lstrip())]
+                    indent_delta = len(matched_indent) - len(diff_base_indent)
+                else:
+                    indent_delta = 0
+            else:
+                indent_delta = 0
             aligned_adds: List[str] = []
             for al in add_lines:
                 if not al.strip():
@@ -1517,30 +1543,62 @@ class PatchEngine:
 
         # Python-specific AST Diagnostic Repair Strategies
         if is_python:
-            # Repair Strategy 2: Specific try/except and block alignment
-            for idx, line in enumerate(bad_lines):
-                stripped = line.strip()
-                if stripped.startswith("except") or stripped.startswith("finally:"):
-                    for try_idx in range(idx - 1, -1, -1):
-                        if bad_lines[try_idx].strip().startswith("try:"):
-                            try_indent = bad_lines[try_idx][:len(bad_lines[try_idx]) - len(bad_lines[try_idx].lstrip())]
-                            curr_indent = line[:len(line) - len(line.lstrip())]
-                            if try_indent != curr_indent:
-                                modified = list(bad_lines)
-                                shift = len(try_indent) - len(curr_indent)
-                                for k in range(idx, len(bad_lines)):
-                                    if k == idx or (bad_lines[k].startswith(" " * (len(curr_indent) + 1))):
-                                        if shift > 0:
-                                            modified[k] = " " * shift + modified[k]
-                                        else:
-                                            trim = min(-shift, len(modified[k]) - len(modified[k].lstrip()))
-                                            modified[k] = modified[k][trim:]
+            # Repair Strategy 2: Multi-clause try/except and finally block alignment
+            # Aligns ALL sibling except/finally clauses and their bodies to match their parent try: block.
+            for try_idx, t_line in enumerate(bad_lines):
+                if t_line.strip().startswith("try:"):
+                    try_indent = t_line[:len(t_line) - len(t_line.lstrip())]
+                    modified = list(bad_lines)
+                    changed_any = False
+                    k = try_idx + 1
+
+                    while k < len(modified):
+                        k_line = modified[k]
+                        k_stripped = k_line.strip()
+                        if not k_stripped:
+                            k += 1
+                            continue
+
+                        k_indent = k_line[:len(k_line) - len(k_line.lstrip())]
+
+                        if k_stripped.startswith(("except", "finally:")):
+                            clause_shift = len(try_indent) - len(k_indent)
+                            if clause_shift != 0:
+                                changed_any = True
+                                if clause_shift > 0:
+                                    modified[k] = " " * clause_shift + modified[k]
+                                else:
+                                    trim = min(-clause_shift, len(modified[k]) - len(modified[k].lstrip()))
+                                    modified[k] = modified[k][trim:]
+
+                            # Shift all body lines under this except/finally clause
+                            b_idx = k + 1
+                            while b_idx < len(modified):
+                                b_line = modified[b_idx]
+                                b_stripped = b_line.strip()
+                                if not b_stripped:
+                                    b_idx += 1
+                                    continue
+                                b_indent = b_line[:len(b_line) - len(b_line.lstrip())]
+                                if b_stripped.startswith(("except", "finally:")) or len(b_indent) <= len(k_indent):
+                                    break
+                                if clause_shift != 0:
+                                    if clause_shift > 0:
+                                        modified[b_idx] = " " * clause_shift + modified[b_idx]
                                     else:
-                                        break
-                                code_cand = "\n".join(modified) + "\n"
-                                if _is_valid(code_cand):
-                                    return code_cand
+                                        trim = min(-clause_shift, len(modified[b_idx]) - len(modified[b_idx].lstrip()))
+                                        modified[b_idx] = modified[b_idx][trim:]
+                                b_idx += 1
+                            k = b_idx
+                        elif len(k_indent) <= len(try_indent) and not k_stripped.startswith(("#", '"""', "'''")):
                             break
+                        else:
+                            k += 1
+
+                    if changed_any:
+                        code_cand = "\n".join(modified) + "\n"
+                        if _is_valid(code_cand):
+                            return code_cand
 
             # Repair Strategy 3: Duplicate block elimination
             for idx in range(len(bad_lines) - 1):

@@ -500,6 +500,71 @@ class TestSurgicalDiffAndMerger(unittest.TestCase):
             # Ensure no extensionless file was created on disk
             self.assertFalse((Path(td) / "FILE").exists())
 
+    def test_try_except_sibling_clauses_insertion(self):
+        orig = [
+            "def calc():",
+            "    while True:",
+            "        try:",
+            "            expr = input('Enter: ')",
+            "            result = eval(expr)",
+            "            return result",
+            "        except Exception as e:",
+            "            print('Error:', e)",
+        ]
+        diff = (
+            "--- a/calc.py\n"
+            "+++ b/calc.py\n"
+            "@@ -5,4 +5,10 @@\n"
+            "             result = eval(expr)\n"
+            "             return result\n"
+            "+        except SyntaxError:\n"
+            "+            print('Syntax Error')\n"
+            "+            continue\n"
+            "+        except NameError:\n"
+            "+            print('Name Error')\n"
+            "+            continue\n"
+            "         except Exception as e:\n"
+            "             print('Error:', e)\n"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            target_f = Path(td) / "calc.py"
+            target_f.write_text("\n".join(orig) + "\n")
+            res = PatchEngine.apply_patch_hunks("calc.py", diff, td)
+            self.assertEqual(res["status"], "success", f"Failed with: {res.get('message')}")
+            content = target_f.read_text()
+            import ast
+            ast.parse(content)
+            self.assertIn("        except SyntaxError:\n            print('Syntax Error')", content)
+            self.assertIn("        except NameError:\n            print('Name Error')", content)
+            self.assertIn("        except Exception as e:", content)
+
+    def test_multi_clause_try_except_repair(self):
+        # Even if clauses were misindented deeper into the try block (12 spaces instead of 8)
+        bad_code = (
+            "def calc():\n"
+            "    while True:\n"
+            "        try:\n"
+            "            expr = input('Enter: ')\n"
+            "            result = eval(expr)\n"
+            "            return result\n"
+            "            except SyntaxError:\n"
+            "                print('Syntax Error')\n"
+            "                continue\n"
+            "            except NameError:\n"
+            "                print('Name Error')\n"
+            "                continue\n"
+            "        except Exception as e:\n"
+            "            print('Error:', e)\n"
+        )
+        repaired = PatchEngine._attempt_syntax_repair([], [], bad_code, "calc.py")
+        self.assertIsNotNone(repaired)
+        import ast
+        ast.parse(repaired)
+        self.assertIn("        except SyntaxError:", repaired)
+        self.assertIn("        except NameError:", repaired)
+        self.assertIn("        except Exception as e:", repaired)
+
 if __name__ == "__main__":
     unittest.main()
+
 

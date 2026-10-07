@@ -35,10 +35,11 @@
   let stagedDiffIsEdited = false;
   let isAgentRunning = false;
   let lastUserQuery = '';
-  const CLAY_ICON_SVG = '<svg viewBox="0 0 512 512" class="clay-cube-icon" shape-rendering="crispEdges"><g transform="translate(64, 148) scale(24)"><rect x="1" y="1" width="2" height="1" fill="#C15C3D"/><rect x="2" y="2" width="2" height="1" fill="#C15C3D"/><rect x="3" y="3" width="2" height="1" fill="#C15C3D"/><rect x="4" y="4" width="2" height="1" fill="#C15C3D"/><rect x="5" y="5" width="2" height="1" fill="#C15C3D"/><rect x="4" y="6" width="2" height="1" fill="#C15C3D"/><rect x="3" y="7" width="2" height="1" fill="#C15C3D"/><rect x="2" y="8" width="2" height="1" fill="#C15C3D"/><rect x="1" y="9" width="2" height="1" fill="#C15C3D"/><rect x="8" y="8" width="6" height="2" fill="#C15C3D"/></g></svg>';
+  const CLAY_ICON_SVG = '<svg viewBox="1 1 13 9" class="clay-cube-icon" shape-rendering="crispEdges"><rect x="1" y="1" width="2" height="1" fill="#C15C3D"/><rect x="2" y="2" width="2" height="1" fill="#C15C3D"/><rect x="3" y="3" width="2" height="1" fill="#C15C3D"/><rect x="4" y="4" width="2" height="1" fill="#C15C3D"/><rect x="5" y="5" width="2" height="1" fill="#C15C3D"/><rect x="4" y="6" width="2" height="1" fill="#C15C3D"/><rect x="3" y="7" width="2" height="1" fill="#C15C3D"/><rect x="2" y="8" width="2" height="1" fill="#C15C3D"/><rect x="1" y="9" width="2" height="1" fill="#C15C3D"/><rect x="8" y="8" width="6" height="2" fill="#C15C3D"/></svg>';
 
   // Active repository files registry for real-time diff mapping
   let currentRepoFilesList = [];
+  let currentRepoDirsList = [];
   let activeEditorFile = '';
   let activeEditorCursorLine = null;
   let activeEditorContent = '';
@@ -348,6 +349,32 @@
       const diffTabBtn = document.querySelector('.nav-tab[data-target="diff"]');
       const dot = diffTabBtn?.querySelector('.diff-staged-dot');
       if (dot) dot.remove();
+      // Hide global header conflict banner when in Diff view to prevent duplicate banner
+      const headerBanner = document.getElementById('header-conflict-banner');
+      if (headerBanner) {
+        headerBanner.style.display = 'none';
+      }
+    } else {
+      // When outside the Diff view, show global header banner if an active undismissed conflict exists
+      const headerBanner = document.getElementById('header-conflict-banner');
+      const hasConflict = Boolean(
+        stagedDiffData &&
+        (stagedDiffData.isDiverged || (stagedDiffData.diff && hasConflictMarkers(stagedDiffData.diff))) &&
+        !stagedDiffData.isDismissed
+      );
+      if (headerBanner) {
+        if (hasConflict) {
+          headerBanner.style.display = 'flex';
+          const hTitle = document.getElementById('header-conflict-title');
+          if (hTitle && stagedDiffData) {
+            hTitle.textContent = stagedDiffData.isDiverged
+              ? 'WARNING: 3-WAY MERGE CONFLICT (BUFFER DIVERGED)'
+              : 'WARNING: 3-WAY MERGE CONFLICT DETECTED';
+          }
+        } else {
+          headerBanner.style.display = 'none';
+        }
+      }
     }
   }
 
@@ -1078,6 +1105,381 @@
     }
   }
 
+  // ==========================================
+  // Claude Code Dynamic Thinking Drawer (<think>)
+  // ==========================================
+  let activeThinkingState = {
+    isInsideThinking: false,
+    hasFinishedThinking: false,
+    isPreStreaming: false,
+    preStreamTimer: null,
+    startTime: 0,
+    timerInterval: null,
+    elapsedSec: 0,
+    drawerEl: null,
+    bodyEl: null,
+    cardsContainerEl: null,
+    streamContainerEl: null,
+    thoughtPreEl: null,
+    titleEl: null,
+    stopwatchEl: null,
+    stepEl: null,
+    toggleBtn: null,
+    cardEl: null
+  };
+
+  function resetActiveThinkingState() {
+    if (activeThinkingState) {
+      if (activeThinkingState.timerInterval) {
+        clearInterval(activeThinkingState.timerInterval);
+      }
+      if (activeThinkingState.preStreamTimer) {
+        clearTimeout(activeThinkingState.preStreamTimer);
+      }
+    }
+    activeThinkingState = {
+      isInsideThinking: false,
+      hasFinishedThinking: false,
+      isPreStreaming: false,
+      preStreamTimer: null,
+      startTime: 0,
+      timerInterval: null,
+      elapsedSec: 0,
+      drawerEl: null,
+      bodyEl: null,
+      cardsContainerEl: null,
+      streamContainerEl: null,
+      thoughtPreEl: null,
+      titleEl: null,
+      stopwatchEl: null,
+      stepEl: null,
+      toggleBtn: null,
+      cardEl: null
+    };
+  }
+
+  function analyzePromptIntentAndContext(promptText, pinnedList = []) {
+    const raw = (promptText || '').trim();
+    const clean = normalizeGoalText(raw);
+    const lower = clean.toLowerCase();
+
+    // 1. Identify target file or symbol
+    let targetEntity = null;
+    let targetType = 'file';
+
+    if (pinnedList && pinnedList.length > 0) {
+      const firstPin = pinnedList[0];
+      targetEntity = firstPin.name;
+      targetType = firstPin.type || 'file';
+    } else {
+      const primaryFile = getPrimaryRepoFile(raw);
+      if (primaryFile) {
+        targetEntity = primaryFile;
+        targetType = 'file';
+      } else {
+        const activeFile = getActiveEditorFileInRepo();
+        if (activeFile) {
+          targetEntity = activeFile.replace(/\\/g, '/').split('/').pop();
+          targetType = 'active-file';
+        }
+      }
+    }
+
+    // 2. Identify Action / Intent
+    let actionTitle = 'Codebase Analysis';
+    let actionDetail = 'Processing prompt specifications';
+
+    if (/\b(fix|bug|error|repair|syntax|fail|failing|broken|issue|patch|indentation|conflict)\b/i.test(lower)) {
+      actionTitle = targetEntity ? `Repair: ${targetEntity}` : 'Bug Diagnosis & Repair';
+      actionDetail = 'Analyzing error patterns, syntax invariants, and patch stability';
+    } else if (/\b(implement|create|build|write|add|generate|make|new|scaffold)\b/i.test(lower)) {
+      actionTitle = targetEntity ? `Implement: ${targetEntity}` : 'Feature Synthesis';
+      actionDetail = 'Constructing domain structures, typing models, and logic components';
+    } else if (/\b(refactor|optimize|clean|speed up|simplify|restructure|improve)\b/i.test(lower)) {
+      actionTitle = targetEntity ? `Refactor: ${targetEntity}` : 'Architecture Optimization';
+      actionDetail = 'Evaluating code complexity, algorithmic bounds, and regression safety';
+    } else if (/\b(test|spec|assert|verify|unit test|integration test)\b/i.test(lower)) {
+      actionTitle = targetEntity ? `Test: ${targetEntity}` : 'Test Harness & Verification Plan';
+      actionDetail = 'Formulating test assertions, boundary edge cases, and mocks';
+    } else if (/\b(explain|what does|how does|why|walkthrough|overview|understand)\b/i.test(lower)) {
+      actionTitle = targetEntity ? `Explain: ${targetEntity}` : 'Codebase Inspection';
+      actionDetail = 'Tracing execution lifecycle, data flows, and dependencies';
+    }
+
+    // Check if domain topic detected (e.g. A*, JWT, LRU, Trie, etc.)
+    const topicInfo = resolveTopicDomain(raw);
+    if (topicInfo && topicInfo.topic && topicInfo.topic !== 'Production Software Module') {
+      actionDetail = `${topicInfo.topic} // ${topicInfo.dataStructure}`;
+    }
+
+    // 3. Context Grounding Details
+    let groundingTitle = 'Repository Context';
+    let groundingDetail = 'Querying workspace index and symbol definitions';
+
+    if (pinnedList && pinnedList.length > 0) {
+      groundingTitle = 'Context Grounding';
+      groundingDetail = pinnedList.map(p => `${p.type}: ${p.name}`).join(', ');
+    } else if (targetEntity) {
+      groundingTitle = 'Workspace Grounding';
+      groundingDetail = `${targetEntity} (active reference)`;
+    } else {
+      groundingTitle = 'Hybrid Codebase Retrieval';
+      groundingDetail = 'Searching repository map, graph store, and vector index';
+    }
+
+    return {
+      actionTitle,
+      actionDetail,
+      groundingTitle,
+      groundingDetail,
+      modelName: currentModel || 'CLAY Core'
+    };
+  }
+
+  function startPreStreamingReasoning(cardEl, pinnedList = [], promptText = '') {
+    if (!cardEl) return;
+    activeThinkingState.isInsideThinking = true;
+    activeThinkingState.isPreStreaming = true;
+    activeThinkingState.startTime = Date.now();
+
+    const drawer = createThinkingDrawer(cardEl);
+    if (!drawer) return;
+
+    const analysis = analyzePromptIntentAndContext(promptText, pinnedList);
+
+    if (activeThinkingState.titleEl) {
+      activeThinkingState.titleEl.textContent = 'Thinking...';
+    }
+    if (activeThinkingState.stopwatchEl) {
+      activeThinkingState.stopwatchEl.textContent = '(0s)';
+    }
+    if (activeThinkingState.stepEl) {
+      activeThinkingState.stepEl.textContent = analysis.actionTitle;
+    }
+
+    if (activeThinkingState.cardsContainerEl) {
+      activeThinkingState.cardsContainerEl.innerHTML = `
+        <div class="thought-step is-done">
+          <span class="thought-step-icon">
+            <svg viewBox="0 0 12 12" width="9" height="9" fill="currentColor">
+              <path d="M10.28 2.28L4.5 8.06 1.72 5.28a.75.75 0 00-1.06 1.06l3.5 3.5a.75.75 0 001.06 0l6.5-6.5a.75.75 0 00-1.06-1.06z"/>
+            </svg>
+          </span>
+          <div class="thought-step-content">
+            <span class="thought-step-title">${escapeHtml(analysis.actionTitle)}</span>
+            <span class="thought-step-detail">${escapeHtml(analysis.actionDetail)}</span>
+          </div>
+        </div>
+
+        <div class="thought-step is-done">
+          <span class="thought-step-icon">
+            <svg viewBox="0 0 12 12" width="9" height="9" fill="currentColor">
+              <path d="M10.28 2.28L4.5 8.06 1.72 5.28a.75.75 0 00-1.06 1.06l3.5 3.5a.75.75 0 001.06 0l6.5-6.5a.75.75 0 00-1.06-1.06z"/>
+            </svg>
+          </span>
+          <div class="thought-step-content">
+            <span class="thought-step-title">${escapeHtml(analysis.groundingTitle)}</span>
+            <span class="thought-step-detail">${escapeHtml(analysis.groundingDetail)}</span>
+          </div>
+        </div>
+
+        <div class="thought-step is-active" id="thought-step-model">
+          <span class="thought-step-icon">
+            <span class="thought-step-dot"></span>
+          </span>
+          <div class="thought-step-content">
+            <span class="thought-step-title">Reasoning with ${escapeHtml(analysis.modelName)}</span>
+            <span class="thought-step-detail" id="thought-step-model-detail">Evaluating context &amp; formulating solution...</span>
+          </div>
+        </div>
+      `;
+    }
+
+    // Live timer starting at 0s
+    activeThinkingState.timerInterval = setInterval(() => {
+      if (!activeThinkingState.isInsideThinking) return;
+      const s = Math.max(1, Math.round((Date.now() - activeThinkingState.startTime) / 1000));
+      activeThinkingState.elapsedSec = s;
+      if (activeThinkingState.stopwatchEl) {
+        activeThinkingState.stopwatchEl.textContent = `(${s}s)`;
+      }
+    }, 1000);
+
+    // Dynamic progress transitions during pre-stream
+    activeThinkingState.preStreamTimer = setTimeout(() => {
+      if (activeThinkingState.isInsideThinking && activeThinkingState.isPreStreaming) {
+        if (activeThinkingState.stepEl) {
+          activeThinkingState.stepEl.textContent = 'Synthesizing response...';
+        }
+        const modelDetail = drawer.querySelector('#thought-step-model-detail');
+        if (modelDetail) {
+          modelDetail.textContent = 'Synthesizing response with active model...';
+        }
+      }
+    }, 600);
+  }
+
+  function createThinkingDrawer(cardEl) {
+    if (!cardEl) return null;
+    const existing = cardEl.querySelector('.thinking-drawer');
+    if (existing) return existing;
+
+    const drawer = document.createElement('div');
+    drawer.className = 'thinking-drawer is-thinking is-expanded';
+    drawer.innerHTML = `
+      <div class="thinking-drawer-header">
+        <div class="thinking-header-left">
+          <span class="thinking-pulse-indicator">
+            <span class="thinking-dot"></span>
+            <span class="thinking-ring"></span>
+          </span>
+          <span class="thinking-glyph-icon">
+            <svg viewBox="0 0 10 10" width="8" height="8" fill="currentColor">
+              <polygon points="2,1 8,5 2,9"/>
+            </svg>
+          </span>
+          <span class="thinking-header-title">Thinking...</span>
+          <span class="thinking-stopwatch">(0s)</span>
+        </div>
+        <div class="thinking-header-right">
+          <span class="thinking-progress-step">Analyzing query</span>
+          <button type="button" class="btn-thinking-toggle" title="Toggle thoughts" aria-label="Toggle thinking">
+            <span class="thinking-toggle-label">Hide</span>
+            <svg class="thinking-toggle-icon" viewBox="0 0 10 10" width="7" height="7" fill="currentColor">
+              <polygon points="1,7 9,7 5,2"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="thinking-drawer-body">
+        <div class="thought-cards-container"></div>
+        <div class="thought-stream-container" style="display: none;">
+          <div class="thought-stream-header">
+            <span class="thought-stream-title">REASONING TRACE</span>
+          </div>
+          <pre class="thinking-thought-content"></pre>
+        </div>
+      </div>
+    `;
+
+    const contentEl = cardEl.querySelector('.assistant-content');
+    if (contentEl) {
+      cardEl.insertBefore(drawer, contentEl);
+    } else {
+      cardEl.appendChild(drawer);
+    }
+
+    const titleEl = drawer.querySelector('.thinking-header-title');
+    const stopwatchEl = drawer.querySelector('.thinking-stopwatch');
+    const stepEl = drawer.querySelector('.thinking-progress-step');
+    const bodyEl = drawer.querySelector('.thinking-drawer-body');
+    const cardsContainerEl = drawer.querySelector('.thought-cards-container');
+    const streamContainerEl = drawer.querySelector('.thought-stream-container');
+    const thoughtPreEl = drawer.querySelector('.thinking-thought-content');
+    const toggleBtn = drawer.querySelector('.btn-thinking-toggle');
+    const headerEl = drawer.querySelector('.thinking-drawer-header');
+
+    const toggleDrawer = (e) => {
+      if (e) e.stopPropagation();
+      const isCurrentlyCollapsed = drawer.classList.contains('is-collapsed');
+      if (isCurrentlyCollapsed) {
+        drawer.classList.remove('is-collapsed');
+        drawer.classList.add('is-expanded');
+        if (toggleBtn) {
+          const lbl = toggleBtn.querySelector('.thinking-toggle-label');
+          if (lbl) lbl.textContent = 'Hide';
+        }
+      } else {
+        drawer.classList.add('is-collapsed');
+        drawer.classList.remove('is-expanded');
+        if (toggleBtn) {
+          const lbl = toggleBtn.querySelector('.thinking-toggle-label');
+          if (lbl) lbl.textContent = 'Expand';
+        }
+      }
+    };
+
+    if (headerEl) {
+      headerEl.addEventListener('click', toggleDrawer);
+    }
+    if (toggleBtn) {
+      toggleBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleDrawer();
+      });
+    }
+
+    activeThinkingState.drawerEl = drawer;
+    activeThinkingState.bodyEl = bodyEl;
+    activeThinkingState.cardsContainerEl = cardsContainerEl;
+    activeThinkingState.streamContainerEl = streamContainerEl;
+    activeThinkingState.thoughtPreEl = thoughtPreEl;
+    activeThinkingState.titleEl = titleEl;
+    activeThinkingState.stopwatchEl = stopwatchEl;
+    activeThinkingState.stepEl = stepEl;
+    activeThinkingState.toggleBtn = toggleBtn;
+    activeThinkingState.cardEl = cardEl;
+
+    return drawer;
+  }
+
+  function finishThinkingDrawer(interrupted = false) {
+    if (activeThinkingState.timerInterval) {
+      clearInterval(activeThinkingState.timerInterval);
+      activeThinkingState.timerInterval = null;
+    }
+    if (activeThinkingState.preStreamTimer) {
+      clearTimeout(activeThinkingState.preStreamTimer);
+      activeThinkingState.preStreamTimer = null;
+    }
+    activeThinkingState.isInsideThinking = false;
+    activeThinkingState.hasFinishedThinking = true;
+    activeThinkingState.isPreStreaming = false;
+
+    const drawer = activeThinkingState.drawerEl;
+    if (!drawer) return;
+
+    // Transition model step to completed
+    const modelStep = drawer.querySelector('#thought-step-model');
+    if (modelStep) {
+      modelStep.classList.remove('is-active');
+      modelStep.classList.add('is-done');
+      const iconEl = modelStep.querySelector('.thought-step-icon');
+      if (iconEl) {
+        iconEl.innerHTML = `
+          <svg viewBox="0 0 12 12" width="9" height="9" fill="currentColor">
+            <path d="M10.28 2.28L4.5 8.06 1.72 5.28a.75.75 0 00-1.06 1.06l3.5 3.5a.75.75 0 001.06 0l6.5-6.5a.75.75 0 00-1.06-1.06z"/>
+          </svg>
+        `;
+      }
+      const detail = modelStep.querySelector('#thought-step-model-detail');
+      if (detail && (!activeThinkingState.thoughtPreEl || !activeThinkingState.thoughtPreEl.textContent.trim())) {
+        detail.textContent = interrupted ? 'Generation cancelled' : 'Complete';
+      }
+    }
+
+    drawer.classList.remove('is-thinking');
+    drawer.classList.add('is-finished');
+
+    // Auto-collapse into sleek summary pill
+    drawer.classList.add('is-collapsed');
+    drawer.classList.remove('is-expanded');
+
+    const sec = activeThinkingState.elapsedSec || 1;
+    if (activeThinkingState.titleEl) {
+      activeThinkingState.titleEl.textContent = interrupted
+        ? `Thought for ${sec}s (Interrupted)`
+        : `Thought for ${sec}s`;
+    }
+    if (activeThinkingState.stopwatchEl) {
+      activeThinkingState.stopwatchEl.textContent = '';
+    }
+    if (activeThinkingState.toggleBtn) {
+      const lbl = activeThinkingState.toggleBtn.querySelector('.thinking-toggle-label');
+      if (lbl) lbl.textContent = 'Expand';
+    }
+  }
+
   function stopChatGeneration(notifyHost = true) {
     if (!isChatStreaming) return;
 
@@ -1095,6 +1497,10 @@
     setChatGeneratingState(false);
     updateAssistantCursorStates(null, false);
 
+    if (activeThinkingState && activeThinkingState.isInsideThinking) {
+      finishThinkingDrawer(true);
+    }
+
     if (currentAssistantTextEl) {
       const stopNotice = document.createElement('div');
       stopNotice.className = 'chat-stopped-notice';
@@ -1103,6 +1509,252 @@
       currentAssistantTextEl.appendChild(stopNotice);
     }
     showToast('Generation stopped', 'info');
+  }
+
+  // ==========================================
+  // Pinned Mentions Context System (Option B)
+  // ==========================================
+  let pinnedMentions = [];
+  let mentionAutocompleteItems = [];
+  let mentionSelectedIndex = -1;
+  let isMentionPopupVisible = false;
+  let mentionDebounceTimer = null;
+  let mentionAtTriggerIndex = -1;
+
+  const mentionChipsTray = document.getElementById('mention-chips-tray');
+  const mentionAutocompletePopup = document.getElementById('mention-autocomplete-popup');
+  const mentionAutocompleteList = document.getElementById('mention-autocomplete-list');
+
+  function renderMentionChipsTray() {
+    if (!mentionChipsTray) return;
+    if (!pinnedMentions || pinnedMentions.length === 0) {
+      mentionChipsTray.style.display = 'none';
+      mentionChipsTray.innerHTML = '';
+      return;
+    }
+
+    mentionChipsTray.style.display = 'flex';
+    mentionChipsTray.innerHTML = pinnedMentions.map((m, idx) => {
+      const typeClass = `mention-chip-${m.type || 'file'}`;
+      const badgeText = m.type === 'symbol'
+        ? `[${(m.kind || 'SYM').toUpperCase()}]`
+        : (m.type === 'folder' ? '[DIR]' : '[FILE]');
+      return `
+        <div class="mention-chip ${typeClass}" data-idx="${idx}" title="${escapeHtml(m.path || m.name)}">
+          <span class="mention-chip-badge">${badgeText}</span>
+          <span class="mention-chip-name">${escapeHtml(m.name)}</span>
+          <button type="button" class="btn-remove-chip" data-idx="${idx}" title="Remove pinned mention" aria-label="Remove">
+            <svg viewBox="0 0 10 10" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1.8">
+              <line x1="1" y1="1" x2="9" y2="9"/>
+              <line x1="9" y1="1" x2="1" y2="9"/>
+            </svg>
+          </button>
+        </div>
+      `;
+    }).join('');
+
+    mentionChipsTray.querySelectorAll('.btn-remove-chip').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const idx = parseInt(btn.getAttribute('data-idx'), 10);
+        if (!isNaN(idx) && idx >= 0 && idx < pinnedMentions.length) {
+          pinnedMentions.splice(idx, 1);
+          renderMentionChipsTray();
+          if (chatInput) chatInput.focus();
+        }
+      });
+    });
+  }
+
+  function hideMentionPopup() {
+    isMentionPopupVisible = false;
+    mentionSelectedIndex = -1;
+    mentionAtTriggerIndex = -1;
+    if (mentionAutocompletePopup) {
+      mentionAutocompletePopup.style.display = 'none';
+    }
+  }
+
+  function showMentionPopup() {
+    isMentionPopupVisible = true;
+    if (mentionAutocompletePopup) {
+      mentionAutocompletePopup.style.display = 'flex';
+    }
+  }
+
+  function getInstantLocalMentionMatches(query) {
+    if (!query) return [];
+    const q = query.toLowerCase();
+    const results = [];
+
+    // 1. Folders from in-memory tree
+    if (currentRepoDirsList && currentRepoDirsList.length > 0) {
+      for (const d of currentRepoDirsList) {
+        const dName = (d.name || '').toLowerCase();
+        const dPath = (d.path || '').toLowerCase();
+        if (dName.includes(q) || dPath.includes(q)) {
+          results.push({
+            type: 'folder',
+            name: d.name.endsWith('/') ? d.name : d.name + '/',
+            path: d.path || d.name,
+            icon: 'folder'
+          });
+          if (results.length >= 3) break;
+        }
+      }
+    }
+
+    // 2. Files from in-memory tree (instant < 1ms match)
+    if (currentRepoFilesList && currentRepoFilesList.length > 0) {
+      const fileMatches = [];
+      for (const f of currentRepoFilesList) {
+        const fname = (f.name || '').toLowerCase();
+        const fpath = (f.path || '').toLowerCase();
+        if (fname.includes(q) || fpath.includes(q)) {
+          fileMatches.push({
+            type: 'file',
+            name: f.name,
+            path: f.path || f.name,
+            icon: 'file'
+          });
+        }
+      }
+      fileMatches.sort((a, b) => {
+        const aN = a.name.toLowerCase();
+        const bN = b.name.toLowerCase();
+        const aExact = aN === q || aN.startsWith(q + '.');
+        const bExact = bN === q || bN.startsWith(q + '.');
+        if (aExact && !bExact) return -1;
+        if (!aExact && bExact) return 1;
+        const aPrefix = aN.startsWith(q);
+        const bPrefix = bN.startsWith(q);
+        if (aPrefix && !bPrefix) return -1;
+        if (!aPrefix && bPrefix) return 1;
+        return aN.localeCompare(bN);
+      });
+      results.push(...fileMatches.slice(0, 10));
+    }
+    return results;
+  }
+
+  async function fetchMentionCandidates(query) {
+    try {
+      const repoPath = (inputRepoPath ? inputRepoPath.value.trim() : '') || currentRepoPath || '';
+      const url = `${BACKEND_URL}/api/context/mentions?query=${encodeURIComponent(query)}&workspace_path=${encodeURIComponent(repoPath)}&limit=12`;
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const data = await res.json();
+      const serverResults = data.results || [];
+
+      // Combine authoritative server results and current local matches
+      const combined = [];
+      const seen = new Set();
+      for (const item of serverResults) {
+        const key = `${item.type}:${item.name}:${item.path}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          combined.push(item);
+        }
+      }
+
+      // Only merge instant matches for the currently active workspace
+      const localMatches = getInstantLocalMentionMatches(query);
+      for (const item of localMatches) {
+        const key = `${item.type}:${item.name}:${item.path}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          combined.push(item);
+        }
+      }
+
+      mentionAutocompleteItems = combined;
+      renderMentionList(mentionAutocompleteItems);
+    } catch (e) {
+      console.warn('Mention candidate search failed:', e);
+    }
+  }
+
+  function renderMentionList(items) {
+    if (!mentionAutocompleteList) return;
+    if (!items || items.length === 0) {
+      mentionAutocompleteList.innerHTML = '<div class="mention-autocomplete-empty">No matching files or symbols found</div>';
+      showMentionPopup();
+      mentionSelectedIndex = -1;
+      return;
+    }
+
+    mentionSelectedIndex = 0;
+    mentionAutocompleteList.innerHTML = items.map((it, idx) => {
+      const badgeCls = it.type === 'symbol' ? 'badge-symbol' : (it.type === 'folder' ? 'badge-folder' : 'badge-file');
+      const badgeTxt = it.type === 'symbol' ? (it.kind || 'SYM').toUpperCase() : (it.type === 'folder' ? 'DIR' : 'FILE');
+      const detailTxt = it.type === 'symbol'
+        ? `${it.path}:${it.line || 1}`
+        : (it.path || '');
+      return `
+        <div class="mention-autocomplete-item ${idx === 0 ? 'selected' : ''}" data-idx="${idx}">
+          <span class="mention-item-badge ${badgeCls}">[${badgeTxt}]</span>
+          <span class="mention-item-name">${escapeHtml(it.name)}</span>
+          <span class="mention-item-detail">${escapeHtml(detailTxt)}</span>
+        </div>
+      `;
+    }).join('');
+
+    mentionAutocompleteList.querySelectorAll('.mention-autocomplete-item').forEach(el => {
+      el.addEventListener('click', () => {
+        const idx = parseInt(el.getAttribute('data-idx'), 10);
+        if (!isNaN(idx) && mentionAutocompleteItems[idx]) {
+          pinMentionItem(mentionAutocompleteItems[idx]);
+        }
+      });
+    });
+
+    showMentionPopup();
+  }
+
+  function updateMentionSelection() {
+    if (!mentionAutocompleteList) return;
+    const items = mentionAutocompleteList.querySelectorAll('.mention-autocomplete-item');
+    items.forEach((it, idx) => {
+      if (idx === mentionSelectedIndex) {
+        it.classList.add('selected');
+        it.scrollIntoView({ block: 'nearest' });
+      } else {
+        it.classList.remove('selected');
+      }
+    });
+  }
+
+  function pinMentionItem(item) {
+    if (!item) return;
+
+    // Option B: Remove the @<query> from chatInput leaving prompt clean
+    if (chatInput && mentionAtTriggerIndex >= 0) {
+      const val = chatInput.value;
+      const before = val.slice(0, mentionAtTriggerIndex);
+      const after = val.slice(chatInput.selectionStart);
+      chatInput.value = before + after.trimStart();
+      chatInput.selectionStart = before.length;
+      chatInput.selectionEnd = before.length;
+      chatInput.style.height = 'auto';
+      chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
+      chatInput.focus();
+    }
+
+    // Check for duplicate pinned mentions
+    const exists = pinnedMentions.some(m => m.name === item.name && m.path === item.path && m.type === item.type);
+    if (!exists) {
+      pinnedMentions.push({
+        type: item.type,
+        name: item.name,
+        path: item.path,
+        kind: item.kind,
+        line: item.line
+      });
+      renderMentionChipsTray();
+      showToast(`Pinned context: ${item.name}`, 'info', 1400);
+    }
+
+    hideMentionPopup();
   }
 
   async function sendChatMessage() {
@@ -1120,16 +1772,22 @@
     // Hide empty state immediately
     hideChatEmptyState();
 
-    // Append user message
+    // Copy currently pinned mentions and reset tray
+    const mentionsPayload = [...pinnedMentions];
+    pinnedMentions = [];
+    renderMentionChipsTray();
+    hideMentionPopup();
+
+    // Append user message with pinned context pills
     lastUserQuery = text;
-    appendUserMessage(text);
+    appendUserMessage(text, mentionsPayload);
     if (chatInput) {
       chatInput.value = '';
       chatInput.style.height = 'auto';
     }
 
-    // Create assistant streaming placeholder
-    createAssistantCard();
+    // Create assistant streaming placeholder with prompt-aware dynamic reasoning
+    createAssistantCard(mentionsPayload, text);
 
     const pathFromInput = inputRepoPath ? inputRepoPath.value.trim() : '';
     if (pathFromInput) {
@@ -1148,7 +1806,8 @@
         security_mode: currentSecurityMode,
         temperature: currentTemperature,
         num_ctx: currentNumCtx,
-        num_predict: currentNumPredict
+        num_predict: currentNumPredict,
+        pinned_mentions: mentionsPayload
       });
       // Remains in generating state until streamComplete or streamStopped
     } else {
@@ -1165,6 +1824,7 @@
             temperature: currentTemperature,
             num_ctx: currentNumCtx,
             num_predict: currentNumPredict,
+            pinned_mentions: mentionsPayload,
             stream: true
           }),
           signal: chatAbortController.signal
@@ -1230,6 +1890,30 @@
 
   if (chatInput) {
     chatInput.addEventListener('keydown', (e) => {
+      if (isMentionPopupVisible && mentionAutocompleteItems.length > 0) {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          mentionSelectedIndex = (mentionSelectedIndex + 1) % mentionAutocompleteItems.length;
+          updateMentionSelection();
+          return;
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          mentionSelectedIndex = (mentionSelectedIndex - 1 + mentionAutocompleteItems.length) % mentionAutocompleteItems.length;
+          updateMentionSelection();
+          return;
+        } else if (e.key === 'Enter' || e.key === 'Tab') {
+          e.preventDefault();
+          if (mentionSelectedIndex >= 0 && mentionAutocompleteItems[mentionSelectedIndex]) {
+            pinMentionItem(mentionAutocompleteItems[mentionSelectedIndex]);
+          }
+          return;
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          hideMentionPopup();
+          return;
+        }
+      }
+
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         if (isChatStreaming) {
@@ -1243,10 +1927,49 @@
     chatInput.addEventListener('input', () => {
       chatInput.style.height = 'auto';
       chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
+
+      // Check for @ trigger
+      const cursorPos = chatInput.selectionStart;
+      const textBefore = chatInput.value.slice(0, cursorPos);
+      const atIdx = textBefore.lastIndexOf('@');
+
+      if (atIdx >= 0 && (atIdx === 0 || /\s/.test(textBefore[atIdx - 1]))) {
+        const query = textBefore.slice(atIdx + 1);
+        if (!/\s/.test(query)) {
+          mentionAtTriggerIndex = atIdx;
+
+          // Instant 0ms synchronous local match from in-memory workspace tree
+          const localMatches = getInstantLocalMentionMatches(query);
+          if (localMatches.length > 0) {
+            mentionAutocompleteItems = localMatches;
+            renderMentionList(localMatches);
+          }
+
+          if (mentionDebounceTimer) clearTimeout(mentionDebounceTimer);
+          mentionDebounceTimer = setTimeout(() => {
+            fetchMentionCandidates(query);
+          }, 120);
+          return;
+        }
+      }
+
+      hideMentionPopup();
+    });
+
+    // Close mention popup if clicking outside
+    document.addEventListener('click', (e) => {
+      if (isMentionPopupVisible && mentionAutocompletePopup && !mentionAutocompletePopup.contains(e.target) && e.target !== chatInput) {
+        hideMentionPopup();
+      }
     });
   }
 
   function clearChatSession() {
+    // Clear pinned mentions
+    pinnedMentions = [];
+    renderMentionChipsTray();
+    hideMentionPopup();
+
     if (messageList) {
       // Remove all user and assistant chat bubbles and action blocks
       const dynamicItems = messageList.querySelectorAll('.user-bubble, .assistant-card, .chat-agent-action');
@@ -1389,10 +2112,22 @@
     return footer;
   }
 
-  function appendUserMessage(text) {
+  function appendUserMessage(text, mentions = []) {
     hideChatEmptyState();
     const bubble = document.createElement('div');
     bubble.className = 'user-bubble';
+
+    if (mentions && mentions.length > 0) {
+      const badgesContainer = document.createElement('div');
+      badgesContainer.className = 'user-pinned-badges';
+      badgesContainer.innerHTML = mentions.map((m) => {
+        const bText = m.type === 'symbol'
+          ? `[${(m.kind || 'SYM').toUpperCase()}]`
+          : (m.type === 'folder' ? '[DIR]' : '[FILE]');
+        return `<span class="user-pinned-pill"><span style="font-family: var(--font-pixel); font-size: 7px; font-weight: 700;">${bText}</span> ${escapeHtml(m.name)}</span>`;
+      }).join('');
+      bubble.appendChild(badgesContainer);
+    }
 
     const textDiv = document.createElement('div');
     textDiv.className = 'bubble-content';
@@ -1406,8 +2141,10 @@
     scrollChatToBottom();
   }
 
-  function createAssistantCard() {
+  function createAssistantCard(pinnedList = [], promptText = '') {
     hideChatEmptyState();
+    resetActiveThinkingState();
+
     const card = document.createElement('div');
     card.className = 'assistant-card is-latest is-processing';
 
@@ -1438,6 +2175,10 @@
     messageList.appendChild(card);
     currentAssistantTextEl = contentEl;
     updateAssistantCursorStates(card, true);
+
+    // Launch prompt-aware dynamic reasoning phase immediately
+    startPreStreamingReasoning(card, pinnedList, promptText);
+
     scrollChatToBottom();
   }
 
@@ -1446,22 +2187,133 @@
   function appendStreamToken(token) {
     if (!currentAssistantTextEl) return;
     accumulatedRawText += token;
-    currentAssistantTextEl.innerHTML = formatMarkdown(accumulatedRawText) + '<span class="streaming-cursor"></span>';
+
     const card = currentAssistantTextEl.closest('.assistant-card');
     if (card && !card.classList.contains('is-processing')) {
       updateAssistantCursorStates(card, true);
     }
+
+    const thinkOpenMatch = accumulatedRawText.match(/<(?:think|thinking)>/i);
+    const thinkCloseMatch = accumulatedRawText.match(/<\/(?:think|thinking)>/i);
+
+    if (thinkOpenMatch) {
+      activeThinkingState.isPreStreaming = false;
+      const thinkStartIdx = thinkOpenMatch.index + thinkOpenMatch[0].length;
+
+      if (!thinkCloseMatch) {
+        // Actively inside thinking!
+        if (!activeThinkingState.isInsideThinking && !activeThinkingState.hasFinishedThinking) {
+          activeThinkingState.isInsideThinking = true;
+          activeThinkingState.startTime = Date.now();
+          createThinkingDrawer(card);
+          activeThinkingState.timerInterval = setInterval(() => {
+            if (!activeThinkingState.isInsideThinking) return;
+            const s = Math.max(1, Math.round((Date.now() - activeThinkingState.startTime) / 1000));
+            activeThinkingState.elapsedSec = s;
+            if (activeThinkingState.stopwatchEl) {
+              activeThinkingState.stopwatchEl.textContent = `(${s}s)`;
+            }
+          }, 1000);
+        }
+
+        const thoughtsSoFar = accumulatedRawText.slice(thinkStartIdx);
+        if (activeThinkingState.streamContainerEl) {
+          activeThinkingState.streamContainerEl.style.display = 'block';
+        }
+        if (activeThinkingState.thoughtPreEl) {
+          activeThinkingState.thoughtPreEl.textContent = thoughtsSoFar;
+        }
+        if (activeThinkingState.bodyEl) {
+          activeThinkingState.bodyEl.scrollTop = activeThinkingState.bodyEl.scrollHeight;
+        }
+
+        const modelStep = card ? card.querySelector('#thought-step-model') : null;
+        if (modelStep) {
+          const detail = modelStep.querySelector('#thought-step-model-detail');
+          if (detail) detail.textContent = 'Streaming reasoning trace...';
+        }
+
+        // Dynamic progress update: extract latest meaningful line of thought
+        if (activeThinkingState.stepEl) {
+          const lines = thoughtsSoFar.split('\n').map((l) => l.trim()).filter(Boolean);
+          if (lines.length > 0) {
+            const lastLine = lines[lines.length - 1].replace(/^[#\-*`> ]+/, '').trim();
+            if (lastLine && lastLine.length <= 55) {
+              activeThinkingState.stepEl.textContent = lastLine;
+            }
+          }
+        }
+
+        currentAssistantTextEl.innerHTML = '<span class="streaming-cursor"></span>';
+        scrollChatToBottom();
+        return;
+      } else {
+        // Thinking tag closed!
+        if (activeThinkingState.isInsideThinking) {
+          finishThinkingDrawer(false);
+        } else if (!activeThinkingState.hasFinishedThinking) {
+          createThinkingDrawer(card);
+          activeThinkingState.elapsedSec = Math.max(1, Math.round((Date.now() - (activeThinkingState.startTime || Date.now())) / 1000));
+          finishThinkingDrawer(false);
+        }
+
+        const thoughts = accumulatedRawText.slice(thinkStartIdx, thinkCloseMatch.index).trim();
+        if (activeThinkingState.streamContainerEl) {
+          activeThinkingState.streamContainerEl.style.display = 'block';
+        }
+        if (activeThinkingState.thoughtPreEl) {
+          activeThinkingState.thoughtPreEl.textContent = thoughts;
+        }
+
+        const answerText = accumulatedRawText.slice(thinkCloseMatch.index + thinkCloseMatch[0].length).trimStart();
+        currentAssistantTextEl.innerHTML = formatMarkdown(answerText) + '<span class="streaming-cursor"></span>';
+        scrollChatToBottom();
+        return;
+      }
+    }
+
+    // Standard model without <think> tags (e.g. GPT-OSS 12B, Gemma, Llama 3):
+    // First token arrived! Cleanly finish pre-streaming thinking drawer and collapse.
+    if (activeThinkingState.isPreStreaming) {
+      activeThinkingState.isPreStreaming = false;
+      activeThinkingState.elapsedSec = Math.max(1, Math.round((Date.now() - activeThinkingState.startTime) / 1000));
+      finishThinkingDrawer(false);
+    }
+
+    // Default: normal markdown stream without think block
+    currentAssistantTextEl.innerHTML = formatMarkdown(accumulatedRawText) + '<span class="streaming-cursor"></span>';
     scrollChatToBottom();
   }
 
   function onStreamFinished(fullText, citations) {
     setChatGeneratingState(false);
+    if (activeThinkingState.isInsideThinking) {
+      finishThinkingDrawer(false);
+    }
+
+    let answerText = fullText;
+    const thinkOpenMatch = fullText.match(/<(?:think|thinking)>/i);
+    const thinkCloseMatch = fullText.match(/<\/(?:think|thinking)>/i);
+
+    if (thinkOpenMatch && thinkCloseMatch) {
+      const card = currentAssistantTextEl ? currentAssistantTextEl.closest('.assistant-card') : null;
+      if (card && !card.querySelector('.thinking-drawer')) {
+        createThinkingDrawer(card);
+        finishThinkingDrawer(false);
+      }
+      const thoughts = fullText.slice(thinkOpenMatch.index + thinkOpenMatch[0].length, thinkCloseMatch.index).trim();
+      if (activeThinkingState.thoughtPreEl) {
+        activeThinkingState.thoughtPreEl.textContent = thoughts;
+      }
+      answerText = fullText.slice(thinkCloseMatch.index + thinkCloseMatch[0].length).trimStart();
+    }
+
     if (currentAssistantTextEl) {
-      currentAssistantTextEl.innerHTML = formatMarkdown(fullText);
+      currentAssistantTextEl.innerHTML = formatMarkdown(answerText);
       const card = currentAssistantTextEl.closest('.assistant-card');
 
       // Detect unified diff or code block
-      const diffMatch = fullText.match(/```(?:diff)?\n([\s\S]*?@@[\s\S]*?)```/);
+      const diffMatch = answerText.match(/```(?:diff)?\n([\s\S]*?@@[\s\S]*?)```/);
       let detectedDiff = null;
       let targetFilename = null;
 
@@ -1472,12 +2324,12 @@
 
       if (diffMatch) {
         detectedDiff = diffMatch[1].trim();
-        targetFilename = extractDiffFilename(detectedDiff) || (isCreationQuery && queryFile ? queryFile : null) || repoActiveFilename || queryFile || getPrimaryRepoFile(fullText);
+        targetFilename = extractDiffFilename(detectedDiff) || (isCreationQuery && queryFile ? queryFile : null) || repoActiveFilename || queryFile || getPrimaryRepoFile(answerText);
       } else {
-        const rawDiffMatch = fullText.match(/(--- (?:a\/|\/dev\/null)[^\n]+\n\+\+\+ (?:b\/|[^\n]+)[^\n]*\n@@[\s\S]*?)(?:```|$)/);
+        const rawDiffMatch = answerText.match(/(--- (?:a\/|\/dev\/null)[^\n]+\n\+\+\+ (?:b\/|[^\n]+)[^\n]*\n@@[\s\S]*?)(?:```|$)/);
         if (rawDiffMatch) {
           detectedDiff = rawDiffMatch[1].trim();
-          targetFilename = extractDiffFilename(detectedDiff) || (isCreationQuery && queryFile ? queryFile : null) || repoActiveFilename || queryFile || getPrimaryRepoFile(fullText);
+          targetFilename = extractDiffFilename(detectedDiff) || (isCreationQuery && queryFile ? queryFile : null) || repoActiveFilename || queryFile || getPrimaryRepoFile(answerText);
         }
       }
 
@@ -2983,6 +3835,7 @@
   }
 
   function showConflictGuardPill(state, titleText) {
+    const isDiffActive = Boolean(views.diff && views.diff.classList.contains('active-view'));
     const pill = ensureConflictGuardPill();
     if (pill) {
       pill.style.display = 'flex';
@@ -3000,7 +3853,9 @@
 
     const headerBanner = document.getElementById('header-conflict-banner');
     if (headerBanner) {
-      if (state === 'conflict') {
+      // Only show global header banner when the user is NOT on the Diff tab.
+      // In the Diff tab, the in-view diff pill is already displayed, preventing duplicate banners.
+      if (state === 'conflict' && !isDiffActive) {
         headerBanner.style.display = 'flex';
         const hTitle = document.getElementById('header-conflict-title');
         if (hTitle && titleText) {
@@ -3171,10 +4026,20 @@
   }
 
   if (btnHeaderDismissConflict) {
-    btnHeaderDismissConflict.addEventListener('click', () => {
+    btnHeaderDismissConflict.addEventListener('click', (e) => {
+      e.stopPropagation();
       if (stagedDiffData) stagedDiffData.isDismissed = true;
       hideConflictGuardPill();
       showToast('Conflict warning dismissed. Review diff before applying.', 'info', 2000);
+    });
+  }
+
+  const headerConflictBadge = headerConflictBanner?.querySelector('.header-conflict-badge');
+  if (headerConflictBadge) {
+    headerConflictBadge.style.cursor = 'pointer';
+    headerConflictBadge.title = 'Click to review diff';
+    headerConflictBadge.addEventListener('click', () => {
+      switchTab('diff');
     });
   }
 
@@ -5320,11 +6185,13 @@
     }
 
     currentRepoFilesList = [];
+    currentRepoDirsList = [];
     let fileCount = 0;
     function countFiles(nodes) {
       if (!nodes) return;
       nodes.forEach(n => {
         if (n.type === 'directory') {
+          currentRepoDirsList.push(n);
           countFiles(n.children || []);
         } else {
           fileCount++;
@@ -5866,6 +6733,12 @@
         currentRepoPath = '';
         if (inputRepoPath) inputRepoPath.value = '';
         localStorage.removeItem('codebase_copilot_repo_path');
+        mentionAutocompleteItems = [];
+        currentRepoFilesList = [];
+        currentRepoDirsList = [];
+        pinnedMentions = [];
+        renderMentionChipsTray();
+        hideMentionPopup();
         resetRepoGraphState();
         if (repoFileTree) {
           repoFileTree.innerHTML = '<div class="tree-empty-state"><span class="pixel-glyph">»</span> No repository selected. Enter a path above or click BROWSE.</div>';
@@ -5881,6 +6754,12 @@
           if (inputRepoPath) inputRepoPath.value = currentRepoPath;
           localStorage.setItem('codebase_copilot_repo_path', currentRepoPath);
           if (!isSameRepo) {
+            mentionAutocompleteItems = [];
+            currentRepoFilesList = [];
+            currentRepoDirsList = [];
+            pinnedMentions = [];
+            renderMentionChipsTray();
+            hideMentionPopup();
             resetRepoGraphState();
             loadSecurityAudit(currentRepoPath);
             if (msg.tree) {
@@ -6250,8 +7129,41 @@
       );
     }
 
+    // Match static or historical <think>...</think> blocks
+    let out = text.replace(/<(?:think|thinking)>([\s\S]*?)<\/(?:think|thinking)>/gi, function (match, thoughts) {
+      const cleanThoughts = thoughts.trim();
+      const index = codeBlocks.length;
+      const drawerHtml = `
+        <div class="thinking-drawer is-finished is-collapsed">
+          <div class="thinking-drawer-header" onclick="this.parentElement.classList.toggle('is-collapsed')">
+            <div class="thinking-header-left">
+              <span class="thinking-glyph-icon" style="display:inline-flex;">
+                <svg viewBox="0 0 10 10" width="8" height="8" fill="currentColor">
+                  <polygon points="2,1 8,5 2,9"/>
+                </svg>
+              </span>
+              <span class="thinking-header-title">Thought Process</span>
+            </div>
+            <div class="thinking-header-right">
+              <button type="button" class="btn-thinking-toggle" title="Toggle thinking process" aria-label="Toggle thinking">
+                <span class="thinking-toggle-label">Expand</span>
+                <svg class="thinking-toggle-icon" viewBox="0 0 10 10" width="7" height="7" fill="currentColor">
+                  <polygon points="1,7 9,7 5,2"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div class="thinking-drawer-body">
+            <pre class="thinking-thought-content">${escapeHtml(cleanThoughts)}</pre>
+          </div>
+        </div>
+      `;
+      codeBlocks.push(drawerHtml);
+      return `\n__CODE_BLOCK_${index}__\n`;
+    });
+
     // Match code blocks (handles: CRLF, 3 or more backticks, trailing spaces after language, and unclosed streaming blocks at end of text)
-    let out = text.replace(/(?:^|\n)[ \t]*(`{3,})([a-zA-Z0-9_-]*)[^\S\r\n]*\r?\n([\s\S]*?)(?:\r?\n[ \t]*\1[^\S\r\n]*(?:\r?\n|$)|$)/g, function (match, fence, lang, code) {
+    out = out.replace(/(?:^|\n)[ \t]*(`{3,})([a-zA-Z0-9_-]*)[^\S\r\n]*\r?\n([\s\S]*?)(?:\r?\n[ \t]*\1[^\S\r\n]*(?:\r?\n|$)|$)/g, function (match, fence, lang, code) {
       if (!code && !match.endsWith(fence)) return match;
       const displayLang = (lang ? lang.trim().toLowerCase() : '') || 'code';
       const index = codeBlocks.length;
@@ -6659,7 +7571,7 @@
     }
   });
 
-  // Delegated zoom buttons (+ / 100% / -) for mermaid architecture diagram cards (50% to 500%)
+  // Delegated zoom buttons (+ / 100% / -) for mermaid architecture diagram cards (30% to 1000%)
   document.addEventListener('click', (e) => {
     const zoomBtn = e.target.closest('.btn-mermaid-zoom');
     if (!zoomBtn) return;
@@ -6677,7 +7589,7 @@
     let isFitAction = false;
 
     if (zoomBtn.classList.contains('btn-mermaid-zoom-in')) {
-      currentZoom = Math.min(5.0, Math.round((currentZoom + 0.25) * 100) / 100);
+      currentZoom = Math.min(10.0, Math.round((currentZoom + 0.25) * 100) / 100);
     } else if (zoomBtn.classList.contains('btn-mermaid-zoom-out')) {
       currentZoom = Math.max(0.3, Math.round((currentZoom - 0.25) * 100) / 100);
     } else if (zoomBtn.classList.contains('btn-mermaid-zoom-reset')) {
@@ -6688,7 +7600,7 @@
         const availW = Math.max(100, viewport.clientWidth - 28);
         const availH = Math.max(100, viewport.clientHeight - 28);
         const fitScale = Math.min(availW / baseW, availH / baseH);
-        currentZoom = Math.max(0.3, Math.min(5.0, Math.round(fitScale * 100) / 100));
+        currentZoom = Math.max(0.3, Math.min(10.0, Math.round(fitScale * 100) / 100));
       } else {
         currentZoom = 1.0;
       }
