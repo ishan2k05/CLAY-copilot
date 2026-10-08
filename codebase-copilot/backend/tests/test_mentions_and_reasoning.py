@@ -1,13 +1,14 @@
+import asyncio
 import pytest
 from pathlib import Path
 from fastapi.testclient import TestClient
-from app.main import app, graph_store, ChatRequest
+from app.main import app, graph_store, ChatRequest, ACTIVE_SESSION_TOKEN
 from app.parser.symbols import SymbolNode
 
 client = TestClient(app)
+client.headers.update({"X-Clay-Auth-Token": ACTIVE_SESSION_TOKEN})
 
-@pytest.mark.asyncio
-async def test_mentions_endpoint_file_and_folder_search(tmp_path):
+def test_mentions_endpoint_file_and_folder_search(tmp_path):
     # Setup test workspace files
     test_file = tmp_path / "calc.py"
     test_file.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
@@ -30,8 +31,7 @@ async def test_mentions_endpoint_file_and_folder_search(tmp_path):
     data_folder = response_folder.json()
     assert any(r["type"] == "folder" for r in data_folder["results"])
 
-@pytest.mark.asyncio
-async def test_mentions_endpoint_symbol_search():
+def test_mentions_endpoint_symbol_search():
     # Insert mock symbol into graph store
     node = SymbolNode(
         id="calc.py:evaluate_expression",
@@ -40,10 +40,9 @@ async def test_mentions_endpoint_symbol_search():
         file_path="src/calc.py",
         start_line=12,
         end_line=24,
-        parent_id=None,
         docstring="Evaluates mathematical tokens."
     )
-    await graph_store.insert_batch([node], [])
+    asyncio.run(graph_store.insert_batch([node], []))
 
     response = client.get("/api/context/mentions?query=evaluate")
     assert response.status_code == 200

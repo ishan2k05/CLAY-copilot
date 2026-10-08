@@ -6,6 +6,34 @@
   const isVsCode = typeof acquireVsCodeApi === 'function';
   const vscode = isVsCode ? acquireVsCodeApi() : null;
   let BACKEND_URL = (typeof window !== 'undefined' && window.__CLAY_BACKEND_URL__) ? window.__CLAY_BACKEND_URL__ : 'http://127.0.0.1:8765';
+  const metaSessionToken = (typeof document !== 'undefined') ? (document.querySelector('meta[name="clay-session-token"]')?.getAttribute('content') || '') : '';
+  let SESSION_TOKEN = metaSessionToken || (typeof window !== 'undefined' && window.__CLAY_SESSION_TOKEN__) || '';
+
+  // Intercept window.fetch to automatically attach X-Clay-Auth-Token for local backend requests
+  const originalFetch = window.fetch;
+  window.fetch = function secureFetch(input, init) {
+    const urlStr = typeof input === 'string' ? input : (input && input.url ? input.url : '');
+    const isBackendCall = urlStr && (
+      urlStr.startsWith(BACKEND_URL) ||
+      urlStr.startsWith('http://127.0.0.1:') ||
+      urlStr.startsWith('http://localhost:')
+    );
+    if (isBackendCall && SESSION_TOKEN) {
+      init = init ? Object.assign({}, init) : {};
+      if (init.headers instanceof Headers) {
+        if (!init.headers.has('X-Clay-Auth-Token')) {
+          init.headers.set('X-Clay-Auth-Token', SESSION_TOKEN);
+        }
+      } else if (Array.isArray(init.headers)) {
+        init.headers.push(['X-Clay-Auth-Token', SESSION_TOKEN]);
+      } else {
+        init.headers = Object.assign({}, init.headers, {
+          'X-Clay-Auth-Token': SESSION_TOKEN
+        });
+      }
+    }
+    return originalFetch.call(this, input, init);
+  };
 
   // Host OS Autodetection from browser runtime / navigator
   const isHostWin = typeof navigator !== 'undefined' && (/Win/i.test(navigator.platform) || /Windows/i.test(navigator.userAgent));
@@ -912,6 +940,9 @@
     });
   }
 
+  // Backend Lifecycle State
+  let restartPollInterval = null;
+
   // Load initial settings from backend
   async function loadInitialSettings() {
     try {
@@ -1485,7 +1516,12 @@
 
     if (notifyHost && isVsCode) {
       vscode.postMessage({ command: 'stopChat' });
+      vscode.postMessage({ command: 'abortChatGeneration' });
     }
+
+    try {
+      fetch(`${BACKEND_URL}/api/chat/abort`, { method: 'POST' }).catch(() => {});
+    } catch {}
 
     if (chatAbortController) {
       try {
@@ -3350,6 +3386,19 @@
     hideAmbiguityBar();
     if (btnRunAgent) btnRunAgent.style.display = 'flex';
     if (btnStopAgent) btnStopAgent.style.display = 'none';
+
+    // Instantly abort backend execution and terminal processes
+    try {
+      if (isVsCode) {
+        vscode.postMessage({ command: 'abortAgentExecution' });
+        vscode.postMessage({ command: 'abortTerminalCommand' });
+      } else {
+        const headers = SESSION_TOKEN ? { 'X-Clay-Auth-Token': SESSION_TOKEN } : {};
+        fetch(`${BACKEND_URL}/api/agent/abort`, { method: 'POST', headers }).catch(() => {});
+        fetch(`${BACKEND_URL}/api/agent/terminal/abort`, { method: 'POST', headers }).catch(() => {});
+      }
+    } catch (e) {}
+
     if (userTriggered) {
       if (agentTerminalStatus) {
         agentTerminalStatus.textContent = 'STOPPED';
@@ -6549,6 +6598,38 @@
         if (msg.url && typeof msg.url === 'string') {
           BACKEND_URL = msg.url.replace(/\/+$/, '');
         }
+        if (msg.sessionToken) {
+          SESSION_TOKEN = msg.sessionToken;
+        }
+        break;
+
+      case 'setSessionToken':
+        if (msg.token) {
+          SESSION_TOKEN = msg.token;
+        }
+        break;
+
+      case 'backendRestarted':
+        if (restartPollInterval) {
+          clearInterval(restartPollInterval);
+          restartPollInterval = null;
+        }
+        if (msg.url && typeof msg.url === 'string') {
+          BACKEND_URL = msg.url.replace(/\/+$/, '');
+        }
+        if (msg.sessionToken) {
+          SESSION_TOKEN = msg.sessionToken;
+        }
+        showToast('Backend restarted successfully', 'success');
+        testOllamaConnection();
+        break;
+
+      case 'backendRestartFailed':
+        if (restartPollInterval) {
+          clearInterval(restartPollInterval);
+          restartPollInterval = null;
+        }
+        showToast(msg.error || 'Restart failed', 'error');
         break;
 
       case 'terminalCommandResult': {

@@ -43,6 +43,7 @@ export interface AgentTask {
 export class BackendClient {
     private backendUrl: string;
     private activeChatAbortController: AbortController | null = null;
+    private sessionToken: string = '';
 
     constructor() {
         const config = vscode.workspace.getConfiguration('codebaseCopilot');
@@ -64,18 +65,90 @@ export class BackendClient {
         this.backendUrl = url;
     }
 
-    stopStreamChat(): void {
+    public setSessionToken(token: string): void {
+        this.sessionToken = token;
+    }
+
+    public getSessionToken(): string {
+        return this.sessionToken;
+    }
+
+    private async fetchWithAuth(url: string, init: RequestInit = {}): Promise<Response> {
+        const headers: Record<string, string> = {
+            ...((init.headers as Record<string, string>) || {})
+        };
+        if (this.sessionToken) {
+            headers['X-Clay-Auth-Token'] = this.sessionToken;
+        }
+        return fetch(url, {
+            ...init,
+            headers
+        });
+    }
+
+    async stopStreamChat(): Promise<void> {
         if (this.activeChatAbortController) {
             try {
                 this.activeChatAbortController.abort();
             } catch {}
             this.activeChatAbortController = null;
         }
+        try {
+            await this.fetchWithAuth(`${this.backendUrl}/api/chat/abort`, { method: 'POST' }).catch(() => {});
+        } catch {}
+    }
+
+    async abortAgentExecution(): Promise<any> {
+        try {
+            const res = await this.fetchWithAuth(`${this.backendUrl}/api/agent/abort`, { method: 'POST' });
+            if (res.ok) return await res.json();
+        } catch {}
+        return { status: 'failed' };
+    }
+
+    async abortTerminalCommand(executionId?: string): Promise<any> {
+        try {
+            const res = await this.fetchWithAuth(`${this.backendUrl}/api/agent/terminal/abort`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ execution_id: executionId })
+            });
+            if (res.ok) return await res.json();
+        } catch {}
+        return { status: 'failed' };
+    }
+
+    async listTerminalProcesses(): Promise<any[]> {
+        try {
+            const res = await this.fetchWithAuth(`${this.backendUrl}/api/agent/terminal/processes`);
+            if (res.ok) {
+                const data = await res.json() as any;
+                return data.processes || [];
+            }
+        } catch {}
+        return [];
+    }
+
+    async shutdownServer(): Promise<boolean> {
+        try {
+            const res = await this.fetchWithAuth(`${this.backendUrl}/api/system/shutdown`, { method: 'POST' });
+            return res.ok;
+        } catch {
+            return false;
+        }
+    }
+
+    async reloadServer(): Promise<any> {
+        try {
+            const res = await this.fetchWithAuth(`${this.backendUrl}/api/system/reload`, { method: 'POST' });
+            if (res.ok) return await res.json();
+        } catch {}
+        return null;
     }
 
     async checkHealth(): Promise<boolean> {
         try {
-            const res = await fetch(`${this.backendUrl}/health`, { method: 'GET' });
+            const res = await this.fetchWithAuth(`${this.backendUrl}/health`, { method: 'GET' });
             return res.ok;
         } catch {
             return false;
@@ -91,7 +164,7 @@ export class BackendClient {
         latency_ms?: number;
     }> {
         try {
-            const res = await fetch(`${this.backendUrl}/api/ollama/status`);
+            const res = await this.fetchWithAuth(`${this.backendUrl}/api/ollama/status`);
             if (res.ok) {
                 return await res.json() as any;
             }
@@ -101,7 +174,7 @@ export class BackendClient {
 
     async updateSettings(settings: { model?: string; host?: string; privacy_filter?: boolean }): Promise<any> {
         try {
-            const res = await fetch(`${this.backendUrl}/api/settings`, {
+            const res = await this.fetchWithAuth(`${this.backendUrl}/api/settings`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(settings)
@@ -115,7 +188,7 @@ export class BackendClient {
 
     async syncFile(filePath: string, content: string, event: string = 'changed'): Promise<any> {
         try {
-            const res = await fetch(`${this.backendUrl}/api/sync/file`, {
+            const res = await this.fetchWithAuth(`${this.backendUrl}/api/sync/file`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ file_path: filePath, content, event })
@@ -132,7 +205,7 @@ export class BackendClient {
             const url = workspacePath
                 ? `${this.backendUrl}/api/sync/silent-check?workspace_path=${encodeURIComponent(workspacePath)}`
                 : `${this.backendUrl}/api/sync/silent-check`;
-            const res = await fetch(url);
+            const res = await this.fetchWithAuth(url);
             if (res.ok) {
                 return await res.json() as any;
             }
@@ -195,7 +268,7 @@ export class BackendClient {
                 payload.num_predict = inferenceOptions.num_predict;
             }
 
-            const response = await fetch(`${this.backendUrl}/api/chat`, {
+            const response = await this.fetchWithAuth(`${this.backendUrl}/api/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),
@@ -267,7 +340,7 @@ export class BackendClient {
     }
 
     async triggerIndexing(workspacePath: string): Promise<IndexStatus> {
-        const response = await fetch(`${this.backendUrl}/api/index/scan`, {
+        const response = await this.fetchWithAuth(`${this.backendUrl}/api/index/scan`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ workspace_path: workspacePath })
@@ -285,7 +358,7 @@ export class BackendClient {
             if (filePath) params.set('file', filePath);
             const qs = params.toString();
             const url = qs ? `${this.backendUrl}/api/graph/mermaid?${qs}` : `${this.backendUrl}/api/graph/mermaid`;
-            const res = await fetch(url);
+            const res = await this.fetchWithAuth(url);
             if (res.ok) {
                 const data = await res.json() as any;
                 return {
@@ -308,7 +381,7 @@ export class BackendClient {
             const url = workspacePath
                 ? `${this.backendUrl}/api/repo/security-audit?path=${encodeURIComponent(workspacePath)}`
                 : `${this.backendUrl}/api/repo/security-audit`;
-            const res = await fetch(url);
+            const res = await this.fetchWithAuth(url);
             if (res.ok) {
                 return await res.json() as any;
             }
@@ -323,7 +396,7 @@ export class BackendClient {
     }
 
     async createPlan(goal: string, workspacePath?: string, targetFile?: string, modelName?: string): Promise<AgentTask> {
-        const res = await fetch(`${this.backendUrl}/api/agent/plan`, {
+        const res = await this.fetchWithAuth(`${this.backendUrl}/api/agent/plan`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -340,7 +413,7 @@ export class BackendClient {
     }
 
     async applyPatch(filePath: string, diff: string, workspacePath?: string): Promise<any> {
-        const res = await fetch(`${this.backendUrl}/api/agent/apply-patch`, {
+        const res = await this.fetchWithAuth(`${this.backendUrl}/api/agent/apply-patch`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ file_path: filePath, diff, workspace_path: workspacePath })
@@ -353,7 +426,7 @@ export class BackendClient {
     }
 
     async rebaseDiff(filePath: string, baseContent: string, diff: string, currentContent: string, workspacePath?: string, forceResolution?: string): Promise<any> {
-        const res = await fetch(`${this.backendUrl}/api/agent/rebase-diff`, {
+        const res = await this.fetchWithAuth(`${this.backendUrl}/api/agent/rebase-diff`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -374,7 +447,7 @@ export class BackendClient {
 
     async getAgentTask(): Promise<AgentTask | null> {
         try {
-            const res = await fetch(`${this.backendUrl}/api/agent/task`);
+            const res = await this.fetchWithAuth(`${this.backendUrl}/api/agent/task`);
             if (res.ok) {
                 return await res.json() as AgentTask;
             }
@@ -383,7 +456,7 @@ export class BackendClient {
     }
 
     async reviewChanges(taskId: string, decision: 'accept' | 'reject'): Promise<boolean> {
-        const res = await fetch(`${this.backendUrl}/api/agent/review`, {
+        const res = await this.fetchWithAuth(`${this.backendUrl}/api/agent/review`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ task_id: taskId, decision })
@@ -396,7 +469,7 @@ export class BackendClient {
             const url = workspacePath 
                 ? `${this.backendUrl}/api/repo/tree?path=${encodeURIComponent(workspacePath)}`
                 : `${this.backendUrl}/api/repo/tree`;
-            const res = await fetch(url);
+            const res = await this.fetchWithAuth(url);
             if (res.ok) {
                 return await res.json() as any;
             }
@@ -406,7 +479,7 @@ export class BackendClient {
 
     async executeTerminalCommand(command: string, workspacePath?: string, securityMode?: string): Promise<any> {
         try {
-            const res = await fetch(`${this.backendUrl}/api/agent/terminal/execute`, {
+            const res = await this.fetchWithAuth(`${this.backendUrl}/api/agent/terminal/execute`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -430,7 +503,7 @@ export class BackendClient {
             const url = workspacePath
                 ? `${this.backendUrl}/api/system/info?workspace_path=${encodeURIComponent(workspacePath)}`
                 : `${this.backendUrl}/api/system/info`;
-            const res = await fetch(url);
+            const res = await this.fetchWithAuth(url);
             if (res.ok) return await res.json();
         } catch {}
         return { os: process.platform === 'win32' ? 'windows' : 'linux', is_windows: process.platform === 'win32', shell: 'bash' };
@@ -438,7 +511,7 @@ export class BackendClient {
 
     async executeAgentStep(stepId: number, goal: string, workspacePath?: string, activeFile?: string, cursorLine?: number, targetFile?: string, stepAction?: string, totalSteps?: number, activeFileContent?: string): Promise<any> {
         try {
-            const res = await fetch(`${this.backendUrl}/api/agent/step`, {
+            const res = await this.fetchWithAuth(`${this.backendUrl}/api/agent/step`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

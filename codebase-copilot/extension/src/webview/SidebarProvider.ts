@@ -3,6 +3,7 @@ import * as cp from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { BackendClient } from '../api/backendClient';
+import { ServerProcessManager } from '../server/processManager';
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'codebaseCopilot.sidebarView';
@@ -12,8 +13,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     constructor(
         private readonly _extensionUri: vscode.Uri,
         private readonly _backendClient: BackendClient,
-        private readonly _context?: vscode.ExtensionContext
+        private readonly _context?: vscode.ExtensionContext,
+        private readonly _processManager?: ServerProcessManager
     ) { }
+
+    public notifyBackendRestarted(url: string) {
+        const token = this._processManager?.getSessionToken() || this._backendClient.getSessionToken();
+        this._view?.webview.postMessage({
+            command: 'backendRestarted',
+            url: url,
+            sessionToken: token
+        });
+    }
 
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
@@ -90,9 +101,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         vscode.workspace.onDidChangeConfiguration((event) => {
             if (event.affectsConfiguration('codebaseCopilot.backendUrl')) {
                 const newUrl = this._backendClient.getBackendUrl();
+                const token = this._processManager?.getSessionToken() || this._backendClient.getSessionToken();
                 this._view?.webview.postMessage({
                     command: 'setBackendUrl',
-                    url: newUrl
+                    url: newUrl,
+                    sessionToken: token
                 });
             }
         });
@@ -168,7 +181,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         // Always prioritize the active workspace folder currently open in VS Code!
         const initialRepo = activeFolder || savedRepo || '';
 
+        const sessionToken = this._processManager?.getSessionToken() || this._backendClient.getSessionToken();
         setTimeout(() => {
+            if (sessionToken) {
+                this._view?.webview.postMessage({
+                    command: 'setSessionToken',
+                    token: sessionToken
+                });
+            }
             if (initialRepo) {
                 this._view?.webview.postMessage({
                     command: 'repoPathSelected',
@@ -232,6 +252,29 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case 'stopChat': {
                     this._backendClient.stopStreamChat();
                     this._view?.webview.postMessage({ command: 'streamStopped' });
+                    break;
+                }
+                case 'restartBackendServer': {
+                    vscode.commands.executeCommand('codebaseCopilot.restartBackend');
+                    break;
+                }
+                case 'abortChatGeneration': {
+                    this._backendClient.stopStreamChat();
+                    try {
+                        await this._backendClient.fetchWithAuth(`${this._backendClient.getBackendUrl()}/api/chat/abort`, { method: 'POST' }).catch(() => {});
+                    } catch {}
+                    break;
+                }
+                case 'abortAgentExecution': {
+                    try {
+                        await this._backendClient.abortAgentExecution();
+                    } catch {}
+                    break;
+                }
+                case 'abortTerminalCommand': {
+                    try {
+                        await this._backendClient.abortTerminalCommand(data?.execution_id);
+                    } catch {}
                     break;
                 }
                 case 'clearChatContext': {
@@ -486,9 +529,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 : ['ls -la', 'python3 --version', 'git status', 'pytest']
                         }
                     });
+                    const currentToken = this._processManager?.getSessionToken() || this._backendClient.getSessionToken();
                     this._view?.webview.postMessage({
                         command: 'setBackendUrl',
-                        url: this._backendClient.getBackendUrl()
+                        url: this._backendClient.getBackendUrl(),
+                        sessionToken: currentToken
                     });
                     break;
                 }
@@ -803,6 +848,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     });
                     break;
                 }
+                case 'abortChatGeneration': {
+                    await this._backendClient.stopStreamChat();
+                    break;
+                }
+                case 'abortAgentExecution': {
+                    await this._backendClient.abortAgentExecution();
+                    break;
+                }
+                case 'abortTerminalCommand': {
+                    await this._backendClient.abortTerminalCommand(data.execution_id);
+                    break;
+                }
+                case 'restartBackendServer': {
+                    vscode.commands.executeCommand('codebaseCopilot.restartBackend');
+                    break;
+                }
             }
         });
     }
@@ -1008,12 +1069,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         const nonce = getNonce();
         const activeBackendUrl = this._backendClient.getBackendUrl() || 'http://127.0.0.1:8765';
+        const sessionToken = this._processManager?.getSessionToken() || this._backendClient.getSessionToken();
 
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="clay-session-token" content="${sessionToken}">
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src ${activeBackendUrl} http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:* https://ollama.com; style-src ${webview.cspSource} 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'nonce-${nonce}';">
     <link href="${styleUri}" rel="stylesheet">
     <title>CLAY Copilot</title>

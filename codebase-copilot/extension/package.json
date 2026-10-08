@@ -55,6 +55,10 @@
       {
         "command": "codebaseCopilot.fixCurrentError",
         "title": "CLAY Copilot: Fix Current Error"
+      },
+      {
+        "command": "codebaseCopilot.restartBackend",
+        "title": "CLAY Copilot: Restart Backend Server"
       }
     ],
     "configuration": {

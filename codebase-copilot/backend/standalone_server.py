@@ -1676,6 +1676,74 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"status": "success", "action": body.get("decision")}).encode("utf-8"))
 
+        elif self.path == "/api/chat/abort":
+            self.send_response(200)
+            self._set_cors_headers()
+            self.end_headers()
+            self.wfile.write(b'{"status": "aborted"}')
+
+        elif self.path == "/api/agent/abort":
+            self.send_response(200)
+            self._set_cors_headers()
+            self.end_headers()
+            self.wfile.write(b'{"status": "aborted"}')
+
+        elif self.path == "/api/system/shutdown":
+            self.send_response(200)
+            self._set_cors_headers()
+            self.end_headers()
+            self.wfile.write(b'{"status": "shutting_down"}')
+            import threading
+            threading.Timer(0.3, lambda: sys.exit(0)).start()
+
+        elif self.path == "/api/system/restart":
+            self.send_response(200)
+            self._set_cors_headers()
+            self.end_headers()
+            self.wfile.write(b'{"status": "restarting"}')
+            import threading
+            def _do_standalone_restart():
+                time.sleep(0.3)
+                backend_dir = str(Path(__file__).resolve().parent)
+                cmd = [sys.executable, "standalone_server.py", "--port", str(PORT)]
+                try:
+                    if os.name == "nt":
+                        launcher_code = (
+                            f"import time, subprocess; "
+                            f"time.sleep(1.2); "
+                            f"subprocess.Popen({repr(cmd)}, cwd={repr(backend_dir)})"
+                        )
+                        creation_flags = 0x00000008 | 0x00000200
+                        subprocess.Popen(
+                            [sys.executable, "-c", launcher_code],
+                            cwd=backend_dir,
+                            creationflags=creation_flags,
+                            close_fds=True
+                        )
+                    else:
+                        launcher_code = (
+                            f"import time, subprocess; "
+                            f"time.sleep(0.8); "
+                            f"subprocess.Popen({repr(cmd)}, cwd={repr(backend_dir)})"
+                        )
+                        subprocess.Popen(
+                            [sys.executable, "-c", launcher_code],
+                            cwd=backend_dir,
+                            start_new_session=True,
+                            close_fds=True
+                        )
+                    os._exit(0)
+                except Exception:
+                    os._exit(1)
+            threading.Thread(target=_do_standalone_restart, daemon=True).start()
+
+        elif self.path == "/api/system/reload":
+            load_persisted_settings()
+            self.send_response(200)
+            self._set_cors_headers()
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "reloaded", "runtime_settings": runtime_settings}).encode("utf-8"))
+
         else:
             self.send_response(404)
             self._set_cors_headers()

@@ -14,13 +14,14 @@ export async function activate(context: vscode.ExtensionContext) {
     await serverManager.startServer(context.extensionPath, configuredUrl);
 
     const backendClient = new BackendClient();
+    backendClient.setSessionToken(serverManager.getSessionToken());
     if (serverManager.getActiveUrl()) {
         backendClient.setBackendUrl(serverManager.getActiveUrl());
     }
 
     // 2. Register Webview View Provider (Primary Sidebar) with retainContextWhenHidden
     // Keeps webview execution context alive when minimized, collapsed, or when switching sidebar views
-    const sidebarProvider = new SidebarProvider(context.extensionUri, backendClient, context);
+    const sidebarProvider = new SidebarProvider(context.extensionUri, backendClient, context, serverManager);
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(
             SidebarProvider.viewType,
@@ -32,6 +33,44 @@ export async function activate(context: vscode.ExtensionContext) {
             }
         )
     );
+
+    // 2b. Register Command: Restart Backend Server
+    context.subscriptions.push(
+        vscode.commands.registerCommand('codebaseCopilot.restartBackend', async () => {
+            if (!serverManager) return;
+            await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: "CLAY Copilot: Restarting backend server...",
+                cancellable: false
+            }, async () => {
+                const restarted = await serverManager!.restartServer(context.extensionPath, configuredUrl);
+                if (restarted) {
+                    backendClient.setBackendUrl(serverManager!.getActiveUrl());
+                    sidebarProvider.notifyBackendRestarted(serverManager!.getActiveUrl());
+                    vscode.window.showInformationMessage('CLAY Copilot: Backend restarted successfully.');
+                } else {
+                    vscode.window.showErrorMessage('CLAY Copilot: Failed to restart backend server. Check output channel.');
+                }
+            });
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('clay.restartBackend', async () => {
+            return vscode.commands.executeCommand('codebaseCopilot.restartBackend');
+        })
+    );
+
+    // 2c. Start background heartbeat watchdog with auto-recovery prompt
+    serverManager.startHeartbeatWatchdog(async () => {
+        const choice = await vscode.window.showWarningMessage(
+            'CLAY Copilot: Backend server is unresponsive.',
+            'Restart Backend'
+        );
+        if (choice === 'Restart Backend') {
+            vscode.commands.executeCommand('codebaseCopilot.restartBackend');
+        }
+    });
 
     // 3. Command: Check Ollama Status
     context.subscriptions.push(

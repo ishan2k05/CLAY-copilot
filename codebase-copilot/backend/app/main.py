@@ -1,11 +1,16 @@
 import os
 import json
 import asyncio
+import hmac
+import secrets
+import time
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import StreamingResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 import logging
 from pydantic import BaseModel
 
@@ -36,15 +41,130 @@ from .agent.tools.terminal_agent import TerminalAgent
 from .llm.gemma_provider import OllamaGemmaProvider
 from .llm.history_compactor import HistoryCompactor
 
+# Session token resolution & management
+SESSION_TOKEN_DIR = Path.home() / ".clay"
+SESSION_TOKEN_FILE = SESSION_TOKEN_DIR / "auth_token.json"
+
+def get_or_create_session_token() -> str:
+    # 1. Environment variable takes highest priority
+    token = os.getenv("CLAY_SESSION_TOKEN", "").strip()
+    if token:
+        return token
+    
+    # 2. Check persistent token file
+    try:
+        if SESSION_TOKEN_FILE.exists():
+            data = json.loads(SESSION_TOKEN_FILE.read_text(encoding="utf-8"))
+            if data.get("token"):
+                return str(data["token"]).strip()
+    except Exception as e:
+        logger.debug(f"Error reading session token file: {e}")
+
+    # 3. Generate a cryptographically secure 256-bit token
+    token = secrets.token_hex(32)
+    try:
+        SESSION_TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+        SESSION_TOKEN_FILE.write_text(json.dumps({"token": token}), encoding="utf-8")
+        try:
+            SESSION_TOKEN_FILE.chmod(0o600)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.debug(f"Error persisting session token file: {e}")
+    return token
+
+ACTIVE_SESSION_TOKEN = get_or_create_session_token()
+
+MAX_BODY_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB
+
+class LocalAuthTokenMiddleware(BaseHTTPMiddleware):
+    """
+    Validates X-Clay-Auth-Token header against ACTIVE_SESSION_TOKEN.
+    Prevents drive-by browser cross-origin requests (CSRF) and local process tampering.
+    """
+    async def dispatch(self, request: Request, call_next):
+        # 1. Allow preflight OPTIONS requests without auth token
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
+        # 2. Whitelist public health & doc endpoints
+        path = request.url.path.rstrip("/")
+        if path in ("", "/health", "/api/health", "/docs", "/openapi.json"):
+            return await call_next(request)
+
+        # 3. Check if auth is disabled via environment
+        if os.getenv("CLAY_AUTH_DISABLED", "").lower() in ("1", "true", "yes"):
+            return await call_next(request)
+
+        # 4. Extract token from header: X-Clay-Auth-Token or Authorization: Bearer <token>
+        auth_header = request.headers.get("x-clay-auth-token") or request.headers.get("X-Clay-Auth-Token") or ""
+        if not auth_header and "authorization" in request.headers:
+            auth_val = request.headers["authorization"]
+            if auth_val.startswith("Bearer "):
+                auth_header = auth_val[7:].strip()
+        elif not auth_header and "Authorization" in request.headers:
+            auth_val = request.headers["Authorization"]
+            if auth_val.startswith("Bearer "):
+                auth_header = auth_val[7:].strip()
+
+        current_token = os.getenv("CLAY_SESSION_TOKEN") or ACTIVE_SESSION_TOKEN
+        if not auth_header or not hmac.compare_digest(auth_header, current_token):
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "status": "error",
+                    "error": "Unauthorized",
+                    "detail": "Missing or invalid X-Clay-Auth-Token header."
+                }
+            )
+
+        return await call_next(request)
+
+class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
+    """
+    Clamps incoming request body size to MAX_BODY_SIZE_BYTES (25 MB)
+    to protect against memory exhaustion and out-of-memory denial of service.
+    """
+    async def dispatch(self, request: Request, call_next):
+        if request.method in ("POST", "PUT", "PATCH"):
+            content_length = request.headers.get("content-length")
+            if content_length:
+                try:
+                    if int(content_length) > MAX_BODY_SIZE_BYTES:
+                        return JSONResponse(
+                            status_code=413,
+                            content={
+                                "status": "error",
+                                "error": "Payload Too Large",
+                                "detail": f"Request body exceeds maximum size limit of {MAX_BODY_SIZE_BYTES // (1024 * 1024)}MB."
+                            }
+                        )
+                except ValueError:
+                    pass
+        return await call_next(request)
+
 app = FastAPI(title="CLAY Copilot", version="0.2.0")
 
-# Enable CORS for local VS Code extension webview communication
+# Security Middleware Stack (Middlewares run in reverse order of addition)
+# 1. Innermost: Ephemeral Token Handshake
+app.add_middleware(LocalAuthTokenMiddleware)
+
+# 2. Next: Body Size Limiter (25 MB ceiling)
+app.add_middleware(RequestSizeLimitMiddleware)
+
+# 3. Next: Hardened CORS (VS Code webview schemes and local loopback only)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=r"^(https?://(localhost|127\.0\.0\.1)(:\d+)?|vscode-webview://.*|vscode-file://.*)$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# 4. Outermost: Trusted Host validation (DNS Rebinding protection)
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=["127.0.0.1", "localhost", "testserver"]
 )
 
 # Core subsystems
@@ -155,6 +275,10 @@ def is_path_in_workspace(target_path: Optional[Union[str, Path]], workspace_dir:
             return t_norm.startswith(w_norm + "/") or t_norm == w_norm
         except Exception:
             return False
+
+# Global stream cancellation flags for instant abort support
+active_chat_stream_cancel: bool = False
+active_agent_step_cancel: bool = False
 
 async def auto_index_workspace(workspace_dir: str) -> Dict[str, int]:
     """
@@ -1008,19 +1132,32 @@ async def chat_endpoint(req: ChatRequest):
 
     async def event_stream():
         nonlocal accumulated_tokens
+        global active_chat_stream_cancel
+        active_chat_stream_cancel = False
+
         # Stream reasoning tokens directly from Ollama respecting Zero-Leak Privacy Guard
         is_privacy_guard = runtime_settings.get("privacy_filter", True)
-        async for token in ollama_provider.stream_reasoning(
-            req.query,
-            code_context=full_code_context,
-            privacy_filter=is_privacy_guard,
-            history=compacted_history,
-            summary=rolling_summary
-        ):
-            clean_token = token.replace(r'\"\"\"', '"""').replace(r"\'\'\'", "'''")
-            accumulated_tokens.append(clean_token)
-            yield f"data: {json.dumps({'token': clean_token})}\n\n"
-            await asyncio.sleep(0.01)
+        try:
+            async for token in ollama_provider.stream_reasoning(
+                req.query,
+                code_context=full_code_context,
+                privacy_filter=is_privacy_guard,
+                history=compacted_history,
+                summary=rolling_summary
+            ):
+                if active_chat_stream_cancel:
+                    yield f"data: {json.dumps({'aborted': True})}\n\n"
+                    break
+                clean_token = token.replace(r'\"\"\"', '"""').replace(r"\'\'\'", "'''")
+                accumulated_tokens.append(clean_token)
+                yield f"data: {json.dumps({'token': clean_token})}\n\n"
+                await asyncio.sleep(0.01)
+        except asyncio.CancelledError:
+            pass
+
+        if active_chat_stream_cancel:
+            yield "data: [DONE]\n\n"
+            return
 
         # Update in-memory session history with completed turn
         full_assistant_reply = "".join(accumulated_tokens)
@@ -1034,6 +1171,13 @@ async def chat_endpoint(req: ChatRequest):
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+@app.post("/api/chat/abort")
+async def abort_chat_stream():
+    """Immediately halts the active chat token generation stream and cancels inference."""
+    global active_chat_stream_cancel
+    active_chat_stream_cancel = True
+    return {"status": "aborted", "timestamp": time.time()}
 
 @app.post("/api/chat/clear")
 async def clear_chat_context():
@@ -1378,8 +1522,7 @@ class FileOpenRequest(BaseModel):
 async def open_file_in_system(req: FileOpenRequest):
     """
     Opens the requested file using the operating system default application/helper.
-    On Windows: os.startfile(p) prompts the Windows open helper if no program is bound.
-    On Linux/macOS: xdg-open / open.
+    Restricted strictly to the active workspace to prevent arbitrary system execution.
     """
     raw_path = req.file_path.strip()
     p = Path(raw_path).resolve()
@@ -1394,6 +1537,22 @@ async def open_file_in_system(req: FileOpenRequest):
     if not p.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {raw_path}")
     
+    # Path Jailing: target file must reside strictly inside active workspace
+    ws = resolve_workspace_path(req.repo_path or runtime_settings.get("repo_path"))
+    if not is_path_in_workspace(p, ws):
+        raise HTTPException(status_code=403, detail=f"Access denied: file '{p.name}' is outside the active workspace.")
+
+    # Block opening executable binary file types
+    DISALLOWED_OPEN_EXTS = {
+        ".exe", ".bat", ".cmd", ".vbs", ".ps1", ".com",
+        ".scr", ".pif", ".msi", ".reg", ".wsf", ".sh", ".bash", ".cpl", ".hta"
+    }
+    if p.suffix.lower() in DISALLOWED_OPEN_EXTS:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Execution blocked: opening executable files ({p.suffix}) directly is not permitted."
+        )
+
     import platform, subprocess
     os_name = platform.system().lower()
     try:
@@ -1421,6 +1580,8 @@ class PlanRequest(BaseModel):
 
 @app.post("/api/agent/plan")
 async def create_plan(req: PlanRequest):
+    global active_agent_step_cancel
+    active_agent_step_cancel = False
     workspace_dir = str(resolve_workspace_path(req.workspace_path or runtime_settings.get("repo_path")))
     if current_indexed_workspace != workspace_dir:
         await auto_index_workspace(workspace_dir)
@@ -2101,6 +2262,12 @@ async def execute_agent_step_stream(req: StepExecuteRequest):
             action = "verify"
 
     async def step_stream_generator():
+        global active_agent_step_cancel
+        if active_agent_step_cancel:
+            yield f"data: {json.dumps({'step_id': req.step_id, 'status': 'stopped', 'aborted': True, 'log': 'Execution stopped by user.', 'done': True})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+
         # If action is not synthesize, delegate to execute_agent_step and emit single completed payload
         if action != "synthesize":
             res = await execute_agent_step(req)
@@ -2239,9 +2406,19 @@ async def execute_agent_step_stream(req: StepExecuteRequest):
             )
 
         accumulated_tokens = []
-        async for token in ollama_provider.stream_reasoning(prompt, code_context=agent_code_context):
-            accumulated_tokens.append(token)
-            yield f"data: {json.dumps({'token': token})}\n\n"
+        try:
+            async for token in ollama_provider.stream_reasoning(prompt, code_context=agent_code_context):
+                if active_agent_step_cancel:
+                    yield f"data: {json.dumps({'aborted': True, 'log': 'Execution stopped by user.'})}\n\n"
+                    break
+                accumulated_tokens.append(token)
+                yield f"data: {json.dumps({'token': token})}\n\n"
+        except asyncio.CancelledError:
+            pass
+
+        if active_agent_step_cancel:
+            yield "data: [DONE]\n\n"
+            return
 
         generated = "".join(accumulated_tokens)
 
@@ -2488,6 +2665,7 @@ class TerminalCommandRequest(BaseModel):
     command: str
     workspace_path: Optional[str] = None
     security_mode: Optional[str] = "sandboxed"
+    execution_id: Optional[str] = None
 
 @app.post("/api/agent/terminal/execute")
 async def execute_terminal_command(req: TerminalCommandRequest):
@@ -2495,8 +2673,14 @@ async def execute_terminal_command(req: TerminalCommandRequest):
     terminal = TerminalAgent(cwd)
     sec_mode = req.security_mode or runtime_settings.get("security_mode", "sandboxed")
     allow_net = runtime_settings.get("allow_network", True)
-    res = await terminal.run_command(req.command, security_mode=sec_mode, allow_network=allow_net)
+    res = await terminal.run_command(
+        req.command,
+        security_mode=sec_mode,
+        allow_network=allow_net,
+        execution_id=req.execution_id
+    )
     return {
+        "execution_id": res.get("execution_id", req.execution_id),
         "command": req.command,
         "workspace": terminal.workspace_path,
         "os": res.get("os", terminal.os_type),
@@ -2506,6 +2690,28 @@ async def execute_terminal_command(req: TerminalCommandRequest):
         "stderr": res.get("stderr", ""),
         "passed": res.get("passed", False)
     }
+
+class TerminalAbortRequest(BaseModel):
+    execution_id: Optional[str] = None
+
+@app.post("/api/agent/terminal/abort")
+async def abort_terminal_command(req: Optional[TerminalAbortRequest] = None):
+    """Aborts an active terminal command execution by terminating its process tree."""
+    exec_id = req.execution_id if req else None
+    return TerminalAgent.abort_command(exec_id)
+
+@app.get("/api/agent/terminal/processes")
+async def list_terminal_processes():
+    """Returns metadata for all currently running terminal commands."""
+    return {"processes": TerminalAgent.get_active_processes()}
+
+@app.post("/api/agent/abort")
+async def abort_agent_execution():
+    """Immediately halts active multi-step agent planning or code synthesis and child processes."""
+    global active_agent_step_cancel
+    active_agent_step_cancel = True
+    TerminalAgent.abort_command()
+    return {"status": "aborted", "timestamp": time.time()}
 
 class RepairRequest(BaseModel):
     task_description: str
@@ -2524,3 +2730,127 @@ class ReviewRequest(BaseModel):
 @app.post("/api/agent/review")
 async def review_changes(req: ReviewRequest):
     return {"status": "success", "task_id": req.task_id, "action": req.decision}
+
+# ---------------------------------------------------------
+# 6. System Lifecycle, Graceful Shutdown & Auto-Reload
+# ---------------------------------------------------------
+@app.post("/api/system/shutdown")
+async def shutdown_system():
+    """Cleanly flushes database WAL buffers, closes connections, and terminates the backend process."""
+    def _do_shutdown():
+        try:
+            if hasattr(graph_store, "db") and graph_store.db:
+                try:
+                    graph_store.db.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                    graph_store.db.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        os._exit(0)
+
+    loop = asyncio.get_event_loop()
+    loop.call_later(0.3, _do_shutdown)
+    return {"status": "shutting_down", "pid": os.getpid(), "message": "Backend server is shutting down cleanly."}
+
+@app.post("/api/system/restart")
+async def restart_system():
+    """Flushes DB buffers and re-executes the backend process cleanly using a detached launcher."""
+    def _do_restart():
+        try:
+            if hasattr(graph_store, "db") and graph_store.db:
+                try:
+                    graph_store.db.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                    graph_store.db.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        import subprocess
+        import sys
+
+        port = 8765
+        for i, arg in enumerate(sys.argv):
+            if arg == "--port" and i + 1 < len(sys.argv):
+                try:
+                    port = int(sys.argv[i + 1])
+                except Exception:
+                    pass
+
+        host = "127.0.0.1"
+        for i, arg in enumerate(sys.argv):
+            if arg == "--host" and i + 1 < len(sys.argv):
+                host = sys.argv[i + 1]
+
+        backend_dir = str(Path(__file__).resolve().parent.parent)
+        cmd = [sys.executable, "-m", "uvicorn", "app.main:app", "--host", host, "--port", str(port)]
+        try:
+            if os.name == "nt":
+                launcher_code = (
+                    f"import time, subprocess; "
+                    f"time.sleep(1.2); "
+                    f"subprocess.Popen({repr(cmd)}, cwd={repr(backend_dir)})"
+                )
+                creation_flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+                subprocess.Popen(
+                    [sys.executable, "-c", launcher_code],
+                    cwd=backend_dir,
+                    creationflags=creation_flags,
+                    close_fds=True
+                )
+            else:
+                launcher_code = (
+                    f"import time, subprocess; "
+                    f"time.sleep(0.8); "
+                    f"subprocess.Popen({repr(cmd)}, cwd={repr(backend_dir)})"
+                )
+                subprocess.Popen(
+                    [sys.executable, "-c", launcher_code],
+                    cwd=backend_dir,
+                    start_new_session=True,
+                    close_fds=True
+                )
+            os._exit(0)
+        except Exception:
+            os._exit(1)
+
+    loop = asyncio.get_event_loop()
+    loop.call_later(0.3, _do_restart)
+    return {"status": "restarting", "pid": os.getpid()}
+
+@app.post("/api/system/reload")
+async def reload_system():
+    """Reloads runtime settings, clears live memory buffers, and refreshes provider configuration."""
+    load_persisted_settings()
+    live_file_buffers.clear()
+    return {
+        "status": "reloaded",
+        "pid": os.getpid(),
+        "runtime_settings": {k: v for k, v in runtime_settings.items() if k != "api_key"},
+        "active_model": ollama_provider.model_name,
+        "host": ollama_provider.base_url
+    }
+
+@app.get("/api/system/processes")
+async def get_system_process_status():
+    """Returns process and health diagnostics for monitoring and auto-recovery."""
+    return {
+        "pid": os.getpid(),
+        "active_terminal_jobs": len(TerminalAgent.get_active_processes()),
+        "terminal_processes": TerminalAgent.get_active_processes(),
+        "indexed_chunks": len(vector_store.chunks),
+        "model": ollama_provider.model_name,
+        "status": "healthy"
+    }
+
+@app.get("/health")
+@app.get("/api/health")
+async def health_check():
+    """Lightweight health check endpoint for processManager and heartbeat watchdog."""
+    return {
+        "status": "healthy",
+        "pid": os.getpid(),
+        "model": ollama_provider.model_name,
+        "version": "0.2.0"
+    }
+

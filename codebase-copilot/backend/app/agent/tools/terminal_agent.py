@@ -2,7 +2,10 @@ import asyncio
 import os
 import platform
 import shutil
+import signal
 import subprocess
+import time
+import uuid
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 try:
@@ -12,6 +15,33 @@ except ModuleNotFoundError:
         from backend.app.security.guardrails import CommandSafetyGuard
     except ModuleNotFoundError:
         from ...security.guardrails import CommandSafetyGuard
+
+# Active process registry for cancellation and abort support
+ACTIVE_TERMINAL_PROCESSES: Dict[str, Dict[str, Any]] = {}
+
+def kill_process_tree(pid: int) -> bool:
+    """Kills a process and all of its child processes cleanly across Windows and POSIX."""
+    if not pid:
+        return False
+    try:
+        if platform.system().lower() == "windows":
+            # Forcefully terminate entire process tree on Windows
+            subprocess.run(
+                ["taskkill", "/pid", str(pid), "/T", "/F"],
+                capture_output=True,
+                timeout=5
+            )
+            return True
+        else:
+            # POSIX: terminate process group
+            try:
+                pgid = os.getpgid(pid)
+                os.killpg(pgid, signal.SIGKILL)
+            except Exception:
+                os.kill(pid, signal.SIGKILL)
+            return True
+    except Exception:
+        return False
 
 class TerminalAgent:
     """
@@ -80,20 +110,23 @@ class TerminalAgent:
         command: str,
         timeout: int = 45,
         security_mode: str = "sandboxed",
-        allow_network: bool = True
+        allow_network: bool = True,
+        execution_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Synchronously executes a terminal command safely within the workspace directory,
         strictly enforcing the selected Security Mode and Network policies.
-        Uses subprocess.run for rock-solid cross-platform reliability without event-loop limitations.
+        Uses subprocess.Popen with process tree tracking for rock-solid cancellation and abort support.
         """
         cmd_clean = command.strip()
+        exec_id = execution_id or str(uuid.uuid4())
 
         # 1. Mode: Strict (Command review & read-only enforcement)
         if security_mode == "strict":
             is_strict_safe = any(cmd_clean.lower().startswith(prefix) for prefix in self.STRICT_SAFE_COMMAND_PREFIXES)
             if not is_strict_safe:
                 return {
+                    "execution_id": exec_id,
                     "exit_code": -1,
                     "stdout": "",
                     "stderr": f"Execution blocked: Strict mode requires explicit review for modifying command '{command}'.",
@@ -108,6 +141,7 @@ class TerminalAgent:
             is_safe, reason = CommandSafetyGuard.validate_command(command, self.os_type)
             if not is_safe:
                 return {
+                    "execution_id": exec_id,
                     "exit_code": -1,
                     "stdout": "",
                     "stderr": f"Execution blocked: {reason}",
@@ -120,6 +154,7 @@ class TerminalAgent:
             if not allow_network:
                 if any(net_cmd in cmd_clean.lower() for net_cmd in self.NETWORK_COMMANDS):
                     return {
+                        "execution_id": exec_id,
                         "exit_code": -1,
                         "stdout": "",
                         "stderr": "Execution blocked: Sandboxed network requests are disabled in settings.",
@@ -129,51 +164,66 @@ class TerminalAgent:
                         "workspace": self.workspace_path
                     }
 
-        # 3. Synchronous Process Invocation via subprocess.run
+        # 3. Process Invocation via subprocess.Popen with execution tracking
+        proc = None
         try:
+            creationflags = 0
             if self.is_windows:
-                # Prefer PowerShell on Windows for robust scripting and POSIX alias parity (ls, dir, cat, etc.)
+                # Creation flag for process group isolation
+                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
                 ps_path = shutil.which("powershell.exe") or "powershell.exe"
                 run_args = [ps_path, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", cmd_clean]
-                proc = subprocess.run(
+                proc = subprocess.Popen(
                     run_args,
                     cwd=self.workspace_path,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
                     encoding="utf-8",
                     errors="replace",
-                    timeout=timeout
+                    creationflags=creationflags
                 )
             else:
-                # Linux & macOS shell runner
                 shell_executable = shutil.which("bash") or "/bin/sh"
-                proc = subprocess.run(
+                proc = subprocess.Popen(
                     cmd_clean,
                     shell=True,
                     executable=shell_executable,
                     cwd=self.workspace_path,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
                     encoding="utf-8",
                     errors="replace",
-                    timeout=timeout
+                    start_new_session=True
                 )
 
-            stdout = proc.stdout or ""
-            stderr = proc.stderr or ""
+            ACTIVE_TERMINAL_PROCESSES[exec_id] = {
+                "process": proc,
+                "pid": proc.pid,
+                "command": cmd_clean,
+                "started_at": time.time(),
+                "workspace": self.workspace_path
+            }
+
+            stdout, stderr = proc.communicate(timeout=timeout)
             exit_code = proc.returncode
 
             return {
+                "execution_id": exec_id,
                 "exit_code": exit_code,
-                "stdout": stdout,
-                "stderr": stderr,
+                "stdout": stdout or "",
+                "stderr": stderr or "",
                 "passed": (exit_code == 0),
                 "os": self.os_type,
                 "workspace": self.workspace_path
             }
 
         except subprocess.TimeoutExpired:
+            if proc and proc.pid:
+                kill_process_tree(proc.pid)
             return {
+                "execution_id": exec_id,
                 "exit_code": -1,
                 "stdout": "",
                 "stderr": f"Command timed out after {timeout} seconds.",
@@ -182,8 +232,11 @@ class TerminalAgent:
                 "workspace": self.workspace_path
             }
         except Exception as e:
+            if proc and proc.pid:
+                kill_process_tree(proc.pid)
             err_msg = str(e) or repr(e) or type(e).__name__
             return {
+                "execution_id": exec_id,
                 "exit_code": -1,
                 "stdout": "",
                 "stderr": f"Process execution error: {err_msg}",
@@ -191,13 +244,16 @@ class TerminalAgent:
                 "os": self.os_type,
                 "workspace": self.workspace_path
             }
+        finally:
+            ACTIVE_TERMINAL_PROCESSES.pop(exec_id, None)
 
     async def run_command(
         self,
         command: str,
         timeout: int = 45,
         security_mode: str = "sandboxed",
-        allow_network: bool = True
+        allow_network: bool = True,
+        execution_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Asynchronously runs command using executor to prevent event loop blocking or Windows asyncio subprocess issues.
@@ -209,8 +265,45 @@ class TerminalAgent:
             command,
             timeout,
             security_mode,
-            allow_network
+            allow_network,
+            execution_id
         )
+
+    @classmethod
+    def abort_command(cls, execution_id: Optional[str] = None) -> Dict[str, Any]:
+        """Aborts an active terminal execution by killing its process tree."""
+        if execution_id:
+            info = ACTIVE_TERMINAL_PROCESSES.get(execution_id)
+            if info:
+                pid = info.get("pid")
+                killed = kill_process_tree(pid)
+                ACTIVE_TERMINAL_PROCESSES.pop(execution_id, None)
+                return {"status": "aborted", "execution_id": execution_id, "pid": pid, "killed": killed}
+            return {"status": "not_found", "execution_id": execution_id}
+        else:
+            killed_count = 0
+            for eid, info in list(ACTIVE_TERMINAL_PROCESSES.items()):
+                pid = info.get("pid")
+                if pid:
+                    kill_process_tree(pid)
+                    killed_count += 1
+            ACTIVE_TERMINAL_PROCESSES.clear()
+            return {"status": "all_aborted", "count": killed_count}
+
+    @classmethod
+    def get_active_processes(cls) -> List[Dict[str, Any]]:
+        """Returns metadata for all currently running terminal commands."""
+        now = time.time()
+        results = []
+        for eid, info in ACTIVE_TERMINAL_PROCESSES.items():
+            results.append({
+                "execution_id": eid,
+                "pid": info.get("pid"),
+                "command": info.get("command"),
+                "workspace": info.get("workspace"),
+                "duration_seconds": round(now - info.get("started_at", now), 2)
+            })
+        return results
 
     async def run_tests(self) -> Dict[str, Any]:
         """Auto-detects and runs available test runners with OS compatibility."""
