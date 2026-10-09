@@ -202,12 +202,16 @@ export class ServerProcessManager {
         this.outputChannel.appendLine(`[Sidecar] Launching Python backend from ${backendDir} on port ${chosenPort}...`);
 
         try {
-            const pythonCmd = this.findPythonExecutable(backendDir);
-            this.outputChannel.appendLine(`[Sidecar] Using Python executable: ${pythonCmd}`);
-            const env = {
+            const activeWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+            const env: Record<string, string | undefined> = {
                 ...process.env,
                 CLAY_SESSION_TOKEN: this.getSessionToken()
             };
+            if (activeWorkspace) {
+                env.WORKSPACE_ROOT = activeWorkspace;
+            }
+            const pythonCmd = this.findPythonExecutable(backendDir);
+            this.outputChannel.appendLine(`[Sidecar] Using Python executable: ${pythonCmd}`);
             this.process = cp.spawn(
                 pythonCmd,
                 ['-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', chosenPort.toString()],

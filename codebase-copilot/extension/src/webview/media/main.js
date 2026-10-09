@@ -1512,7 +1512,19 @@
   }
 
   function stopChatGeneration(notifyHost = true) {
+    flushStreamRender();
     if (!isChatStreaming) return;
+
+    if (currentAssistantTextEl && accumulatedRawText) {
+      const thinkOpenMatch = accumulatedRawText.match(/<(?:think|thinking)>/i);
+      const thinkCloseMatch = accumulatedRawText.match(/<\/(?:think|thinking)>/i);
+      if (thinkOpenMatch && thinkCloseMatch) {
+        const answerText = accumulatedRawText.slice(thinkCloseMatch.index + thinkCloseMatch[0].length).trimStart();
+        currentAssistantTextEl.innerHTML = formatMarkdown(answerText);
+      } else if (!thinkOpenMatch) {
+        currentAssistantTextEl.innerHTML = formatMarkdown(accumulatedRawText);
+      }
+    }
 
     if (notifyHost && isVsCode) {
       vscode.postMessage({ command: 'stopChat' });
@@ -2178,6 +2190,8 @@
   }
 
   function createAssistantCard(pinnedList = [], promptText = '') {
+    flushStreamRender();
+    accumulatedRawText = '';
     hideChatEmptyState();
     resetActiveThinkingState();
 
@@ -2219,6 +2233,44 @@
   }
 
   let accumulatedRawText = '';
+  let streamRenderRafId = null;
+  let isStreamRenderPending = false;
+
+  function renderStreamFrame() {
+    isStreamRenderPending = false;
+    streamRenderRafId = null;
+    if (!currentAssistantTextEl) return;
+
+    const thinkOpenMatch = accumulatedRawText.match(/<(?:think|thinking)>/i);
+    const thinkCloseMatch = accumulatedRawText.match(/<\/(?:think|thinking)>/i);
+
+    if (thinkOpenMatch) {
+      if (!thinkCloseMatch) {
+        currentAssistantTextEl.innerHTML = '<span class="streaming-cursor"></span>';
+      } else {
+        const answerText = accumulatedRawText.slice(thinkCloseMatch.index + thinkCloseMatch[0].length).trimStart();
+        currentAssistantTextEl.innerHTML = formatMarkdown(answerText) + '<span class="streaming-cursor"></span>';
+      }
+    } else {
+      currentAssistantTextEl.innerHTML = formatMarkdown(accumulatedRawText) + '<span class="streaming-cursor"></span>';
+    }
+    scrollChatToBottom();
+  }
+
+  function scheduleStreamRender() {
+    if (!isStreamRenderPending) {
+      isStreamRenderPending = true;
+      streamRenderRafId = requestAnimationFrame(renderStreamFrame);
+    }
+  }
+
+  function flushStreamRender() {
+    if (streamRenderRafId) {
+      cancelAnimationFrame(streamRenderRafId);
+      streamRenderRafId = null;
+    }
+    isStreamRenderPending = false;
+  }
 
   function appendStreamToken(token) {
     if (!currentAssistantTextEl) return;
@@ -2280,8 +2332,7 @@
           }
         }
 
-        currentAssistantTextEl.innerHTML = '<span class="streaming-cursor"></span>';
-        scrollChatToBottom();
+        scheduleStreamRender();
         return;
       } else {
         // Thinking tag closed!
@@ -2301,9 +2352,7 @@
           activeThinkingState.thoughtPreEl.textContent = thoughts;
         }
 
-        const answerText = accumulatedRawText.slice(thinkCloseMatch.index + thinkCloseMatch[0].length).trimStart();
-        currentAssistantTextEl.innerHTML = formatMarkdown(answerText) + '<span class="streaming-cursor"></span>';
-        scrollChatToBottom();
+        scheduleStreamRender();
         return;
       }
     }
@@ -2317,11 +2366,11 @@
     }
 
     // Default: normal markdown stream without think block
-    currentAssistantTextEl.innerHTML = formatMarkdown(accumulatedRawText) + '<span class="streaming-cursor"></span>';
-    scrollChatToBottom();
+    scheduleStreamRender();
   }
 
   function onStreamFinished(fullText, citations) {
+    flushStreamRender();
     setChatGeneratingState(false);
     if (activeThinkingState.isInsideThinking) {
       finishThinkingDrawer(false);
@@ -7169,6 +7218,9 @@
   function formatMarkdown(text) {
     if (!text) return '';
 
+    // Cleanly strip any legacy or model-emitted bare [plan] header at the start
+    text = text.replace(/^\s*\[(?:plan|PLAN)\]\s*\r?\n?/, '');
+
     // 1. Stash and protect complete or streaming code blocks
     const codeBlocks = [];
 
@@ -7271,6 +7323,8 @@
     function formatInline(str) {
       if (!str) return '';
       let s = escapeHtml(str);
+      // Allow safe HTML line breaks (e.g. from table cells or markdown <br>, <br/>, <br />)
+      s = s.replace(/&lt;br\s*\/?&gt;/gi, '<br/>');
       // Inline code `...`
       s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
       // Bold **...**

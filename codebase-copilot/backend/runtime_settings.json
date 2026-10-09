@@ -4,7 +4,7 @@
   "privacy_filter": true,
   "exclusion_patterns": ".env, *.pem, credentials.json, id_rsa, *.key",
   "connection_type": "local",
-  "repo_path": "C:\\Users\\igautam\\Desktop\\CLAY-copilot",
+  "repo_path": "C:\\Users\\igautam\\Desktop\\q_path",
   "model": "gpt-oss:120b-cloud",
   "host": "http://127.0.0.1:11434",
   "temperature": 0.2,

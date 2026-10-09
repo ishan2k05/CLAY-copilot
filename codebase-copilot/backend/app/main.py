@@ -169,7 +169,7 @@ app.add_middleware(
 
 # Core subsystems
 graph_store = SQLiteGraphStore("code_graph.sqlite")
-vector_store = LocalVectorStore()
+vector_store = LocalVectorStore(db_path="code_graph.sqlite")
 ast_chunker = UniversalASTChunker()
 ollama_provider = OllamaGemmaProvider()
 hybrid_engine = HybridSearchEngine(vector_store, graph_store)
@@ -280,6 +280,9 @@ def is_path_in_workspace(target_path: Optional[Union[str, Path]], workspace_dir:
 active_chat_stream_cancel: bool = False
 active_agent_step_cancel: bool = False
 
+live_file_buffers: Dict[str, str] = {}
+workspace_file_states: Dict[str, Tuple[float, int]] = {}
+
 async def auto_index_workspace(workspace_dir: str) -> Dict[str, int]:
     """
     Auto-indexes workspace files into SQLite symbol graph and vector store.
@@ -296,6 +299,7 @@ async def auto_index_workspace(workspace_dir: str) -> Dict[str, int]:
     # 1. Reset vector store chunks and graph store for fresh repository context
     vector_store.chunks = []
     vector_store.chunk_embeddings = None
+    workspace_file_states.clear()
     await graph_store.clear_all()
 
     all_symbols = []
@@ -329,11 +333,13 @@ async def auto_index_workspace(workspace_dir: str) -> Dict[str, int]:
         if SecretMasker.is_file_sensitive(str(path)):
             continue
         try:
+            st = path.stat()
             content = path.read_text(encoding="utf-8", errors="ignore")
             symbols, relationships, chunks = ast_chunker.parse_file(str(path), content)
             all_symbols.extend(symbols)
             all_relationships.extend(relationships)
             all_chunks.extend(chunks)
+            workspace_file_states[str(path.resolve())] = (st.st_mtime, st.st_size)
             indexed_files += 1
         except Exception:
             continue
@@ -350,9 +356,6 @@ async def auto_index_workspace(workspace_dir: str) -> Dict[str, int]:
         "relationshipsCount": len(all_relationships),
         "chunksCount": len(all_chunks)
     }
-
-live_file_buffers: Dict[str, str] = {}
-workspace_file_states: Dict[str, Tuple[float, int]] = {}
 
 async def reindex_file(file_path: str, content: Optional[str] = None) -> bool:
     """
@@ -512,11 +515,19 @@ async def silent_sync_endpoint(workspace_path: Optional[str] = None):
         "tracked_files": len(workspace_file_states)
     }
 
+async def _background_startup_index():
+    try:
+        if len(vector_store.chunks) == 0:
+            logger.info(f"Starting non-blocking background workspace indexing for: {DEFAULT_WORKSPACE}")
+            await auto_index_workspace(DEFAULT_WORKSPACE)
+            logger.info("Background workspace indexing complete.")
+    except Exception as e:
+        logger.warning(f"Background startup indexing error: {e}")
+
 @app.on_event("startup")
 async def on_startup():
     await graph_store.init_db()
-    if len(vector_store.chunks) == 0:
-        await auto_index_workspace(DEFAULT_WORKSPACE)
+    asyncio.create_task(_background_startup_index())
 
 @app.get("/health")
 async def health_check():
