@@ -168,8 +168,16 @@ app.add_middleware(
 )
 
 # Core subsystems
-graph_store = SQLiteGraphStore("code_graph.sqlite")
-vector_store = LocalVectorStore(db_path="code_graph.sqlite")
+WORKSPACE_STORAGE_DIR = os.getenv("CLAY_WORKSPACE_STORAGE_DIR")
+if WORKSPACE_STORAGE_DIR:
+    STORAGE_PATH = Path(WORKSPACE_STORAGE_DIR)
+    STORAGE_PATH.mkdir(parents=True, exist_ok=True)
+    GRAPH_DB_PATH = str(STORAGE_PATH / "code_graph.sqlite")
+else:
+    GRAPH_DB_PATH = "code_graph.sqlite"
+
+graph_store = SQLiteGraphStore(GRAPH_DB_PATH)
+vector_store = LocalVectorStore(db_path=GRAPH_DB_PATH)
 ast_chunker = UniversalASTChunker()
 ollama_provider = OllamaGemmaProvider()
 hybrid_engine = HybridSearchEngine(vector_store, graph_store)
@@ -208,9 +216,9 @@ def resolve_workspace_path(path_str: Optional[str]) -> Path:
     """
     Intelligently resolves workspace directory paths.
     Handles:
-    - Absolute paths (e.g. /home/ishan/Desktop/Clay test)
-    - Tilde paths (e.g. ~/Desktop/Clay test)
-    - Bare folder names from browser directory pickers (e.g. "Clay test")
+    - Absolute paths (e.g. /path/to/my-project or C:/Users/name/my-project)
+    - Tilde paths (e.g. ~/my-project)
+    - Bare folder names from browser directory pickers (e.g. "my-project")
       searches: Desktop, home, Documents, Downloads, scratch directory
     - Fallback to current runtime repo_path or DEFAULT_WORKSPACE
     """
@@ -556,7 +564,14 @@ async def get_ollama_status():
     status["host"] = ollama_provider.base_url
     return status
 
-SETTINGS_FILE = Path(__file__).resolve().parent.parent / "runtime_settings.json"
+GLOBAL_DATA_DIR = os.getenv("CLAY_GLOBAL_DATA_DIR")
+if GLOBAL_DATA_DIR:
+    SETTINGS_DIR = Path(GLOBAL_DATA_DIR)
+else:
+    SETTINGS_DIR = Path(__file__).resolve().parent.parent
+
+SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+SETTINGS_FILE = SETTINGS_DIR / "runtime_settings.json"
 
 runtime_settings = {
     "security_mode": "sandboxed",
@@ -569,9 +584,14 @@ runtime_settings = {
 }
 
 def load_persisted_settings():
-    if SETTINGS_FILE.exists():
+    target_file = SETTINGS_FILE
+    if not target_file.exists():
+        fallback = Path(__file__).resolve().parent.parent / "runtime_settings.json"
+        if fallback.exists():
+            target_file = fallback
+    if target_file.exists():
         try:
-            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            data = json.loads(target_file.read_text(encoding="utf-8"))
             for k, v in data.items():
                 runtime_settings[k] = v
             if "temperature" in data:

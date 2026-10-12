@@ -76,6 +76,13 @@ dist/
 *.vsix
 .vscode-test/
 
+# Executables & Native Binary Artifacts
+*.exe
+*.dll
+*.pyd
+bin/
+**/bin/
+
 # --- Environment & Secret Management ---
 # Prevent committing credentials and secrets
 .env

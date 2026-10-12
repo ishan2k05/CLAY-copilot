@@ -11,7 +11,7 @@ export async function activate(context: vscode.ExtensionContext) {
     serverManager = new ServerProcessManager();
     const config = vscode.workspace.getConfiguration('codebaseCopilot');
     const configuredUrl = config.get<string>('backendUrl');
-    await serverManager.startServer(context.extensionPath, configuredUrl);
+    await serverManager.startServer(context.extensionPath, configuredUrl, context);
 
     const backendClient = new BackendClient();
     backendClient.setSessionToken(serverManager.getSessionToken());

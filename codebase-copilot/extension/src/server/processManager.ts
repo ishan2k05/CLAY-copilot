@@ -14,9 +14,14 @@ export class ServerProcessManager {
     private heartbeatInterval: NodeJS.Timeout | null = null;
     private isRestarting: boolean = false;
     private sessionToken: string = '';
+    private context: vscode.ExtensionContext | null = null;
 
     constructor() {
         this.outputChannel = vscode.window.createOutputChannel('CLAY Copilot Server');
+    }
+
+    public setContext(context: vscode.ExtensionContext): void {
+        this.context = context;
     }
 
     public getActivePort(): number {
@@ -158,11 +163,45 @@ export class ServerProcessManager {
         return isWin ? 'python' : 'python3';
     }
 
+    private getServerExecutable(extensionPath: string): { cmd: string; args: string[]; cwd: string; isBinary: boolean } {
+        const isWin = process.platform === 'win32';
+        const binaryName = isWin ? 'clay-server.exe' : 'clay-server';
+        const bundledBinary = path.join(extensionPath, 'bin', binaryName);
+
+        if (fs.existsSync(bundledBinary)) {
+            if (!isWin) {
+                try { fs.chmodSync(bundledBinary, 0o755); } catch {}
+            }
+            this.outputChannel.appendLine(`[Sidecar] Found bundled production binary: ${bundledBinary}`);
+            return {
+                cmd: bundledBinary,
+                args: [],
+                cwd: path.dirname(bundledBinary),
+                isBinary: true
+            };
+        }
+
+        // Developer mode: fallback to local Python in backend directory
+        const backendDir = path.resolve(extensionPath, '..', 'backend');
+        const pythonCmd = this.findPythonExecutable(backendDir);
+        this.outputChannel.appendLine(`[Sidecar] Dev Mode: using local Python: ${pythonCmd}`);
+        return {
+            cmd: pythonCmd,
+            args: ['-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1'],
+            cwd: backendDir,
+            isBinary: false
+        };
+    }
+
     /**
      * Attempts to start the FastAPI backend sidecar process automatically,
      * dynamically binding to an available port if the default is in use.
      */
-    async startServer(extensionPath: string, configuredUrl?: string): Promise<boolean> {
+    async startServer(extensionPath: string, configuredUrl?: string, context?: vscode.ExtensionContext): Promise<boolean> {
+        if (context) {
+            this.context = context;
+        }
+
         let targetPort = 8765;
         if (configuredUrl) {
             try {
@@ -198,24 +237,36 @@ export class ServerProcessManager {
         this.activePort = chosenPort;
         this.activeUrl = `http://127.0.0.1:${chosenPort}`;
 
-        const backendDir = path.resolve(extensionPath, '..', 'backend');
-        this.outputChannel.appendLine(`[Sidecar] Launching Python backend from ${backendDir} on port ${chosenPort}...`);
+        const globalStorage = this.context?.globalStorageUri.fsPath || path.join(os.homedir(), '.clay');
+        const activeWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        const workspaceStorage = this.context?.storageUri?.fsPath || (activeWorkspace ? path.join(activeWorkspace, '.clay') : globalStorage);
+
+        try { fs.mkdirSync(globalStorage, { recursive: true }); } catch {}
+        try { fs.mkdirSync(workspaceStorage, { recursive: true }); } catch {}
+
+        this.outputChannel.appendLine(`[Sidecar] Storage configured: Global=${globalStorage}, Workspace=${workspaceStorage}`);
 
         try {
-            const activeWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
             const env: Record<string, string | undefined> = {
                 ...process.env,
-                CLAY_SESSION_TOKEN: this.getSessionToken()
+                CLAY_SESSION_TOKEN: this.getSessionToken(),
+                CLAY_GLOBAL_DATA_DIR: globalStorage,
+                CLAY_WORKSPACE_STORAGE_DIR: workspaceStorage,
+                CLAY_PORT: chosenPort.toString(),
+                CLAY_HOST: '127.0.0.1'
             };
             if (activeWorkspace) {
                 env.WORKSPACE_ROOT = activeWorkspace;
             }
-            const pythonCmd = this.findPythonExecutable(backendDir);
-            this.outputChannel.appendLine(`[Sidecar] Using Python executable: ${pythonCmd}`);
+
+            const serverExec = this.getServerExecutable(extensionPath);
+            const spawnArgs = [...serverExec.args, '--port', chosenPort.toString()];
+            this.outputChannel.appendLine(`[Sidecar] Spawning backend from ${serverExec.cwd}: ${serverExec.cmd} ${spawnArgs.join(' ')}`);
+
             this.process = cp.spawn(
-                pythonCmd,
-                ['-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', chosenPort.toString()],
-                { cwd: backendDir, detached: process.platform !== 'win32', env }
+                serverExec.cmd,
+                spawnArgs,
+                { cwd: serverExec.cwd, detached: process.platform !== 'win32', env }
             );
 
             this.process.stdout?.on('data', (data) => {
@@ -316,7 +367,7 @@ export class ServerProcessManager {
             // 2. Fallback: Stop existing process and spawn fresh instance
             await this.stopServer();
             await new Promise((r) => setTimeout(r, 800));
-            const started = await this.startServer(extensionPath, configuredUrl);
+            const started = await this.startServer(extensionPath, configuredUrl, this.context || undefined);
 
             // Wait up to 10 seconds for health check
             if (started) {

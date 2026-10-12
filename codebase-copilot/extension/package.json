@@ -4,6 +4,15 @@
   "description": "Repository Intelligence & Autonomous Coding Agent powered by Cloud Gemma 4 (31B)",
   "version": "0.1.0",
   "publisher": "codebase-copilot",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ishan2k05/CLAY-copilot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ishan2k05/CLAY-copilot/issues"
+  },
+  "homepage": "https://github.com/ishan2k05/CLAY-copilot#readme",
   "engines": {
     "vscode": "^1.88.0"
   },
@@ -81,7 +90,8 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "lint": "eslint src --ext ts"
+    "lint": "eslint src --ext ts",
+    "package:win32": "npm run compile && npx @vscode/vsce package --target win32-x64 -o codebase-copilot-win32-x64.vsix"
   },
   "devDependencies": {
     "@types/node": "^20.x",

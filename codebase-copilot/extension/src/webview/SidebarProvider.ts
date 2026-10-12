@@ -259,10 +259,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 case 'abortChatGeneration': {
-                    this._backendClient.stopStreamChat();
-                    try {
-                        await this._backendClient.fetchWithAuth(`${this._backendClient.getBackendUrl()}/api/chat/abort`, { method: 'POST' }).catch(() => {});
-                    } catch {}
+                    await this._backendClient.stopStreamChat();
                     break;
                 }
                 case 'abortAgentExecution': {
@@ -1155,7 +1152,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     </svg>
                 </div>
                 <div class="empty-state-title">CLAY Copilot</div>
-                <div class="empty-state-desc">Autonomous repository agent & surgical engineering copilot. Running on <strong id="welcome-model-text">gemma4:31b-cloud</strong>.</div>
             </div>
         </div>
     </div>

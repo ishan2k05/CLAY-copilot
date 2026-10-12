@@ -7790,14 +7790,31 @@
     panStartScrollLeft = viewport.scrollLeft;
     panStartScrollTop = viewport.scrollTop;
     viewport.classList.add('is-panning');
+
+    // Prevent default browser text selection from starting inside the diagram viewport
+    e.preventDefault();
+    if (window.getSelection) {
+      window.getSelection().removeAllRanges();
+    }
   });
 
   window.addEventListener('mousemove', (e) => {
     if (!activePanViewport) return;
+    // Suppress any stray text selection while dragging/panning
+    if (window.getSelection && window.getSelection().rangeCount > 0) {
+      window.getSelection().removeAllRanges();
+    }
     const dx = e.pageX - panStartX;
     const dy = e.pageY - panStartY;
     activePanViewport.scrollLeft = panStartScrollLeft - dx;
     activePanViewport.scrollTop = panStartScrollTop - dy;
+  });
+
+  // Prevent browser native ghost drag of SVG or text elements inside mermaid diagrams
+  document.addEventListener('dragstart', (e) => {
+    if (e.target.closest('.mermaid-diagram-viewport')) {
+      e.preventDefault();
+    }
   });
 
   // Delegated click listener for interactive Call Hierarchy symbols in Repo tab

@@ -73,7 +73,7 @@ export class BackendClient {
         return this.sessionToken;
     }
 
-    private async fetchWithAuth(url: string, init: RequestInit = {}): Promise<Response> {
+    public async fetchWithAuth(url: string, init: RequestInit = {}): Promise<Response> {
         const headers: Record<string, string> = {
             ...((init.headers as Record<string, string>) || {})
         };

@@ -1392,9 +1392,24 @@ body.claude-dark .clay-chat-li {
 .btn-run-in-agent,
 .mermaid-diagram-card,
 .mermaid-diagram-header,
-.mermaid-diagram-viewport {
+.mermaid-diagram-viewport,
+.mermaid-diagram-viewport *,
+.mermaid-viewport-inner,
+.mermaid-viewport-inner *,
+.mermaid-diagram-canvas,
+.mermaid-diagram-canvas *,
+.mermaid-svg,
+.mermaid-svg *,
+.mermaid-node-item,
+.mermaid-node-item *,
+.mermaid-edge-group,
+.mermaid-edge-group *,
+.mermaid-subgraph,
+.mermaid-subgraph * {
   user-select: none !important;
   -webkit-user-select: none !important;
+  -moz-user-select: none !important;
+  -ms-user-select: none !important;
 }
 
 /* Horizontal Rule */
@@ -2346,13 +2361,7 @@ body.claude-dark .ambiguity-chip:hover .ambiguity-chip-badge {
 }
 
 .empty-state-desc {
-  font-size: 11px;
-  color: var(--text-secondary);
-  max-width: 260px;
-  margin: 0 auto;
-  line-height: 1.45;
-  text-align: center;
-  width: 100%;
+  display: none !important;
 }
 
 /* Bottom Chat Input Form (Rounder, Cleared, Modern) */
@@ -5749,7 +5758,7 @@ body.vscode-native .empty-state-title {
 }
 
 body.vscode-native .empty-state-desc {
-  color: var(--vscode-descriptionForeground, #888888);
+  display: none !important;
 }
 
 /* ==========================================================================
@@ -6149,6 +6158,37 @@ body.claude-light #seq-arrow path {
   filter: drop-shadow(0 0 8px rgba(249, 115, 22, 0.5));
 }
 
+/* Specifically prevent text lines inside mermaid SVGs from capturing selection or cursor */
+.mermaid-diagram-viewport text,
+.mermaid-diagram-viewport tspan,
+.mermaid-diagram-canvas text,
+.mermaid-diagram-canvas tspan,
+.mermaid-svg text,
+.mermaid-svg tspan {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  -moz-user-select: none !important;
+  -ms-user-select: none !important;
+  cursor: grab !important;
+  pointer-events: none !important;
+}
+
+.mermaid-diagram-viewport.is-panning text,
+.mermaid-diagram-viewport.is-panning tspan {
+  cursor: grabbing !important;
+}
+
+/* Suppress text selection highlight boxes inside the mermaid diagram viewport */
+.mermaid-diagram-viewport ::selection,
+.mermaid-diagram-viewport *::selection,
+.mermaid-diagram-canvas ::selection,
+.mermaid-diagram-canvas *::selection,
+.mermaid-svg ::selection,
+.mermaid-svg *::selection {
+  background: transparent !important;
+  color: inherit !important;
+}
+
 .mermaid-code-fallback {
   padding: 0;
 }
@@ -6157,6 +6197,28 @@ body.claude-light #seq-arrow path {
   margin: 0;
   border: none;
   border-radius: 0;
+}
+
+/* Keep raw code view in Mermaid Code tab fully selectable */
+.mermaid-code-fallback,
+.mermaid-code-fallback *,
+.mermaid-code-fallback pre,
+.mermaid-code-fallback code {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  pointer-events: auto !important;
+}
+
+.mermaid-code-fallback ::selection,
+.mermaid-code-fallback *::selection {
+  background: rgba(204, 107, 73, 0.3) !important;
+  color: inherit !important;
+}
+
+body.claude-dark .mermaid-code-fallback ::selection,
+body.claude-dark .mermaid-code-fallback *::selection {
+  background: rgba(217, 119, 87, 0.4) !important;
+  color: #FFFFFF !important;
 }
 
 /* VS Code Explicit Light Theme Overrides (Only when NOT in CLAY Dark Mode) */

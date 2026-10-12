@@ -1,0 +1,9 @@
+.vscode/**
+src/**
+tsconfig.json
+**/*.map
+.gitignore
+*.vsix
+preview.html
+backend/**
+!bin/clay-server.exe
