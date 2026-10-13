@@ -24,6 +24,7 @@ else:
         sys.path.insert(0, current_dir)
 
 import uvicorn
+from app.main import app as fastapi_app
 
 def main():
     parser = argparse.ArgumentParser(description="CLAY Copilot Backend Server")
@@ -34,7 +35,7 @@ def main():
 
     print(f"[CLAY Runner] Starting CLAY Copilot FastAPI Server on http://{args.host}:{args.port}")
     uvicorn.run(
-        "app.main:app",
+        fastapi_app,
         host=args.host,
         port=args.port,
         log_level=args.log_level,

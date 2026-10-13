@@ -15,6 +15,7 @@ export class ServerProcessManager {
     private isRestarting: boolean = false;
     private sessionToken: string = '';
     private context: vscode.ExtensionContext | null = null;
+    private isProcessOwner: boolean = false;
 
     constructor() {
         this.outputChannel = vscode.window.createOutputChannel('CLAY Copilot Server');
@@ -22,6 +23,10 @@ export class ServerProcessManager {
 
     public setContext(context: vscode.ExtensionContext): void {
         this.context = context;
+    }
+
+    public getIsProcessOwner(): boolean {
+        return this.isProcessOwner;
     }
 
     public getActivePort(): number {
@@ -194,65 +199,91 @@ export class ServerProcessManager {
     }
 
     /**
-     * Attempts to start the FastAPI backend sidecar process automatically,
-     * dynamically binding to an available port if the default is in use.
+     * Checks if a backend on the given port is responsive and whether it matches the target workspace.
      */
-    async startServer(extensionPath: string, configuredUrl?: string, context?: vscode.ExtensionContext): Promise<boolean> {
-        if (context) {
-            this.context = context;
-        }
-
-        let targetPort = 8765;
-        if (configuredUrl) {
-            try {
-                const parsed = new URL(configuredUrl);
-                if (parsed.port) {
-                    targetPort = parseInt(parsed.port, 10);
-                }
-            } catch {}
-        }
-
-        // 1. Check if an active responsive server is already running on the target port
+    private async checkServerWorkspaceMatch(
+        port: number,
+        activeWorkspace: string,
+        isCustomConfigured: boolean
+    ): Promise<{ responsive: boolean; sameWorkspace: boolean; serverWorkspace: string }> {
         try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 1200);
-            const res = await fetch(`http://127.0.0.1:${targetPort}/health`, { signal: controller.signal });
-            clearTimeout(timeoutId);
-            if (res.ok) {
-                this.activePort = targetPort;
-                this.activeUrl = `http://127.0.0.1:${targetPort}`;
-                this.outputChannel.appendLine(`[Sidecar] Backend is already running and responsive on port ${targetPort}.`);
-                return true;
+            const token = this.getSessionToken();
+            const headers: Record<string, string> = {};
+            if (token) {
+                headers['X-Clay-Auth-Token'] = token;
             }
-        } catch {}
 
-        // 2. If port is occupied by an unresponsive/zombie process, attempt to reclaim it
-        let chosenPort = targetPort;
-        const reclaimed = await this.reclaimPort(targetPort);
-        if (!reclaimed) {
-            this.outputChannel.appendLine(`[Sidecar] Port ${targetPort} could not be reclaimed. Searching for open port...`);
-            chosenPort = await this.findAvailablePort(targetPort + 1, targetPort + 20);
+            const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal, headers });
+            clearTimeout(timeoutId);
+            if (!res.ok) {
+                return { responsive: false, sameWorkspace: false, serverWorkspace: '' };
+            }
+
+            let healthData: any = null;
+            try {
+                healthData = await res.json();
+            } catch {}
+
+            // 1. If /health provides workspace directly
+            if (healthData && typeof healthData.workspace === 'string' && healthData.workspace.trim()) {
+                const sWs = healthData.workspace.trim();
+                if (activeWorkspace) {
+                    const isSame = path.resolve(activeWorkspace).toLowerCase() === path.resolve(sWs).toLowerCase();
+                    return { responsive: true, sameWorkspace: isSame, serverWorkspace: sWs };
+                }
+                return { responsive: true, sameWorkspace: false, serverWorkspace: sWs };
+            }
+
+            // 2. Query /api/system/info for workspace metadata
+            try {
+                const infoController = new AbortController();
+                const infoTimeoutId = setTimeout(() => infoController.abort(), 1200);
+                const infoRes = await fetch(`http://127.0.0.1:${port}/api/system/info`, {
+                    signal: infoController.signal,
+                    headers
+                });
+                clearTimeout(infoTimeoutId);
+                if (infoRes.ok) {
+                    const infoData = await infoRes.json() as any;
+                    const sWs = (infoData?.workspace || '').trim();
+                    if (activeWorkspace && sWs) {
+                        const isSame = path.resolve(activeWorkspace).toLowerCase() === path.resolve(sWs).toLowerCase();
+                        return { responsive: true, sameWorkspace: isSame, serverWorkspace: sWs };
+                    } else if (!activeWorkspace && !sWs) {
+                        return { responsive: true, sameWorkspace: true, serverWorkspace: '' };
+                    }
+                    return { responsive: true, sameWorkspace: false, serverWorkspace: sWs };
+                }
+            } catch {}
+
+            // If responsive but workspace could not be verified:
+            // If custom port was explicitly requested, attach to it;
+            // Otherwise, if this window has an active workspace, do not risk cross-talk.
+            return { responsive: true, sameWorkspace: isCustomConfigured, serverWorkspace: '' };
+        } catch {
+            return { responsive: false, sameWorkspace: false, serverWorkspace: '' };
         }
+    }
 
-        this.activePort = chosenPort;
-        this.activeUrl = `http://127.0.0.1:${chosenPort}`;
-
-        const globalStorage = this.context?.globalStorageUri.fsPath || path.join(os.homedir(), '.clay');
-        const activeWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-        const workspaceStorage = this.context?.storageUri?.fsPath || (activeWorkspace ? path.join(activeWorkspace, '.clay') : globalStorage);
-
-        try { fs.mkdirSync(globalStorage, { recursive: true }); } catch {}
-        try { fs.mkdirSync(workspaceStorage, { recursive: true }); } catch {}
-
-        this.outputChannel.appendLine(`[Sidecar] Storage configured: Global=${globalStorage}, Workspace=${workspaceStorage}`);
-
+    /**
+     * Spawns the sidecar executable or local python on the designated port.
+     */
+    private spawnBackendProcess(
+        extensionPath: string,
+        port: number,
+        globalStorage: string,
+        workspaceStorage: string,
+        activeWorkspace: string
+    ): boolean {
         try {
             const env: Record<string, string | undefined> = {
                 ...process.env,
                 CLAY_SESSION_TOKEN: this.getSessionToken(),
                 CLAY_GLOBAL_DATA_DIR: globalStorage,
                 CLAY_WORKSPACE_STORAGE_DIR: workspaceStorage,
-                CLAY_PORT: chosenPort.toString(),
+                CLAY_PORT: port.toString(),
                 CLAY_HOST: '127.0.0.1'
             };
             if (activeWorkspace) {
@@ -260,7 +291,7 @@ export class ServerProcessManager {
             }
 
             const serverExec = this.getServerExecutable(extensionPath);
-            const spawnArgs = [...serverExec.args, '--port', chosenPort.toString()];
+            const spawnArgs = [...serverExec.args, '--port', port.toString()];
             this.outputChannel.appendLine(`[Sidecar] Spawning backend from ${serverExec.cwd}: ${serverExec.cmd} ${spawnArgs.join(' ')}`);
 
             this.process = cp.spawn(
@@ -268,6 +299,7 @@ export class ServerProcessManager {
                 spawnArgs,
                 { cwd: serverExec.cwd, detached: process.platform !== 'win32', env }
             );
+            this.isProcessOwner = true;
 
             this.process.stdout?.on('data', (data) => {
                 this.outputChannel.append(`[Server] ${data.toString()}`);
@@ -280,21 +312,94 @@ export class ServerProcessManager {
             this.process.on('close', (code) => {
                 this.outputChannel.appendLine(`[Sidecar] Server process exited with code ${code}`);
                 this.process = null;
+                this.isProcessOwner = false;
             });
 
             return true;
         } catch (err: any) {
-            this.outputChannel.appendLine(`[Sidecar] Failed to start backend: ${err.message}`);
+            this.outputChannel.appendLine(`[Sidecar] Failed to start backend on port ${port}: ${err.message}`);
+            this.isProcessOwner = false;
             return false;
         }
     }
 
     /**
+     * Attempts to start the FastAPI backend sidecar process automatically,
+     * dynamically isolating ports per window/workspace to prevent multi-instance cross-talk.
+     */
+    async startServer(extensionPath: string, configuredUrl?: string, context?: vscode.ExtensionContext): Promise<boolean> {
+        if (context) {
+            this.context = context;
+        }
+
+        let defaultPort = 8765;
+        let isCustomConfigured = false;
+        if (configuredUrl && configuredUrl !== 'http://127.0.0.1:8765' && configuredUrl !== 'http://localhost:8765') {
+            try {
+                const parsed = new URL(configuredUrl);
+                if (parsed.port) {
+                    defaultPort = parseInt(parsed.port, 10);
+                    isCustomConfigured = true;
+                }
+            } catch {}
+        }
+
+        const activeWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        const globalStorage = this.context?.globalStorageUri.fsPath || path.join(os.homedir(), '.clay');
+        const workspaceStorage = this.context?.storageUri?.fsPath || (activeWorkspace ? path.join(activeWorkspace, '.clay') : globalStorage);
+
+        try { fs.mkdirSync(globalStorage, { recursive: true }); } catch {}
+        try { fs.mkdirSync(workspaceStorage, { recursive: true }); } catch {}
+
+        this.outputChannel.appendLine(`[Sidecar] Storage configured: Global=${globalStorage}, Workspace=${workspaceStorage}`);
+
+        // 1. If user explicitly configured a custom backendUrl setting, test and attach or spawn there
+        if (isCustomConfigured) {
+            const check = await this.checkServerWorkspaceMatch(defaultPort, activeWorkspace, true);
+            if (check.responsive) {
+                this.activePort = defaultPort;
+                this.activeUrl = `http://127.0.0.1:${defaultPort}`;
+                this.isProcessOwner = false;
+                this.outputChannel.appendLine(`[Sidecar] Attached to custom configured backend on port ${defaultPort}.`);
+                return true;
+            }
+            return this.spawnBackendProcess(extensionPath, defaultPort, globalStorage, workspaceStorage, activeWorkspace);
+        }
+
+        // 2. Multi-instance isolation: Check if any running server across candidate ports (8765..8785)
+        // already belongs to THIS exact workspace folder.
+        for (let p = defaultPort; p <= defaultPort + 20; p++) {
+            const status = await this.checkServerWorkspaceMatch(p, activeWorkspace, false);
+            if (status.responsive && status.sameWorkspace) {
+                this.activePort = p;
+                this.activeUrl = `http://127.0.0.1:${p}`;
+                this.isProcessOwner = false;
+                this.outputChannel.appendLine(`[Sidecar] Found existing backend for this workspace on port ${p}. Attaching without spawning.`);
+                return true;
+            }
+        }
+
+        // 3. No existing server manages this workspace -> allocate an isolated available port
+        const chosenPort = await this.findAvailablePort(defaultPort, defaultPort + 20);
+        this.activePort = chosenPort;
+        this.activeUrl = `http://127.0.0.1:${chosenPort}`;
+        this.outputChannel.appendLine(`[Sidecar] Allocated isolated port ${chosenPort} for workspace: ${activeWorkspace || 'Default'}`);
+
+        return this.spawnBackendProcess(extensionPath, chosenPort, globalStorage, workspaceStorage, activeWorkspace);
+    }
+
+    /**
      * Cleanly terminates the sidecar on VS Code shutdown or restart.
-     * Issues graceful shutdown HTTP request first, then terminates process tree.
+     * Only terminates process tree if this window is the process owner.
      */
     async stopServer(): Promise<void> {
         this.stopHeartbeatWatchdog();
+
+        // If this window attached to an existing server, only detach without killing it
+        if (!this.isProcessOwner) {
+            this.outputChannel.appendLine(`[Sidecar] Detached from shared backend on port ${this.activePort} (not process owner).`);
+            return;
+        }
 
         // 1. Send graceful shutdown request to flush SQLite WAL buffers
         try {
@@ -319,6 +424,7 @@ export class ServerProcessManager {
 
         // 3. Ensure port is liberated
         await this.reclaimPort(this.activePort);
+        this.isProcessOwner = false;
     }
 
     /**

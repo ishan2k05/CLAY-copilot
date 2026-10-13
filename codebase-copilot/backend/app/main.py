@@ -16,30 +16,56 @@ from pydantic import BaseModel
 
 logger = logging.getLogger("clay")
 
-from .security.secret_masker import SecretMasker
-from .parser.ast_chunker import PythonASTChunker
-from .parser.universal_chunker import UniversalASTChunker
-from .parser.symbols import CodeChunk
-from .index.graph_store import SQLiteGraphStore
-from .index.vector_store import LocalVectorStore
-from .retrieval.hybrid_search import HybridSearchEngine
-from .retrieval.file_resolver import WorkspaceFileResolver
-from .retrieval.repo_map import RepoMapGenerator
-from .agent.planner import AgentPlanner
-from .agent.patch_engine import PatchEngine
-from .agent.instruction_parser import (
-    InstructionClassifier,
-    SymbolEntityResolver,
-    AmbiguityDetector,
-    ContextWindowBuilder,
-    DynamicTaskPlanner,
-    TopicDomainResolver,
-    normalize_prompt_text,
-)
-from .agent.repair_loop import SelfHealingRepairLoop
-from .agent.tools.terminal_agent import TerminalAgent
-from .llm.gemma_provider import OllamaGemmaProvider
-from .llm.history_compactor import HistoryCompactor
+try:
+    from .security.secret_masker import SecretMasker
+    from .parser.ast_chunker import PythonASTChunker
+    from .parser.universal_chunker import UniversalASTChunker
+    from .parser.symbols import CodeChunk
+    from .index.graph_store import SQLiteGraphStore
+    from .index.vector_store import LocalVectorStore
+    from .retrieval.hybrid_search import HybridSearchEngine
+    from .retrieval.file_resolver import WorkspaceFileResolver
+    from .retrieval.repo_map import RepoMapGenerator
+    from .agent.planner import AgentPlanner
+    from .agent.patch_engine import PatchEngine
+    from .agent.instruction_parser import (
+        InstructionClassifier,
+        SymbolEntityResolver,
+        AmbiguityDetector,
+        ContextWindowBuilder,
+        DynamicTaskPlanner,
+        TopicDomainResolver,
+        normalize_prompt_text,
+    )
+    from .agent.repair_loop import SelfHealingRepairLoop
+    from .agent.tools.terminal_agent import TerminalAgent
+    from .llm.gemma_provider import OllamaGemmaProvider
+    from .llm.history_compactor import HistoryCompactor
+except (ImportError, ValueError):
+    from app.security.secret_masker import SecretMasker
+    from app.parser.ast_chunker import PythonASTChunker
+    from app.parser.universal_chunker import UniversalASTChunker
+    from app.parser.symbols import CodeChunk
+    from app.index.graph_store import SQLiteGraphStore
+    from app.index.vector_store import LocalVectorStore
+    from app.retrieval.hybrid_search import HybridSearchEngine
+    from app.retrieval.file_resolver import WorkspaceFileResolver
+    from app.retrieval.repo_map import RepoMapGenerator
+    from app.agent.planner import AgentPlanner
+    from app.agent.patch_engine import PatchEngine
+    from app.agent.instruction_parser import (
+        InstructionClassifier,
+        SymbolEntityResolver,
+        AmbiguityDetector,
+        ContextWindowBuilder,
+        DynamicTaskPlanner,
+        TopicDomainResolver,
+        normalize_prompt_text,
+    )
+    from app.agent.repair_loop import SelfHealingRepairLoop
+    from app.agent.tools.terminal_agent import TerminalAgent
+    from app.llm.gemma_provider import OllamaGemmaProvider
+    from app.llm.history_compactor import HistoryCompactor
 
 # Session token resolution & management
 SESSION_TOKEN_DIR = Path.home() / ".clay"
@@ -143,7 +169,7 @@ class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
                     pass
         return await call_next(request)
 
-app = FastAPI(title="CLAY Copilot", version="0.2.0")
+app = FastAPI(title="CLAY Copilot", version="1.6.14")
 
 # Security Middleware Stack (Middlewares run in reverse order of addition)
 # 1. Innermost: Ephemeral Token Handshake
@@ -2878,10 +2904,12 @@ async def get_system_process_status():
 @app.get("/api/health")
 async def health_check():
     """Lightweight health check endpoint for processManager and heartbeat watchdog."""
+    ws = runtime_settings.get("repo_path") or DEFAULT_WORKSPACE
     return {
         "status": "healthy",
         "pid": os.getpid(),
         "model": ollama_provider.model_name,
-        "version": "0.2.0"
+        "version": "1.6.14",
+        "workspace": str(resolve_workspace_path(ws)) if ws else ""
     }
 

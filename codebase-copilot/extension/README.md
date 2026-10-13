@@ -1,11 +1,16 @@
+<p align="center">
+  <img src="resources/icon.png" width="96" height="96" alt="CLAY Copilot Logo" />
+</p>
+
 # CLAY Copilot
 ### Autonomous Repository Intelligence & Coding Agent Platform for VS Code
 
-[![Platform: Windows](https://img.shields.io/badge/Platform-Windows%20(win32--x64)-0078D6?logo=windows&logoColor=white)](https://marketplace.visualstudio.com)
+[![Platform: Windows](https://img.shields.io/badge/Platform-Windows%20(win32--x64)-0078D6?logo=windows&logoColor=white)](https://github.com/ishan2k05/CLAY-copilot/releases)
+[![Version: v1.6.14](https://img.shields.io/badge/Version-v1.6.14-C15C3D.svg)](package.json)
 [![Runtime: FastAPI](https://img.shields.io/badge/Backend-FastAPI%20Sidecar-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![Parser: Tree--Sitter](https://img.shields.io/badge/Parser-Tree--Sitter%20AST-brightgreen)](https://tree-sitter.github.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Zero Setup](https://img.shields.io/badge/Setup-Zero--Dependency%20Binary-orange)](https://github.com)
+[![Zero Setup](https://img.shields.io/badge/Setup-Zero--Dependency%20Binary-orange)](https://github.com/ishan2k05/CLAY-copilot)
 
 **CLAY Copilot** is a repository intelligence platform and autonomous software engineering agent built directly into VS Code. Powered by modern LLMs (via local or cloud Ollama), a multi-language **Tree-Sitter AST engine**, an embedded **SQLite relational call graph**, and a **4-stream hybrid RAG retrieval pipeline**, CLAY Copilot navigates, explains, plans, and surgically refactors codebases of any size.
 
@@ -37,6 +42,7 @@ Unlike extensions that require complex Python installations, virtual environment
 - **Automated 1-Shot Self-Healing Repair:** Catches AST syntax errors, misaligned indentation, and malformed diffs, automatically invoking an internal repair loop to heal the patch before staging.
 - **4-Stream RRF Hybrid Search Engine:** Blends SQLite FTS5 BM25 text search, packed binary vector embeddings, structural AST symbols, and relational call graph hops via Reciprocal Rank Fusion.
 - **Zero-Leak Privacy Guard:** Client-side regex engine that strips API keys, OAuth tokens, private `.pem` certificates, and `.env` credentials before prompts leave your machine.
+- **Multi-Instance Workspace Isolation:** Run multiple CLAY windows concurrently across separate projects with automated dynamic loopback port allocation (`8765-8785`), workspace handshake verification, and isolated per-window lifecycles.
 - **Isolated State Management:** User settings persist safely in VS Code's User Application Storage across updates, while repository call graphs remain strictly isolated per workspace.
 
 ---
@@ -45,11 +51,28 @@ Unlike extensions that require complex Python installations, virtual environment
 
 CLAY Copilot provides a custom, responsive, **Warm Minimalist Canvas** sidebar interface divided into five dedicated workspaces:
 
-### 1. Chat Workspace (Conversational Intelligence)
+### 1. Chat Workspace (Conversational Intelligence & Smart Mentions)
 - **Token-Budgeted Rolling Compaction:** Multi-turn session memory split into Tier 1 (recent turn buffers) and Tier 2 (rolling semantic summary) to preserve token budget.
 - **60fps Smooth Streaming:** RAF-throttled smooth token rendering with an interactive, collapsible internal thinking drawer and live reasoning stopwatch.
 - **Smart Mention Chips:** Type `@` to dynamically mention and pin files (`@app.py`), structural symbols (`@UserService`), or directories (`@src/auth`).
 - **Interactive Line Citation Pills:** Responses output clickable line citations (e.g., `[auth.py:L14-L32]`) that jump directly to the code in your active editor.
+
+<p align="center">
+  <img src="docs/images/01_chattab.png" width="850" alt="CLAY Copilot - Welcome & Chat Canvas" />
+</p>
+
+<p align="center">
+  <img src="docs/images/02_chattab.png" width="850" alt="CLAY Copilot - Conversational Reasoning & Streaming" />
+</p>
+
+#### Smart Context Engine (`@` Mentions)
+Pin target symbols, classes, or files directly into the prompt context with fuzzy search:
+
+<p align="center">
+  <img src="docs/images/07_function_mention.png" width="850" alt="CLAY Copilot - Smart Mention Autocomplete" />
+</p>
+
+---
 
 ### 2. Agent Workspace (Autonomous Multi-Step Execution)
 - **Dynamic Task Decomposer:** Analyzes user instructions and generates tailored multi-step execution plans with real-time status badges (`[+] Done`, `[>] Active`, `[-] Queued`).
@@ -57,20 +80,50 @@ CLAY Copilot provides a custom, responsive, **Warm Minimalist Canvas** sidebar i
 - **Interactive Ambiguity Resolution:** When a target file is ambiguous across multiple candidates, the agent pauses, renders selection chips, and resumes immediately upon selection.
 - **One-Click Stop & Resume:** Non-blocking abort triggers that cleanly terminate child processes and terminal sessions without freezing the editor.
 
+<p align="center">
+  <img src="docs/images/03_agenttab.png" width="850" alt="CLAY Copilot - Autonomous Agent Workspace & Terminal Stream" />
+</p>
+
+---
+
 ### 3. Repo Workspace (Repository Map & Symbol Graph)
 - **Universal AST Symbol Navigator:** Structural hierarchy listing classes, methods, functions, interfaces, entrypoints, and imports across all supported languages.
 - **Interactive SVG Architecture Diagrams:** Generates and renders Mermaid diagrams (`flowchart LR`, `classDiagram`, `sequenceDiagram`) directly inside an interactive SVG card with drag-to-pan, 30% to 500% zoom, and Fit-to-Window controls.
 - **1-Click Editor Jump:** Clicking any symbol in the repository map instantly navigates to its exact definition in the active editor.
+
+<p align="center">
+  <img src="docs/images/05_repotab.png" width="850" alt="CLAY Copilot - Repository AST Symbol Tree" />
+</p>
+
+#### Interactive Architecture & Class Diagrams
+Inspect dependencies, call flows, and module hierarchies visually:
+
+<p align="center">
+  <img src="docs/images/08_diagrameg.png" width="850" alt="CLAY Copilot - Interactive Architectural Diagrams" />
+</p>
+
+---
 
 ### 4. Diff Workspace (Surgical Code Reviewer)
 - **Visual Split & Unified Diff Viewer:** Side-by-side or unified view with clear syntax-highlighted additions (`+`) and deletions (`-`).
 - **Hunk-by-Hunk Navigation:** Review multi-region modifications across multiple files individually.
 - **1-Click Patch Application:** Accept and apply surgical changes directly to disk, or discard individual hunks with zero risk of full-file overwrites.
 
+<p align="center">
+  <img src="docs/images/04_difftab.png" width="850" alt="CLAY Copilot - Surgical Diff Reviewer & Patch Engine" />
+</p>
+
+---
+
 ### 5. Settings Workspace (Configuration & Guardrails)
+- **Theme & IDE Bindings:** Toggle between the signature Warm Minimalist CLAY Palette and live VS Code editor token inheritance.
 - **Dynamic Model Selector:** Seamlessly switch between local models (Gemma, Llama, Qwen, DeepSeek) and cloud endpoints without restarting.
 - **Generation Tuning:** Real-time sliders for temperature, context window (`num_ctx` up to 128k), and output prediction limits (`num_predict`).
 - **Security Sandboxing:** Toggle between **Sandboxed** (workspace-confined), **Strict**, and **Open** execution modes.
+
+<p align="center">
+  <img src="docs/images/06_settingstab.png" width="850" alt="CLAY Copilot - Settings Workspace & Security Guardrails" />
+</p>
 
 ---
 
@@ -86,12 +139,13 @@ VS Code Extension Host (TypeScript)
 |   `-- style.css (Warm Minimalist Theme)
 |
 |-- ProcessManager (Sidecar Lifecycle Manager)
-|   |-- Auto-Port Finder (8765 -> 8785)
+|   |-- Dynamic Multi-Instance Port Allocation (8765 -> 8785)
+|   |-- Workspace-Aware Health Handshake & Ownership Guard
 |   |-- Zombie Port Reclamation & Process Tree Killer (taskkill /T /F)
 |   `-- Storage Path Resolver (globalStorageUri & storageUri)
 |
 `-- BackendClient (EventSource SSE & JSON Client)
-        |  (HTTP / SSE on 127.0.0.1:8765 + Session Token Auth)
+        |  (HTTP / SSE on 127.0.0.1:<allocated_port> + Session Token Auth)
         v
 Bundled Standalone Server (clay-server.exe)
 |
@@ -186,7 +240,7 @@ CLAY Copilot was built from the ground up for strict privacy and enterprise comp
 
 ## Known Bugs & Scheduled Fixes (Clean-Up Roadmap)
 
-The following items are tracked for the upcoming v0.2.0 patch:
+The following items are tracked for upcoming maintenance releases:
 
 1. **`url.parse()` Deprecation Notice:**
    - *Status:* Scheduled for cleanup.
@@ -194,9 +248,9 @@ The following items are tracked for the upcoming v0.2.0 patch:
 2. **Multi-Platform CI Matrix:**
    - *Status:* In progress.
    - *Detail:* Automating Linux ELF and macOS Mach-O binary builds via GitHub Actions matrix to release alongside `win32-x64`.
-3. **Port Contention Edge Case:**
-   - *Status:* Mitigated (Reclaimed via `taskkill /T /F`).
-   - *Detail:* If a zombie process holds port 8765 and fails to exit within 1.2s, the server dynamically seeks open ports in the 8766-8785 range.
+3. **Multi-Instance Port & Process Isolation:**
+   - *Status:* **Resolved & Active** in v1.6.14.
+   - *Detail:* Multiple instances of CLAY running in different IDE windows or repositories seamlessly allocate isolated loopback ports (`8765-8785`) with bidirectional workspace handshake verification to prevent cross-talk.
 4. **Interactive Terminal REPL Support:**
    - *Status:* Planned.
    - *Detail:* Agent terminal execution currently supports non-interactive commands (e.g. `pytest`, `npm test`, `git status`). Interactive prompts (like `pdb` or interactive confirmation inputs) will be supported via pseudo-terminal (pty) integration.
@@ -238,7 +292,7 @@ The following items are tracked for the upcoming v0.2.0 patch:
    ```powershell
    # 1. Compile backend executable
    cd ..\backend
-   pyinstaller server.spec --clean
+   pyinstaller clay-server.spec --clean
    Copy-Item dist\clay-server.exe -Destination ..\extension\bin\clay-server.exe
 
    # 2. Package extension

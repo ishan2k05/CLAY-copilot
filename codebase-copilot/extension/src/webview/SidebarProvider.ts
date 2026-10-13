@@ -458,12 +458,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 case 'acceptChanges': {
-                    await this._backendClient.reviewChanges('TASK #0428', 'accept');
+                    const taskId = data.taskId || data.task_id || 'TASK #0428';
+                    await this._backendClient.reviewChanges(taskId, 'accept');
                     vscode.window.showInformationMessage('CLAY Copilot: Staged changes accepted.');
                     break;
                 }
                 case 'rejectChanges': {
-                    await this._backendClient.reviewChanges('TASK #0428', 'reject');
+                    const taskId = data.taskId || data.task_id || 'TASK #0428';
+                    await this._backendClient.reviewChanges(taskId, 'reject');
                     vscode.window.showWarningMessage('CLAY Copilot: Staged changes rejected.');
                     break;
                 }
@@ -1097,6 +1099,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     <rect x="8" y="8" width="6" height="2" fill="#C15C3D"/>
                 </svg>
                 <span class="brand-title">CLAY</span>
+                <span class="brand-version" style="font-size: 9px; font-weight: 700; opacity: 0.55; margin-left: 5px; font-family: var(--font-mono, monospace); letter-spacing: 0.3px;">v1.6.14</span>
             </div>
         </div>
         <div class="context-pills">
@@ -1152,6 +1155,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     </svg>
                 </div>
                 <div class="empty-state-title">CLAY Copilot</div>
+                <div class="empty-state-version" style="font-size: 11px; opacity: 0.5; font-family: var(--font-mono, monospace); margin-top: 2px;">v1.6.14</div>
             </div>
         </div>
     </div>
@@ -1547,6 +1551,9 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
                 <button class="btn-primary-action" id="btn-save-all-settings" style="margin-top: 8px;">
                     Save All Settings
                 </button>
+                <div class="settings-version-footer" style="text-align: center; margin-top: 16px; padding-bottom: 6px; font-size: 11px; opacity: 0.45; font-family: var(--font-mono, monospace);">
+                    CLAY Copilot &bull; v1.6.14
+                </div>
             </div>
         </div>
     </div>

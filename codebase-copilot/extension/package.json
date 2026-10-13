@@ -1,10 +1,11 @@
 {
   "name": "codebase-copilot",
   "displayName": "CLAY Copilot",
-  "description": "Repository Intelligence & Autonomous Coding Agent powered by Cloud Gemma 4 (31B)",
-  "version": "0.1.0",
+  "description": "Autonomous Repository Intelligence & Coding Agent Platform for VS Code",
+  "version": "1.6.14",
   "publisher": "codebase-copilot",
   "license": "MIT",
+  "icon": "resources/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/ishan2k05/CLAY-copilot.git"
@@ -17,9 +18,30 @@
     "vscode": "^1.88.0"
   },
   "categories": [
+    "Chat",
     "Programming Languages",
     "Machine Learning",
-    "Testing"
+    "Testing",
+    "Data Science",
+    "Education",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "copilot",
+    "coding agent",
+    "autonomous agent",
+    "codebase",
+    "chat",
+    "assistant",
+    "ollama",
+    "tree-sitter",
+    "code review",
+    "refactor",
+    "rag",
+    "ast",
+    "repository",
+    "llm"
   ],
   "main": "./out/extension.js",
   "activationEvents": [

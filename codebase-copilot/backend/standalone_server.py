@@ -156,15 +156,18 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self.path == "/health":
+        if self.path in ("/health", "/api/health"):
             self.send_response(200)
             self._set_cors_headers()
             self.end_headers()
+            ws_val = runtime_settings.get("repo_path", "")
             data = {
                 "status": "healthy",
                 "service": "codebase-copilot-backend",
                 "model": OLLAMA_MODEL,
-                "server": "standalone_standard_library"
+                "server": "standalone_standard_library",
+                "version": "1.6.14",
+                "workspace": str(Path(ws_val).resolve()) if ws_val else ""
             }
             self.wfile.write(json.dumps(data).encode("utf-8"))
 

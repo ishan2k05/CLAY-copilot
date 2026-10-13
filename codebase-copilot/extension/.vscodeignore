@@ -1,5 +1,6 @@
 .vscode/**
 src/**
+!src/webview/media/**
 tsconfig.json
 **/*.map
 .gitignore
