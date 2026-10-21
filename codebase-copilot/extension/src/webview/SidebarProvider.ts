@@ -26,6 +26,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         });
     }
 
+    public focusChatWithPrompt(promptText: string, autoSend: boolean = false): void {
+        this._view?.webview.postMessage({
+            command: 'injectPrompt',
+            targetTab: 'chat',
+            text: promptText,
+            autoSend: autoSend
+        });
+    }
+
+    public focusAgentWithGoal(goalText: string): void {
+        this._view?.webview.postMessage({
+            command: 'injectPrompt',
+            targetTab: 'agent',
+            text: goalText,
+            autoSend: false
+        });
+    }
+
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
         _context: vscode.WebviewViewResolveContext,

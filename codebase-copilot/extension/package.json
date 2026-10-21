@@ -92,6 +92,23 @@
         "title": "CLAY Copilot: Restart Backend Server"
       }
     ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "codebaseCopilot.explainSelection",
+          "when": "editorHasSelection",
+          "group": "clay_copilot@1"
+        },
+        {
+          "command": "codebaseCopilot.fixCurrentError",
+          "group": "clay_copilot@2"
+        },
+        {
+          "command": "codebaseCopilot.ask",
+          "group": "clay_copilot@3"
+        }
+      ]
+    },
     "configuration": {
       "title": "CLAY Copilot",
       "properties": {

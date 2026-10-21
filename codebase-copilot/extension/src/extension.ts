@@ -118,6 +118,26 @@ export async function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    // 2d. Command: Ask Question (Focus Sidebar Chat)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('codebaseCopilot.ask', async () => {
+            await vscode.commands.executeCommand('codebaseCopilot.sidebarView.focus');
+            const editor = vscode.window.activeTextEditor;
+            const selection = editor ? editor.document.getText(editor.selection) : '';
+
+            if (selection && selection.trim()) {
+                const fileName = path.basename(editor!.document.fileName);
+                const startLine = editor!.selection.start.line + 1;
+                const endLine = editor!.selection.end.line + 1;
+                const lang = editor!.document.languageId || '';
+                const prompt = `Regarding this code in \`${fileName}\` (L${startLine}-L${endLine}):\n\`\`\`${lang}\n${selection.trim()}\n\`\`\`\n`;
+                sidebarProvider.focusChatWithPrompt(prompt, false);
+            } else {
+                sidebarProvider.focusChatWithPrompt('', false);
+            }
+        })
+    );
+
     // 5. Command: Explain Selected Code
     context.subscriptions.push(
         vscode.commands.registerCommand('codebaseCopilot.explainSelection', async () => {
@@ -127,13 +147,21 @@ export async function activate(context: vscode.ExtensionContext) {
                 return;
             }
             const selection = editor.document.getText(editor.selection);
-            if (!selection) {
+            if (!selection || !selection.trim()) {
                 vscode.window.showInformationMessage('CLAY Copilot: No code selected.');
                 return;
             }
 
-            // Focus sidebar
+            const fileName = path.basename(editor.document.fileName);
+            const startLine = editor.selection.start.line + 1;
+            const endLine = editor.selection.end.line + 1;
+            const lang = editor.document.languageId || '';
+
             await vscode.commands.executeCommand('codebaseCopilot.sidebarView.focus');
+            sidebarProvider.focusChatWithPrompt(
+                `Explain this code from \`${fileName}\` (L${startLine}-L${endLine}):\n\`\`\`${lang}\n${selection.trim()}\n\`\`\`\nBreak down its architecture, behavior, edge cases, and any potential optimizations.`,
+                true
+            );
         })
     );
 
@@ -144,19 +172,53 @@ export async function activate(context: vscode.ExtensionContext) {
             if (!editor) return;
 
             const diagnostics = vscode.languages.getDiagnostics(editor.document.uri);
-            const errors = diagnostics.filter(d => d.severity === vscode.DiagnosticSeverity.Error);
+            const errors = diagnostics.filter(d => d.severity === vscode.DiagnosticSeverity.Error || d.severity === vscode.DiagnosticSeverity.Warning);
 
             if (errors.length === 0) {
-                vscode.window.showInformationMessage('CLAY Copilot: No active errors detected in current file.');
+                vscode.window.showInformationMessage('CLAY Copilot: No active errors or warnings detected in current file.');
                 return;
             }
 
-            const firstError = errors[0];
-            vscode.window.showInformationMessage(
-                `CLAY Copilot: Diagnosing "${firstError.message}" with gemma4:31b-cloud...`
-            );
+            // Target the error closest to the user's cursor, or the first error in the file
+            const targetError = errors.find(e => e.range.contains(editor.selection.active)) || errors[0];
+            const errorLine = targetError.range.start.line;
+            const lineContent = editor.document.lineAt(errorLine).text;
+            const fileName = path.basename(editor.document.fileName);
+            const lang = editor.document.languageId || '';
+
             await vscode.commands.executeCommand('codebaseCopilot.sidebarView.focus');
+            sidebarProvider.focusChatWithPrompt(
+                `Diagnose and fix this error in \`${fileName}\` at line ${errorLine + 1}:\n` +
+                `Error Message: "${targetError.message}"\n` +
+                `Offending Code:\n\`\`\`${lang}\n${lineContent.trim()}\n\`\`\`\n` +
+                `Please analyze the root cause and provide the minimal surgical patch to resolve it.`,
+                true
+            );
         })
+    );
+
+    // 6b. Quick Fix CodeActionProvider for inline lightbulb & Quick Fix (Ctrl+.)
+    context.subscriptions.push(
+        vscode.languages.registerCodeActionsProvider(
+            { scheme: 'file' },
+            {
+                provideCodeActions(document, range, context) {
+                    if (!context.diagnostics || context.diagnostics.length === 0) {
+                        return [];
+                    }
+                    const action = new vscode.CodeAction('Fix with CLAY Copilot', vscode.CodeActionKind.QuickFix);
+                    action.command = {
+                        command: 'codebaseCopilot.fixCurrentError',
+                        title: 'Fix with CLAY Copilot'
+                    };
+                    action.isPreferred = true;
+                    return [action];
+                }
+            },
+            {
+                providedCodeActionKinds: [vscode.CodeActionKind.QuickFix]
+            }
+        )
     );
 
     // 7. Real-Time Document Synchronization & Hot Reload

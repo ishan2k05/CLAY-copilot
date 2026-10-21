@@ -6643,6 +6643,31 @@
     if (!msg) return;
 
     switch (msg.command) {
+      case 'injectPrompt': {
+        const targetTab = msg.targetTab || 'chat';
+        switchTab(targetTab);
+        if (targetTab === 'chat') {
+          if (chatInput) {
+            chatInput.value = msg.text || '';
+            chatInput.style.height = 'auto';
+            chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
+            chatInput.focus();
+            if (msg.autoSend && msg.text && msg.text.trim()) {
+              setTimeout(() => {
+                dispatchChatMessage(msg.text.trim());
+              }, 50);
+            }
+          }
+        } else if (targetTab === 'agent') {
+          const agentGoalInput = document.getElementById('agent-goal-input');
+          if (agentGoalInput) {
+            agentGoalInput.value = msg.text || '';
+            agentGoalInput.focus();
+          }
+        }
+        break;
+      }
+
       case 'setBackendUrl':
         if (msg.url && typeof msg.url === 'string') {
           BACKEND_URL = msg.url.replace(/\/+$/, '');
