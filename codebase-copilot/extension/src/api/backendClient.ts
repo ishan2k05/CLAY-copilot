@@ -226,7 +226,9 @@ export class BackendClient {
         inferenceOptions?: { temperature?: number; num_ctx?: number; num_predict?: number },
         cursorLine?: number,
         history?: Array<{ role: string; content: string }>,
-        pinnedMentions?: Array<Record<string, any>>
+        pinnedMentions?: Array<Record<string, any>>,
+        allowMultiFile?: boolean,
+        targetFiles?: string[]
     ): Promise<void> {
         if (this.activeChatAbortController) {
             try { this.activeChatAbortController.abort(); } catch {}
@@ -249,6 +251,12 @@ export class BackendClient {
                 cursor_line: cursorLine,
                 stream: true
             };
+            if (allowMultiFile !== undefined) {
+                payload.allow_multi_file = allowMultiFile;
+            }
+            if (targetFiles && targetFiles.length > 0) {
+                payload.target_files = targetFiles;
+            }
             if (pinnedMentions && pinnedMentions.length > 0) {
                 payload.pinned_mentions = pinnedMentions;
             }
@@ -425,6 +433,19 @@ export class BackendClient {
         return await res.json();
     }
 
+    async applyAllPatches(patches: Array<{ file_path: string; diff: string }>, workspacePath?: string): Promise<any> {
+        const res = await this.fetchWithAuth(`${this.backendUrl}/api/agent/apply-all-patches`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ patches, workspace_path: workspacePath })
+        });
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error(err);
+        }
+        return await res.json();
+    }
+
     async rebaseDiff(filePath: string, baseContent: string, diff: string, currentContent: string, workspacePath?: string, forceResolution?: string): Promise<any> {
         const res = await this.fetchWithAuth(`${this.backendUrl}/api/agent/rebase-diff`, {
             method: 'POST',
@@ -509,22 +530,41 @@ export class BackendClient {
         return { os: process.platform === 'win32' ? 'windows' : 'linux', is_windows: process.platform === 'win32', shell: 'bash' };
     }
 
-    async executeAgentStep(stepId: number, goal: string, workspacePath?: string, activeFile?: string, cursorLine?: number, targetFile?: string, stepAction?: string, totalSteps?: number, activeFileContent?: string): Promise<any> {
+    async executeAgentStep(
+        stepId: number,
+        goal: string,
+        workspacePath?: string,
+        activeFile?: string,
+        cursorLine?: number,
+        targetFile?: string,
+        stepAction?: string,
+        totalSteps?: number,
+        activeFileContent?: string,
+        allowMultiFile?: boolean,
+        targetFiles?: string[]
+    ): Promise<any> {
         try {
+            const payload: any = {
+                step_id: stepId,
+                goal,
+                workspace_path: workspacePath,
+                active_file: activeFile,
+                active_file_content: activeFileContent,
+                cursor_line: cursorLine,
+                target_file: targetFile,
+                step_action: stepAction,
+                total_steps: totalSteps
+            };
+            if (allowMultiFile !== undefined) {
+                payload.allow_multi_file = allowMultiFile;
+            }
+            if (targetFiles && targetFiles.length > 0) {
+                payload.target_files = targetFiles;
+            }
             const res = await this.fetchWithAuth(`${this.backendUrl}/api/agent/step`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    step_id: stepId,
-                    goal,
-                    workspace_path: workspacePath,
-                    active_file: activeFile,
-                    active_file_content: activeFileContent,
-                    cursor_line: cursorLine,
-                    target_file: targetFile,
-                    step_action: stepAction,
-                    total_steps: totalSteps
-                })
+                body: JSON.stringify(payload)
             });
             if (res.ok) return await res.json();
             return { status: 'error', message: await res.text() };

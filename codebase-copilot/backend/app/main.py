@@ -776,6 +776,8 @@ class ChatRequest(BaseModel):
     cursor_line: Optional[int] = None
     history: Optional[List[Dict[str, str]]] = None
     pinned_mentions: Optional[List[Dict[str, Any]]] = None
+    allow_multi_file: Optional[bool] = None
+    target_files: Optional[List[str]] = None
 
 active_chat_history: List[Dict[str, str]] = []
 active_rolling_summary: Optional[str] = None
@@ -1151,8 +1153,32 @@ async def chat_endpoint(req: ChatRequest):
         if p_blocks:
             pinned_context = "<user_pinned_context>\n" + "\n\n".join(p_blocks) + "\n</user_pinned_context>"
 
+    # 2d. Scope directive: allow the LLM to decide whether single-file or multi-file is needed
+    scope_directive = (
+        "<scope_directive>\n"
+        "[CODE EDITING & SCOPE GUIDELINES]:\n"
+        "- If your solution requires changes to multiple files, output each file's changes inside a separate code block with the exact filename labeled on line 1, for example:\n"
+        "  ```python\n"
+        "  # calc.py\n"
+        "  ...\n"
+        "  ```\n"
+        "  ```python\n"
+        "  # app.py\n"
+        "  ...\n"
+        "  ```\n"
+        "- If the user's request pertains to only a single file, confine your updates to that single file.\n"
+        "- Provide complete, functional, working code without omitting functions.\n"
+        "</scope_directive>"
+    )
+
+
+
+
+
     # Combine contexts with context-window token budgeting
     parts = []
+    if scope_directive:
+        parts.append(scope_directive)
     if pinned_context:
         parts.append(pinned_context)
     if target_creation_directive:
@@ -1691,7 +1717,12 @@ async def create_plan(req: PlanRequest):
         provider=ollama_provider
     )
     
-    effective_target_files = dynamic_plan.get("target_files") or target_files
+    merged_targets = list(dict.fromkeys(list(dynamic_plan.get("target_files") or []) + list(target_files or [])))
+    if merged_targets:
+        dynamic_plan["target_files"] = merged_targets
+        effective_target_files = merged_targets
+    else:
+        effective_target_files = dynamic_plan.get("target_files") or target_files
     global active_task
     active_task = {
         "id": f"TASK #{abs(hash(req.goal)) % 9000 + 1000}",
@@ -1725,6 +1756,8 @@ class StepExecuteRequest(BaseModel):
     active_file: Optional[str] = None
     active_file_content: Optional[str] = None
     target_file: Optional[str] = None
+    allow_multi_file: Optional[bool] = None
+    target_files: Optional[List[str]] = None
 
 @app.post("/api/agent/step")
 async def execute_agent_step(req: StepExecuteRequest):
@@ -2092,7 +2125,60 @@ async def execute_agent_step(req: StepExecuteRequest):
         target_ext = Path(target_filename).suffix.lstrip(".")
         lang_hint = target_ext if target_ext else "python"
 
-        if is_comprehensive:
+        all_targets = list(dict.fromkeys((req.target_files or []) + target_files))
+        if target_filename and target_filename not in all_targets:
+            all_targets.insert(0, target_filename)
+
+        # Build file_orig_lines_map for all candidate files
+        file_orig_lines_map = {}
+        for at in all_targets:
+            at_obj = accessible.get(at) or (Path(workspace_dir) / at)
+            lines = []
+            if at in live_file_buffers:
+                lines = live_file_buffers[at].splitlines()
+            elif at_obj.name in live_file_buffers:
+                lines = live_file_buffers[at_obj.name].splitlines()
+            elif at_obj.exists() and at_obj.is_file():
+                try:
+                    lines = at_obj.read_text(encoding="utf-8", errors="ignore").splitlines()
+                except Exception:
+                    lines = []
+            elif at == target_filename and raw_file_content:
+                lines = raw_file_content.splitlines()
+
+            file_orig_lines_map[at] = lines
+            file_orig_lines_map[at_obj.name] = lines
+            file_orig_lines_map[str(at_obj)] = lines
+
+        if len(all_targets) > 1:
+            multi_contexts = []
+            for at in all_targets:
+                lines = file_orig_lines_map.get(at, [])
+                if lines:
+                    numbered = [f"{i+1:3d}: {line}" for i, line in enumerate(lines)]
+                    multi_contexts.append(f"[Target File: {at} ({len(lines)} lines)]\n" + "\n".join(numbered)[:12000])
+                else:
+                    multi_contexts.append(f"[Target File to Create: '{at}']\n[Status: File has no code yet on disk. Provide full implementation.]")
+            agent_code_context = "\n\n".join(multi_contexts)
+            prompt = (
+                f"Goal: {req.goal}\n"
+                f"Target Files: {', '.join(all_targets)}\n\n"
+                f"Implement the complete, working solution across the target files to achieve: {req.goal}\n\n"
+                "INSTRUCTIONS:\n"
+                "- Output the updated code for each target file.\n"
+                "- Output each file inside a separate code block, with the filename labeled on line 1, for example:\n"
+                "  ```python\n"
+                f"  # {all_targets[0]}\n"
+                "  ...\n"
+                "  ```\n"
+                "  ```python\n"
+                f"  # {all_targets[1]}\n"
+                "  ...\n"
+                "  ```\n"
+                "- Provide complete, production-ready, working code. Do not use placeholders or omit lines.\n"
+                "- ZERO EMOJIS: Do not use emojis anywhere in your output."
+            )
+        elif is_comprehensive:
             prompt = (
                 f"Goal: {req.goal}\n"
                 f"Target File: {target_filename}\n"
@@ -2118,30 +2204,18 @@ async def execute_agent_step(req: StepExecuteRequest):
 
         generated = await ollama_provider.generate_text(prompt, code_context=agent_code_context)
 
-        # Build surgical minimal diff using multi-strategy builder (eliminates full-file wipes and line desync)
-        diff_text = PatchEngine.build_surgical_diff(orig_lines, generated, target_filename, preferred_line=preferred_line)
+        # Build surgical minimal diff using multi-surgical builder
+        final_diff, staged_files = PatchEngine.build_multi_surgical_diff(
+            file_orig_lines_map=file_orig_lines_map,
+            generated_text=generated,
+            default_filename=target_filename,
+            allow_multi_file=True,
+            authorized_files=all_targets,
+            preferred_line=preferred_line
+        )
 
-        # Pre-staging AST syntax validation & automated self-healing
-        is_valid, final_diff, err_msg = PatchEngine.validate_and_heal_diff(orig_lines, diff_text, target_filename)
-
-        # 1-shot self-healing repair loop if syntax error remains
-        if not is_valid and err_msg and target_filename.endswith(".py"):
-            try:
-                repair_prompt = (
-                    f"The proposed modification for '{target_filename}' caused: {err_msg}\n"
-                    f"Goal was: {req.goal}\n"
-                    f"Original diff was:\n{diff_text}\n"
-                    f"Please provide the corrected, syntactically valid code or SEARCH/REPLACE block for '{target_filename}'.\n"
-                    "Output ONLY the corrected code or diff inside a code block."
-                )
-                repair_gen = await ollama_provider.generate_text(repair_prompt, code_context=agent_code_context)
-                repaired_diff = PatchEngine.build_surgical_diff(orig_lines, repair_gen, target_filename)
-                rep_valid, rep_diff, _ = PatchEngine.validate_and_heal_diff(orig_lines, repaired_diff, target_filename)
-                if rep_valid:
-                    final_diff = rep_diff
-                    is_valid = True
-            except Exception:
-                pass
+        is_valid = all(s.get("valid", True) for s in staged_files) if staged_files else True
+        err_msg = next((s.get("error") for s in staged_files if s.get("error")), None)
 
         # Extract filename from diff header if present
         if final_diff:
@@ -2150,9 +2224,10 @@ async def execute_agent_step(req: StepExecuteRequest):
                 target_filename = Path(header_match.group(1)).name
 
         hunks = PatchEngine.split_into_hunks(final_diff)
-        staged_files = PatchEngine.split_multi_file_diff(final_diff)
 
-        if is_new_file:
+        if staged_files and len(staged_files) > 1:
+            log_msg = f"Synthesized surgical solution across {len(staged_files)} files ({', '.join(s['file_path'] for s in staged_files)})."
+        elif is_new_file:
             log_msg = f"Generated complete implementation for new file '{target_filename}'."
         elif is_algorithm_or_complex:
             log_msg = f"Synthesized production-ready implementation of {topic_info.get('topic', 'algorithm')} for '{target_filename}'."
@@ -2438,7 +2513,60 @@ async def execute_agent_step_stream(req: StepExecuteRequest):
         target_ext = Path(target_filename).suffix.lstrip(".")
         lang_hint = target_ext if target_ext else "python"
 
-        if is_comprehensive:
+        all_targets = list(dict.fromkeys((req.target_files or []) + target_files))
+        if target_filename and target_filename not in all_targets:
+            all_targets.insert(0, target_filename)
+
+        # Build file_orig_lines_map for all candidate files
+        file_orig_lines_map = {}
+        for at in all_targets:
+            at_obj = accessible.get(at) or (Path(workspace_dir) / at)
+            lines = []
+            if at in live_file_buffers:
+                lines = live_file_buffers[at].splitlines()
+            elif at_obj.name in live_file_buffers:
+                lines = live_file_buffers[at_obj.name].splitlines()
+            elif at_obj.exists() and at_obj.is_file():
+                try:
+                    lines = at_obj.read_text(encoding="utf-8", errors="ignore").splitlines()
+                except Exception:
+                    lines = []
+            elif at == target_filename and raw_file_content:
+                lines = raw_file_content.splitlines()
+
+            file_orig_lines_map[at] = lines
+            file_orig_lines_map[at_obj.name] = lines
+            file_orig_lines_map[str(at_obj)] = lines
+
+        if len(all_targets) > 1:
+            multi_contexts = []
+            for at in all_targets:
+                lines = file_orig_lines_map.get(at, [])
+                if lines:
+                    numbered = [f"{i+1:3d}: {line}" for i, line in enumerate(lines)]
+                    multi_contexts.append(f"[Target File: {at} ({len(lines)} lines)]\n" + "\n".join(numbered)[:12000])
+                else:
+                    multi_contexts.append(f"[Target File to Create: '{at}']\n[Status: File has no code yet on disk. Provide full implementation.]")
+            agent_code_context = "\n\n".join(multi_contexts)
+            prompt = (
+                f"Goal: {req.goal}\n"
+                f"Target Files: {', '.join(all_targets)}\n\n"
+                f"Implement the complete, working solution across the target files to achieve: {req.goal}\n\n"
+                "INSTRUCTIONS:\n"
+                "- Output the updated code for each target file.\n"
+                "- Output each file inside a separate code block, with the filename labeled on line 1, for example:\n"
+                "  ```python\n"
+                f"  # {all_targets[0]}\n"
+                "  ...\n"
+                "  ```\n"
+                "  ```python\n"
+                f"  # {all_targets[1]}\n"
+                "  ...\n"
+                "  ```\n"
+                "- Provide complete, production-ready, working code. Do not use placeholders or omit lines.\n"
+                "- ZERO EMOJIS: Do not use emojis anywhere in your output."
+            )
+        elif is_comprehensive:
             prompt = (
                 f"Goal: {req.goal}\n"
                 f"Target File: {target_filename}\n"
@@ -2479,27 +2607,18 @@ async def execute_agent_step_stream(req: StepExecuteRequest):
 
         generated = "".join(accumulated_tokens)
 
-        # Build surgical minimal diff
-        diff_text = PatchEngine.build_surgical_diff(orig_lines, generated, target_filename, preferred_line=preferred_line)
-        is_valid, final_diff, err_msg = PatchEngine.validate_and_heal_diff(orig_lines, diff_text, target_filename)
+        # Build surgical minimal diff with multi-file scope awareness
+        final_diff, staged_files = PatchEngine.build_multi_surgical_diff(
+            file_orig_lines_map=file_orig_lines_map,
+            generated_text=generated,
+            default_filename=target_filename,
+            allow_multi_file=True,
+            authorized_files=all_targets,
+            preferred_line=preferred_line
+        )
 
-        if not is_valid and err_msg and target_filename.endswith(".py"):
-            try:
-                repair_prompt = (
-                    f"The proposed modification for '{target_filename}' caused: {err_msg}\n"
-                    f"Goal was: {req.goal}\n"
-                    f"Original diff was:\n{diff_text}\n"
-                    f"Please provide the corrected, syntactically valid code or SEARCH/REPLACE block for '{target_filename}'.\n"
-                    "Output ONLY the corrected code or diff inside a code block."
-                )
-                repair_gen = await ollama_provider.generate_text(repair_prompt, code_context=agent_code_context)
-                repaired_diff = PatchEngine.build_surgical_diff(orig_lines, repair_gen, target_filename)
-                rep_valid, rep_diff, _ = PatchEngine.validate_and_heal_diff(orig_lines, repaired_diff, target_filename)
-                if rep_valid:
-                    final_diff = rep_diff
-                    is_valid = True
-            except Exception:
-                pass
+        is_valid = all(s.get("valid", True) for s in staged_files) if staged_files else True
+        err_msg = next((s.get("error") for s in staged_files if s.get("error")), None)
 
         if final_diff:
             header_match = re.search(r"\+\+\+\s+(?:b/)?([^\s\n\r]+)", final_diff)
@@ -2507,9 +2626,10 @@ async def execute_agent_step_stream(req: StepExecuteRequest):
                 target_filename = Path(header_match.group(1)).name
 
         hunks = PatchEngine.split_into_hunks(final_diff)
-        staged_files = PatchEngine.split_multi_file_diff(final_diff)
 
-        if is_new_file:
+        if staged_files and len(staged_files) > 1:
+            log_msg = f"Synthesized surgical solution across {len(staged_files)} files ({', '.join(s['file_path'] for s in staged_files)})."
+        elif is_new_file:
             log_msg = f"Generated complete implementation for new file '{target_filename}'."
         elif is_algorithm_or_complex:
             log_msg = f"Synthesized production-ready implementation of {topic_info.get('topic', 'algorithm')} for '{target_filename}'."
@@ -2568,6 +2688,56 @@ async def apply_patch(req: ApplyPatchRequest):
 
     return result
 
+class PatchItem(BaseModel):
+    file_path: str
+    diff: str
+
+class ApplyAllPatchesRequest(BaseModel):
+    patches: List[PatchItem]
+    workspace_path: Optional[str] = None
+
+@app.post("/api/agent/apply-all-patches")
+async def apply_all_patches(req: ApplyAllPatchesRequest):
+    workspace = resolve_workspace_path(req.workspace_path)
+    results = []
+    applied_count = 0
+
+    for p in req.patches:
+        res = PatchEngine.apply_patch_hunks(
+            file_path=p.file_path,
+            diff_text=p.diff,
+            workspace_path=str(workspace)
+        )
+        is_success = (res.get("status") == "success")
+        if is_success:
+            applied_count += 1
+            patched_file = res.get("file")
+            if patched_file:
+                try:
+                    p_obj = Path(patched_file)
+                    if p_obj.exists():
+                        new_text = p_obj.read_text(encoding="utf-8", errors="ignore")
+                        live_file_buffers[str(p_obj.resolve())] = new_text
+                        live_file_buffers[p_obj.name] = new_text
+                        await reindex_file(str(p_obj.resolve()), new_text)
+                except Exception as e:
+                    logger.error(f"Failed to auto-reindex patched file {patched_file}: {e}")
+
+        results.append({
+            "file_path": p.file_path,
+            "status": res.get("status", "error"),
+            "message": res.get("message", ""),
+            "applied": is_success
+        })
+
+    overall_status = "success" if (applied_count == len(req.patches) and len(req.patches) > 0) else ("partial" if applied_count > 0 else "error")
+    return {
+        "status": overall_status,
+        "applied_count": applied_count,
+        "total_count": len(req.patches),
+        "results": results
+    }
+
 class RebaseDiffRequest(BaseModel):
     file_path: str
     base_content: str
@@ -2595,6 +2765,8 @@ class ComputeDiffRequest(BaseModel):
     workspace_path: Optional[str] = None
     preferred_line: Optional[int] = None
     active_file_content: Optional[str] = None
+    allow_multi_file: Optional[bool] = None
+    target_files: Optional[List[str]] = None
 
 @app.post("/api/agent/compute-diff")
 async def compute_diff(req: ComputeDiffRequest):
@@ -2615,10 +2787,51 @@ async def compute_diff(req: ComputeDiffRequest):
     elif target_path.name in live_file_buffers:
         orig_lines = live_file_buffers[target_path.name].splitlines()
 
-    diff_text = PatchEngine.build_surgical_diff(orig_lines, req.code_or_snippet, target_path.name, preferred_line=req.preferred_line)
-    is_valid, final_diff, err = PatchEngine.validate_and_heal_diff(orig_lines, diff_text, target_path.name)
+    file_orig_lines_map = {
+        req.target_file: orig_lines,
+        target_path.name: orig_lines
+    }
+
+    # Auto-discover all candidate filenames present in the snippet or code blocks
+    auth_targets = list(req.target_files or [])
+    if target_path.name not in auth_targets:
+        auth_targets.append(target_path.name)
+    if req.target_file not in auth_targets:
+        auth_targets.append(req.target_file)
+
+    fn_matches = re.findall(r"(?:###|\*\*|File:?|filepath:?|#|\/\/|\/\*|<!--|\+\+\+\s+(?:b/)?)\s*([A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)", req.code_or_snippet)
+    for fn in fn_matches:
+        fn_clean = Path(fn.replace("\\", "/")).name
+        if fn_clean not in auth_targets and "." in fn_clean:
+            auth_targets.append(fn_clean)
+
+    for at in auth_targets:
+        if at not in file_orig_lines_map:
+            resolved_p = PatchEngine.resolve_target_path(at, str(workspace))
+            if at in live_file_buffers:
+                file_orig_lines_map[at] = live_file_buffers[at].splitlines()
+            elif resolved_p.name in live_file_buffers:
+                file_orig_lines_map[at] = live_file_buffers[resolved_p.name].splitlines()
+            elif resolved_p.exists() and resolved_p.is_file():
+                try:
+                    file_orig_lines_map[at] = resolved_p.read_text(encoding="utf-8", errors="ignore").splitlines()
+                except Exception:
+                    file_orig_lines_map[at] = []
+
+    is_multi = req.allow_multi_file if req.allow_multi_file is not None else (len(auth_targets) > 1)
+
+    final_diff, staged_files = PatchEngine.build_multi_surgical_diff(
+        file_orig_lines_map=file_orig_lines_map,
+        generated_text=req.code_or_snippet,
+        default_filename=target_path.name,
+        allow_multi_file=is_multi,
+        authorized_files=auth_targets,
+        preferred_line=req.preferred_line
+    )
+
+    is_valid = all(s.get("valid", True) for s in staged_files) if staged_files else True
+    err = next((s.get("error") for s in staged_files if s.get("error")), None)
     hunks = PatchEngine.split_into_hunks(final_diff)
-    staged_files = PatchEngine.split_multi_file_diff(final_diff)
     return {
         "status": "success",
         "target_file": target_path.name,

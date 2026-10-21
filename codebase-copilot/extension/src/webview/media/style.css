@@ -2063,24 +2063,131 @@ body.vscode-native .diff-edited-badge {
   display: flex;
   gap: 4px;
   align-items: center;
+  flex-wrap: wrap;
+  margin-top: 4px;
 }
 
 .diff-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-family: var(--font-pixel), monospace;
-  font-size: 7.5px;
-  padding: 2px 6px;
-  background: var(--surface-muted);
+  font-size: 8px;
+  padding: 3px 6px;
+  background: var(--surface-card);
   border: 1px solid var(--border-subtle);
   border-radius: 4px;
   color: var(--text-secondary);
   cursor: pointer;
   transition: all 0.15s ease;
+  user-select: none;
+}
+
+.diff-file-chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
 }
 
 .diff-file-chip.active {
   background: var(--primary-terracotta);
   color: #fff;
   border-color: var(--primary-terracotta);
+}
+
+.diff-file-chip.is-applied {
+  border-color: rgba(16, 185, 129, 0.45);
+  background: rgba(16, 185, 129, 0.08);
+}
+
+.diff-file-chip.active.is-applied {
+  background: #059669;
+  border-color: #047857;
+  color: #fff;
+}
+
+.diff-chip-status {
+  font-size: 8.5px;
+  line-height: 1;
+  font-weight: 700;
+}
+
+.diff-chip-status.is-done {
+  color: #10B981;
+}
+
+.diff-chip-status.is-err {
+  color: #EF4444;
+}
+
+.diff-chip-status.is-pending {
+  color: #F97316;
+}
+
+.diff-file-chip.active .diff-chip-status.is-done,
+.diff-file-chip.active .diff-chip-status.is-err,
+.diff-file-chip.active .diff-chip-status.is-pending {
+  color: #ffffff;
+}
+
+.diff-chip-name {
+  font-weight: 600;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-chip-metrics {
+  display: inline-flex;
+  gap: 3px;
+  font-size: 7.5px;
+  opacity: 0.9;
+  margin-left: 2px;
+}
+
+.chip-add {
+  color: #10B981;
+}
+
+.chip-del {
+  color: #EF4444;
+}
+
+.diff-file-chip.active .chip-add,
+.diff-file-chip.active .chip-del {
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.btn-chip-discard {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  border-radius: 2px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 9px;
+  line-height: 1;
+  padding: 0;
+  margin-left: 2px;
+  transition: all 0.12s ease;
+}
+
+.btn-chip-discard:hover {
+  background: rgba(239, 68, 68, 0.25);
+  color: #EF4444;
+}
+
+.diff-file-chip.active .btn-chip-discard {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.diff-file-chip.active .btn-chip-discard:hover {
+  background: rgba(0, 0, 0, 0.3);
+  color: #ffffff;
 }
 
 .diff-split-table {
@@ -3203,6 +3310,42 @@ body.claude-dark .chat-jump-down-btn:hover {
 
 .btn-accept:active {
   box-shadow: 0 1px 0 #7C311C;
+  transform: translateY(1px);
+}
+
+.btn-accept-all {
+  flex: 1.3;
+  min-width: 0;
+  padding: 8px 10px;
+  background: #10B981;
+  border: 1.5px solid #059669;
+  border-radius: 4px;
+  font-family: var(--font-pixel);
+  font-size: 8.5px;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: white;
+  cursor: pointer;
+  box-shadow: 0 2px 0 #047857, 0 4px 12px rgba(16, 185, 129, 0.35);
+  transition: all 0.12s ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: center;
+  box-sizing: border-box;
+  pointer-events: auto;
+}
+
+.btn-accept-all:hover {
+  background: #059669;
+  border-color: #047857;
+  box-shadow: 0 3px 0 #065F46, 0 6px 16px rgba(16, 185, 129, 0.45);
+  transform: translateY(-1px);
+}
+
+.btn-accept-all:active {
+  box-shadow: 0 1px 0 #065F46;
   transform: translateY(1px);
 }
 
@@ -4395,6 +4538,18 @@ body.claude-dark .btn-accept:hover {
   box-shadow: 0 3px 0 #7C311C, 0 6px 16px rgba(217, 119, 87, 0.5);
 }
 
+body.claude-dark .btn-accept-all {
+  background: #10B981;
+  border-color: #059669;
+  box-shadow: 0 2px 0 #047857, 0 4px 12px rgba(16, 185, 129, 0.35);
+}
+
+body.claude-dark .btn-accept-all:hover {
+  background: #059669;
+  border-color: #047857;
+  box-shadow: 0 3px 0 #065F46, 0 6px 16px rgba(16, 185, 129, 0.45);
+}
+
 body.claude-dark .settings-card {
   background: #25231F;
   border-color: #38342D;
@@ -5559,6 +5714,25 @@ body.vscode-native .btn-accept {
 body.vscode-native .btn-accept:hover {
   background: var(--vscode-button-hoverBackground, #1177bb) !important;
   border-color: var(--vscode-button-border, transparent) !important;
+  box-shadow: 0 4px 10px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.45)) !important;
+  transform: translateY(-1px) !important;
+}
+
+body.vscode-native .btn-accept-all {
+  font-family: var(--font-pixel) !important;
+  font-size: 8.5px !important;
+  letter-spacing: 0.7px !important;
+  text-transform: uppercase !important;
+  border-radius: 4px !important;
+  background: #10B981 !important;
+  color: #ffffff !important;
+  border: 1px solid #059669 !important;
+  box-shadow: 0 3px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35)) !important;
+}
+
+body.vscode-native .btn-accept-all:hover {
+  background: #059669 !important;
+  border-color: #047857 !important;
   box-shadow: 0 4px 10px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.45)) !important;
   transform: translateY(-1px) !important;
 }

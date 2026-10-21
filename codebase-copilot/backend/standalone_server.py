@@ -998,6 +998,50 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(result).encode("utf-8"))
 
+        elif self.path == "/api/agent/apply-all-patches":
+            patches = body.get("patches", [])
+            ws_path = body.get("workspace_path") or runtime_settings.get("repo_path", ".")
+            results = []
+            applied_count = 0
+            for p in patches:
+                f_path = p.get("file_path", "")
+                d_text = p.get("diff", "")
+                res = PatchEngine.apply_patch_hunks(
+                    file_path=f_path,
+                    diff_text=d_text,
+                    workspace_path=str(ws_path)
+                )
+                success = (res.get("status") == "success")
+                if success:
+                    applied_count += 1
+                    patched_file = res.get("file")
+                    if patched_file:
+                        try:
+                            p_obj = Path(patched_file)
+                            if p_obj.exists():
+                                new_text = p_obj.read_text(encoding="utf-8", errors="ignore")
+                                live_file_buffers[str(p_obj.resolve())] = new_text
+                                live_file_buffers[p_obj.name] = new_text
+                        except Exception:
+                            pass
+                results.append({
+                    "file_path": f_path,
+                    "status": res.get("status", "error"),
+                    "message": res.get("message", ""),
+                    "applied": success
+                })
+            overall_status = "success" if (applied_count == len(patches) and len(patches) > 0) else ("partial" if applied_count > 0 else "error")
+            resp_data = {
+                "status": overall_status,
+                "applied_count": applied_count,
+                "total_count": len(patches),
+                "results": results
+            }
+            self.send_response(200)
+            self._set_cors_headers()
+            self.end_headers()
+            self.wfile.write(json.dumps(resp_data).encode("utf-8"))
+
         elif self.path == "/api/agent/compute-diff":
             file_path = body.get("target_file", "")
             code_snippet = body.get("code_or_snippet", "")
@@ -1019,11 +1063,49 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             elif target_path.name in live_file_buffers:
                 orig_lines = live_file_buffers[target_path.name].splitlines()
 
+            file_orig_lines_map = {
+                file_path: orig_lines,
+                target_path.name: orig_lines
+            }
+
+            auth_targets = list(body.get("target_files") or [])
+            if file_path and file_path not in auth_targets and target_path.name not in auth_targets:
+                auth_targets.insert(0, target_path.name)
+
+            fn_matches = re.findall(r"(?:###|\*\*|File:?|filepath:?|#|\/\/|\/\*|<!--|\+\+\+\s+(?:b/)?)\s*([A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)", code_snippet)
+            for fn in fn_matches:
+                fn_clean = Path(fn.replace("\\", "/")).name
+                if fn_clean not in auth_targets and "." in fn_clean:
+                    auth_targets.append(fn_clean)
+
+            for at in auth_targets:
+                if at not in file_orig_lines_map:
+                    resolved_p = PatchEngine.resolve_target_path(at, str(ws_path))
+                    if at in live_file_buffers:
+                        file_orig_lines_map[at] = live_file_buffers[at].splitlines()
+                    elif resolved_p.name in live_file_buffers:
+                        file_orig_lines_map[at] = live_file_buffers[resolved_p.name].splitlines()
+                    elif resolved_p.exists() and resolved_p.is_file():
+                        try:
+                            file_orig_lines_map[at] = resolved_p.read_text(encoding="utf-8", errors="ignore").splitlines()
+                        except Exception:
+                            file_orig_lines_map[at] = []
+
+            is_multi = body.get("allow_multi_file") if body.get("allow_multi_file") is not None else (len(auth_targets) > 1)
             pref_line = body.get("preferred_line") or body.get("cursor_line")
-            diff_text = PatchEngine.build_surgical_diff(orig_lines, code_snippet, target_path.name, preferred_line=pref_line)
-            is_valid, final_diff, err = PatchEngine.validate_and_heal_diff(orig_lines, diff_text, target_path.name)
+
+            final_diff, staged_files = PatchEngine.build_multi_surgical_diff(
+                file_orig_lines_map=file_orig_lines_map,
+                generated_text=code_snippet,
+                default_filename=target_path.name,
+                allow_multi_file=is_multi,
+                authorized_files=auth_targets,
+                preferred_line=pref_line
+            )
+
+            is_valid = all(s.get("valid", True) for s in staged_files) if staged_files else True
+            err = next((s.get("error") for s in staged_files if s.get("error")), None)
             hunks = PatchEngine.split_into_hunks(final_diff)
-            staged_files = PatchEngine.split_multi_file_diff(final_diff)
             res = {
                 "status": "success",
                 "target_file": target_path.name,
@@ -1526,7 +1608,61 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                 target_ext = Path(target_filename).suffix.lstrip(".")
                 lang_hint = target_ext if target_ext else "python"
 
-                if is_comprehensive:
+                all_targets = list(dict.fromkeys((body.get("target_files") or []) + target_files))
+                if target_filename and target_filename not in all_targets:
+                    all_targets.insert(0, target_filename)
+
+                file_orig_lines_map = {}
+                for at in all_targets:
+                    at_obj = accessible.get(at) or (Path(ws_path) / at)
+                    lines = []
+                    if at in live_file_buffers:
+                        lines = live_file_buffers[at].splitlines()
+                    elif at_obj.name in live_file_buffers:
+                        lines = live_file_buffers[at_obj.name].splitlines()
+                    elif at_obj.exists() and at_obj.is_file():
+                        try:
+                            lines = at_obj.read_text(encoding="utf-8", errors="ignore").splitlines()
+                        except Exception:
+                            lines = []
+                    elif at == target_filename and raw_file_content:
+                        lines = raw_file_content.splitlines()
+
+                    file_orig_lines_map[at] = lines
+                    file_orig_lines_map[at_obj.name] = lines
+                    file_orig_lines_map[str(at_obj)] = lines
+
+                if len(all_targets) > 1:
+                    multi_contexts = []
+                    for at in all_targets:
+                        lines = file_orig_lines_map.get(at, [])
+                        if lines:
+                            numbered = [f"{i+1:3d}: {line}" for i, line in enumerate(lines)]
+                            multi_contexts.append(f"[Target File: {at} ({len(lines)} lines)]\n" + "\n".join(numbered)[:12000])
+                        else:
+                            multi_contexts.append(f"[Target File to Create: '{at}']\n[Status: File has no code yet on disk. Provide full implementation.]")
+                    agent_code_context = "\n\n".join(multi_contexts)
+                    prompt = (
+                        f"Goal: {goal}\n"
+                        f"Target Files: {', '.join(all_targets)}\n\n"
+                        f"{agent_code_context}\n\n"
+                        f"Implement the complete, working solution across the target files to achieve: {goal}\n\n"
+                        "INSTRUCTIONS:\n"
+                        "- Output the updated code for each target file.\n"
+                        "- Output each file inside a separate code block, with the filename labeled on line 1, for example:\n"
+                        "  ```python\n"
+                        f"  # {all_targets[0]}\n"
+                        "  ...\n"
+                        "  ```\n"
+                        "  ```python\n"
+                        f"  # {all_targets[1]}\n"
+                        "  ...\n"
+                        "  ```\n"
+                        "- Provide complete, production-ready, working code. Do not use placeholders or omit lines.\n"
+                        "- ZERO EMOJIS: Do not use emojis anywhere in your output."
+                    )
+                    sys_msg = "You are CLAY, an autonomous code synthesis engine. Provide complete, multi-file code solutions with each file in its own labeled code block."
+                elif is_comprehensive:
                     prompt = (
                         f"Goal: {goal}\n"
                         f"Target File: {target_filename}\n"
@@ -1614,11 +1750,18 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                     except Exception as e:
                         generated = f"// Error connecting to {active_model}: {str(e)}"
 
-                # Build surgical minimal diff using multi-strategy builder (eliminates full-file wipes and line desync)
-                diff_text = PatchEngine.build_surgical_diff(orig_lines, generated, target_filename, preferred_line=preferred_line)
+                # Build surgical minimal diff using multi-surgical builder
+                final_diff, staged_files = PatchEngine.build_multi_surgical_diff(
+                    file_orig_lines_map=file_orig_lines_map,
+                    generated_text=generated,
+                    default_filename=target_filename,
+                    allow_multi_file=True,
+                    authorized_files=all_targets,
+                    preferred_line=preferred_line
+                )
 
-                # Pre-staging AST syntax validation & automated self-healing
-                is_valid, final_diff, err_msg = PatchEngine.validate_and_heal_diff(orig_lines, diff_text, target_filename)
+                is_valid = all(s.get("valid", True) for s in staged_files) if staged_files else True
+                err_msg = next((s.get("error") for s in staged_files if s.get("error")), None)
 
                 # Extract filename from diff header if present
                 if final_diff:
@@ -1627,9 +1770,10 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                         target_filename = Path(header_match.group(1)).name
 
                 hunks = PatchEngine.split_into_hunks(final_diff)
-                staged_files = PatchEngine.split_multi_file_diff(final_diff)
 
-                if is_new_file:
+                if staged_files and len(staged_files) > 1:
+                    log_msg = f"Synthesized surgical solution across {len(staged_files)} files ({', '.join(s['file_path'] for s in staged_files)})."
+                elif is_new_file:
                     log_msg = f"Generated complete implementation for new file '{target_filename}'."
                 elif is_algorithm_or_complex:
                     log_msg = f"Synthesized production-ready implementation of {topic_info.get('topic', 'algorithm')} for '{target_filename}'."

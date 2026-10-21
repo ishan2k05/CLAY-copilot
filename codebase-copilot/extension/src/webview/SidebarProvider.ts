@@ -263,7 +263,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             num_predict: data.num_predict
                         } : undefined,
                         data.history,
-                        data.pinned_mentions
+                        data.pinned_mentions,
+                        data.allow_multi_file,
+                        data.target_files
                     );
                     break;
                 }
@@ -435,6 +437,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         this._view?.webview.postMessage({ command: 'patchApplied', file: finalName });
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`Failed to apply patch: ${err.message}`);
+                    }
+                    break;
+                }
+                case 'applyAllPatches': {
+                    try {
+                        const targetWorkspace = data.workspacePath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || (this._lastActiveDocument ? path.dirname(this._lastActiveDocument.uri.fsPath) : undefined);
+                        const rawPatches: Array<{ file_path?: string; file?: string; diff: string }> = data.patches || [];
+                        const resolvedPatches: Array<{ file_path: string; diff: string }> = [];
+
+                        for (const p of rawPatches) {
+                            let tf = p.file_path || p.file || '';
+                            if (targetWorkspace && tf && !path.isAbsolute(tf)) {
+                                tf = path.resolve(targetWorkspace, tf);
+                            }
+                            resolvedPatches.push({ file_path: tf, diff: p.diff });
+                        }
+
+                        const res = await this._backendClient.applyAllPatches(resolvedPatches, targetWorkspace);
+                        vscode.window.showInformationMessage(`CLAY Copilot: Applied ${res.applied_count || 0} of ${resolvedPatches.length} patches.`);
+                        this._view?.webview.postMessage({
+                            command: 'allPatchesApplied',
+                            results: res.results || [],
+                            applied_count: res.applied_count || 0,
+                            total_count: res.total_count || resolvedPatches.length
+                        });
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to apply all patches: ${err.message}`);
                     }
                     break;
                 }
@@ -856,7 +885,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         data.target_file,
                         data.step_action,
                         data.total_steps,
-                        activeFileContent
+                        activeFileContent,
+                        data.allow_multi_file,
+                        data.target_files
                     );
                     this._view?.webview.postMessage({
                         command: 'agentStepResult',
@@ -1015,7 +1046,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         securityMode?: string,
         inferenceOptions?: { temperature?: number; num_ctx?: number; num_predict?: number },
         history?: Array<{ role: string; content: string }>,
-        pinnedMentions?: Array<Record<string, any>>
+        pinnedMentions?: Array<Record<string, any>>,
+        allowMultiFile?: boolean,
+        targetFiles?: string[]
     ) {
         let activeDoc = vscode.window.activeTextEditor?.document;
         if ((!activeDoc || activeDoc.uri.scheme !== 'file') && this._lastActiveDocument && !this._lastActiveDocument.isClosed) {
@@ -1076,7 +1109,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             inferenceOptions,
             cursorLine,
             history,
-            pinnedMentions
+            pinnedMentions,
+            allowMultiFile,
+            targetFiles
         );
     }
 
@@ -1323,6 +1358,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         <div class="sticky-review-bar" id="diff-action-bar" style="display: none;">
             <button class="btn-reject" id="btn-reject-diff">Reject Changes</button>
             <button class="btn-accept" id="btn-accept-diff">Accept & Apply Patch</button>
+            <button class="btn-accept-all" id="btn-accept-all-diff" style="display: none;">Apply All (0)</button>
         </div>
     </div>
 

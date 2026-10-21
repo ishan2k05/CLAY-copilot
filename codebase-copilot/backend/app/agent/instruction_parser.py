@@ -1147,6 +1147,7 @@ class DynamicTaskPlanner:
             "complexity": "huge" if (is_huge or len(steps) >= 5) else ("high" if len(steps) == 4 else "normal"),
             "total_steps": len(steps),
             "target_file": resolved_target,
+            "target_files": target_files or ([resolved_target] if resolved_target else []),
             "folder_name": folder_name,
             "steps": steps
         }

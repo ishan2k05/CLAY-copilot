@@ -83,6 +83,7 @@ class LLMInstructionDecomposer:
         folders_str = ", ".join(existing_folders) if existing_folders else "None (root only)"
         files_str = ", ".join(candidate_files) if candidate_files else "None"
         active_str = active_file or "None"
+        targets_str = ", ".join(target_files) if target_files else "None"
 
         return (
             "You are the Task Planning Intelligence for an autonomous coding agent.\n"
@@ -90,7 +91,8 @@ class LLMInstructionDecomposer:
             f"Workspace Context:\n"
             f"- Existing Folders: {folders_str}\n"
             f"- Active Open File: {active_str}\n"
-            f"- Accessible Files: {files_str}\n\n"
+            f"- Accessible Files: {files_str}\n"
+            f"- Target Files in Scope: {targets_str}\n\n"
             f"User Directive:\n\"{goal}\"\n\n"
             "You MUST respond ONLY with a raw JSON object matching this exact schema:\n"
             "{\n"
@@ -125,8 +127,9 @@ class LLMInstructionDecomposer:
             "3. If user asks to create a brand new file (e.g. 'create auth.py'):\n"
             "   - primary_intent MUST be 'CREATE_NEW'\n"
             "   - Steps MUST be 3 steps: 1. scan, 2. synthesize, 3. verify\n"
-            "4. If user asks to edit or modify existing file:\n"
+            "4. If user asks to edit or modify existing file(s):\n"
             "   - primary_intent MUST be 'EDIT_EXISTING'\n"
+            "   - If multiple files are involved, include all of them in \"target_files\": [\"calc.py\", \"app.py\"]\n"
             "   - Steps MUST be 3 steps: 1. scan, 2. synthesize, 3. verify\n"
             "5. If user asks to implement algorithms or complex data structures:\n"
             "   - primary_intent MUST be 'ALGORITHM_SYNTHESIS'\n"
@@ -191,9 +194,11 @@ class LLMInstructionDecomposer:
                             "detail": s.get("detail", f"Step {idx} completed.")
                         })
 
-                    resolved_target_files = parsed_plan.get("target_files", [])
-                    if not resolved_target_files and target_files:
-                        resolved_target_files = list(target_files)
+                    resolved_target_files = parsed_plan.get("target_files", []) or []
+                    if target_files:
+                        for tf in target_files:
+                            if tf not in resolved_target_files:
+                                resolved_target_files.append(tf)
 
                     primary_target = resolved_target_files[0] if resolved_target_files else (active_file or "test.py")
                     target_folders = parsed_plan.get("target_folders", [])

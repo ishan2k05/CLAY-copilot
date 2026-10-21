@@ -79,5 +79,68 @@ class TestMultiFileAndHunkStageEndpoints(unittest.TestCase):
         self.assertIn("staged_files", data)
         self.assertEqual(data["target_file"], "new_module.py")
 
+    def test_build_multi_surgical_diff_extracts_both_files(self):
+        llm_response = (
+            "Here is the code for both files:\n\n"
+            "```py\n"
+            "# calc.py\n"
+            "def multiply(a, b):\n"
+            "    return a * b\n"
+            "```\n\n"
+            "```py\n"
+            "# app.py\n"
+            "from calc import multiply\n\n"
+            "def app():\n"
+            "    result = multiply(5, 4)\n"
+            "    print(f'The result of multiply(5, 4) is {result}')\n"
+            "```\n"
+        )
+        file_map = {
+            "calc.py": [],
+            "app.py": []
+        }
+        diff, staged = PatchEngine.build_multi_surgical_diff(
+            file_orig_lines_map=file_map,
+            generated_text=llm_response,
+            default_filename="calc.py",
+            allow_multi_file=True,
+            authorized_files=["calc.py", "app.py"]
+        )
+        self.assertEqual(len(staged), 2)
+        staged_names = [s["file_path"] for s in staged]
+        self.assertIn("calc.py", staged_names)
+        self.assertIn("app.py", staged_names)
+        self.assertTrue(all(s["valid"] for s in staged))
+        self.assertIn("calc.py", diff)
+        self.assertIn("app.py", diff)
+
+    def test_compute_diff_multi_file_endpoint(self):
+        llm_response = (
+            "```python\n"
+            "# calc.py\n"
+            "def multiply(a, b):\n"
+            "    return a * b\n"
+            "```\n\n"
+            "```python\n"
+            "# app.py\n"
+            "from calc import multiply\n"
+            "print(multiply(5, 4))\n"
+            "```\n"
+        )
+        resp = self.client.post("/api/agent/compute-diff", json={
+            "target_file": "calc.py",
+            "target_files": ["calc.py", "app.py"],
+            "allow_multi_file": True,
+            "code_or_snippet": llm_response
+        })
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("staged_files", data)
+        self.assertEqual(len(data["staged_files"]), 2)
+        paths = [sf["file_path"] for sf in data["staged_files"]]
+        self.assertIn("calc.py", paths)
+        self.assertIn("app.py", paths)
+
 if __name__ == "__main__":
     unittest.main()
+

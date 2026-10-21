@@ -129,6 +129,32 @@
     return null;
   }
 
+  function getAllFilesFromGoal(goalText) {
+    if (!goalText || typeof goalText !== 'string') return [];
+    const trimmed = goalText.trim();
+    const cleanFiles = [];
+    const fileMatches = trimmed.match(/(?:[a-zA-Z0-9_\-\.\/\\\:]+\.[a-zA-Z0-9_\-]+)/g) || [];
+    for (const match of fileMatches) {
+      let token = match.trim().replace(/^['"`<(\[]+|['"`>)\]]+$/g, '').replace(/\\/g, '/');
+      if (token && token.includes('.') && !token.startsWith('.') && !/^(https?:\/\/|www\.)/i.test(token)) {
+        const ext = token.split('.').pop().toLowerCase();
+        if (ext && /^[a-zA-Z0-9]{1,10}$/.test(ext) && !['com', 'org', 'net', 'io', 'ai', 'edu', 'gov'].includes(ext)) {
+          const fn = token.split('/').pop();
+          if (fn && !cleanFiles.includes(fn)) cleanFiles.push(fn);
+        }
+      }
+    }
+    if (Array.isArray(currentRepoFilesList) && currentRepoFilesList.length > 0) {
+      const lower = trimmed.toLowerCase();
+      for (const f of currentRepoFilesList) {
+        if (f.name && lower.includes(f.name.toLowerCase())) {
+          if (!cleanFiles.includes(f.name)) cleanFiles.push(f.name);
+        }
+      }
+    }
+    return cleanFiles;
+  }
+
   const GENERIC_DIFF_PLACEHOLDERS = new Set([
     'file', 'unknown', 'filename', 'patch', 'diff',
     'solution.py', 'patch.diff', 'code', 'script',
@@ -1805,6 +1831,9 @@
     hideMentionPopup();
   }
 
+  let lastChatAllowMulti = false;
+  let lastChatTargetFiles = [];
+
   async function sendChatMessage() {
     if (!chatInput) return;
     const text = chatInput.value.trim();
@@ -1845,6 +1874,25 @@
 
     const historyPayload = chatSessionHistory.slice(-10);
 
+    // Scope parameterization: evaluate target files from mentions and prompt text
+    // The LLM decides scope naturally based on context and prompt instructions
+    const fileMentions = mentionsPayload.filter(m => m.type === 'file');
+    const filesFromText = getAllFilesFromGoal(text);
+    const targetFilesSet = new Set(fileMentions.map(m => m.path || m.name));
+    for (const f of filesFromText) {
+      targetFilesSet.add(f);
+    }
+    const targetFiles = Array.from(targetFilesSet);
+
+    // Multi-file is allowed if multiple files are referenced or if open-ended scope
+    const allowMultiFile = targetFiles.length > 1 || (targetFiles.length === 0);
+    if (targetFiles.length === 0 && activeEditorFile) {
+      targetFiles.push(activeEditorFile);
+    }
+
+    lastChatAllowMulti = allowMultiFile;
+    lastChatTargetFiles = targetFiles;
+
     if (isVsCode) {
       vscode.postMessage({
         command: 'userQuery',
@@ -1855,7 +1903,9 @@
         temperature: currentTemperature,
         num_ctx: currentNumCtx,
         num_predict: currentNumPredict,
-        pinned_mentions: mentionsPayload
+        pinned_mentions: mentionsPayload,
+        allow_multi_file: allowMultiFile,
+        target_files: targetFiles
       });
       // Remains in generating state until streamComplete or streamStopped
     } else {
@@ -1873,6 +1923,8 @@
             num_ctx: currentNumCtx,
             num_predict: currentNumPredict,
             pinned_mentions: mentionsPayload,
+            allow_multi_file: allowMultiFile,
+            target_files: targetFiles,
             stream: true
           }),
           signal: chatAbortController.signal
@@ -2422,18 +2474,88 @@
         targetFilename = targetFilename.replace(/(\.[a-zA-Z0-9]+)\1+$/gi, '$1');
       }
 
-      if (detectedDiff && targetFilename) {
+      // Multi-code-block and multi-file extraction from cleaned answerText (excluding thinking block)
+      const codeBlockRegex = /```(?!mermaid\b)([a-zA-Z0-9_\-\.:/]+)?\s*\n([\s\S]*?)```/gi;
+      const allExtractedBlocks = [];
+      let blockMatch;
+      while ((blockMatch = codeBlockRegex.exec(answerText)) !== null) {
+        const header = (blockMatch[1] || '').trim();
+        const code = (blockMatch[2] || '').trim();
+        if (!code || ['mermaid', 'json', 'bash', 'sh', 'terminal', 'output', 'text'].includes(header.toLowerCase())) {
+          continue;
+        }
+
+        let fn = null;
+        if (header.includes(':')) {
+          fn = header.split(':')[1].trim();
+        } else if (header.includes('.') && !header.startsWith('.')) {
+          fn = header;
+        }
+        if (!fn && code) {
+          const lines = code.split('\n').map(l => l.trim()).filter(Boolean);
+          for (const cl of lines.slice(0, 5)) {
+            const flm = cl.match(/^(?:#|\/\/|\/\*|<!--|--|;)\s*(?:File:?|filepath:?|path:?|filename:?)?\s*([A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)/i);
+            if (flm) { fn = flm[1].trim(); break; }
+          }
+        }
+        if (!fn) {
+          const pre = answerText.substring(Math.max(0, blockMatch.index - 300), blockMatch.index).trim();
+          const lines = pre.split('\n').filter(l => l.trim());
+          if (lines.length > 0) {
+            const lastLine = lines[lines.length - 1];
+            const preM = lastLine.match(/(?:###|\*\*|File:?|Target:?|Path:?|In|Update|Create)?\s*[`'\"]?([A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)[`'\"]?/i);
+            if (preM && preM[1].includes('.')) fn = preM[1].trim();
+          }
+        }
+        allExtractedBlocks.push({ file_path: fn || targetFilename || 'file', code: code });
+      }
+
+      const detectedCode = allExtractedBlocks.length > 0 ? allExtractedBlocks.map(b => b.code).join('\n\n') : null;
+      const activeFile = getActiveEditorFileInRepo();
+      const activeContent = getActiveEditorContentInRepo();
+      const activeBaseFilename = activeFile ? activeFile.replace(/\\/g, '/').split('/').pop() : null;
+      if (!targetFilename) {
+        targetFilename = (allExtractedBlocks[0] && allExtractedBlocks[0].file_path) || getPrimaryRepoFile(lastUserQuery || answerText) || activeBaseFilename || repoActiveFilename || 'solution.py';
+      }
+
+      // 1. Immediate staging for fast UI feedback
+      if (allExtractedBlocks.length > 1) {
+        const initialStaged = allExtractedBlocks.map(b => {
+          const rawLines = b.code.split('\n');
+          const d = `--- /dev/null\n+++ b/${b.file_path}\n@@ -0,0 +1,${rawLines.length} @@\n` + rawLines.map(l => `+${l}`).join('\n');
+          return {
+            file_path: b.file_path,
+            diff: d,
+            adds: rawLines.length,
+            dels: 0,
+            applied: false
+          };
+        });
+        stageDiff(initialStaged[0].file_path, initialStaged[0].diff, initialStaged);
+      } else if (detectedDiff && targetFilename) {
         stageDiff(targetFilename, detectedDiff);
-        // Asynchronously heal bare @@ or missing line numbers through compute-diff
+      } else if (allExtractedBlocks.length === 1 && targetFilename) {
+        const b = allExtractedBlocks[0];
+        const rawLines = b.code.split('\n');
+        const initialDiff = `--- /dev/null\n+++ b/${targetFilename}\n@@ -0,0 +1,${rawLines.length} @@\n` + rawLines.map(l => `+${l}`).join('\n');
+        stageDiff(targetFilename, initialDiff);
+      }
+
+      // 2. Asynchronously compute exact surgical unified diffs across all target files
+      if (allExtractedBlocks.length > 0 || (detectedDiff && targetFilename)) {
         (async () => {
           try {
             const isTargetActive = streamActiveFile && isSameFileReference(streamActiveFile, targetFilename);
+            const compTargetFiles = allExtractedBlocks.length > 1 ? allExtractedBlocks.map(b => b.file_path) : (lastChatTargetFiles || undefined);
+            const compAllowMulti = allExtractedBlocks.length > 1 || Boolean(lastChatAllowMulti);
             const compRes = await fetch(`${BACKEND_URL}/api/agent/compute-diff`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 target_file: targetFilename,
-                code_or_snippet: detectedDiff,
+                target_files: compTargetFiles,
+                allow_multi_file: compAllowMulti,
+                code_or_snippet: answerText,
                 workspace_path: currentRepoPath,
                 active_file_content: isTargetActive ? (activeEditorContent || undefined) : undefined,
                 preferred_line: isTargetActive ? (activeEditorCursorLine || undefined) : undefined
@@ -2441,79 +2563,17 @@
             });
             if (compRes.ok) {
               const compData = await compRes.json();
-              if (compData && compData.diff && compData.diff.trim().length > 0) {
-                stageDiff(targetFilename, compData.diff, compData.staged_files);
+              if (compData && compData.staged_files && compData.staged_files.length > 0) {
+                const firstF = compData.staged_files[0];
+                stageDiff(firstF.file_path, firstF.diff, compData.staged_files);
+              } else if (compData && compData.diff && compData.diff.trim().length > 0) {
+                stageDiff(targetFilename, compData.diff);
               }
             }
           } catch (e) {
             console.warn('[compute-diff in onStreamFinished failed]', e);
           }
         })();
-      }
-
-      // Check if there is a general executable code block if diff wasn't detected (strictly excluding mermaid)
-      let detectedCode = null;
-      if (!detectedDiff) {
-        const codeBlockMatch = fullText.match(/```(?!mermaid\b)[a-zA-Z0-9_-]*\n([\s\S]*?)```/i);
-        if (codeBlockMatch) {
-          detectedCode = codeBlockMatch[1].trim();
-
-          // Check if first line in code block or fullText has an explicit path comment: e.g. "# documentation/plan.md"
-          let pathInComment = null;
-          const firstLine = detectedCode.split('\n')[0].trim();
-          const firstLinePathMatch = firstLine.match(/^(?:#|\/\/|\/\*|<!--)\s*([a-zA-Z0-9_\-\.\/\\\:]+\.[a-zA-Z0-9_\-]+)/);
-          if (firstLinePathMatch) {
-            const candPath = firstLinePathMatch[1].trim().replace(/^['"`<(\[]+|['"`>)\]]+$/g, '').replace(/\\/g, '/');
-            if (candPath && candPath.includes('.') && !candPath.startsWith('.')) {
-              const ext = candPath.split('.').pop().toLowerCase();
-              if (ext && /^[a-zA-Z0-9]{1,10}$/.test(ext) && !['com', 'org', 'net', 'io'].includes(ext)) {
-                pathInComment = candPath;
-              }
-            }
-          }
-
-          const activeFile = getActiveEditorFileInRepo();
-          const activeContent = getActiveEditorContentInRepo();
-          const repoActiveFilename = activeFile ? activeFile.replace(/\\/g, '/').split('/').pop() : null;
-          targetFilename = pathInComment || getPrimaryRepoFile(lastUserQuery || fullText) || repoActiveFilename;
-
-          // If code was generated for a requested new file or creation prompt, or file is empty, construct and stage creation diff
-          const isCreationIntent = /\b(create|new\s+file|put\s+.*in|write\s+.*in|save\s+as|in\s+a\s+new\s+file)\b/i.test(lastUserQuery || '');
-          const fileExists = currentRepoFilesList && currentRepoFilesList.some(f => f.name && f.name.toLowerCase() === (targetFilename || '').toLowerCase());
-          const isActiveEmpty = (activeFile && isSameFileReference(activeFile, targetFilename) && (!activeContent || !activeContent.trim()));
-
-          if (detectedCode && (isCreationIntent || !fileExists || isActiveEmpty) && targetFilename) {
-            const rawLines = detectedCode.split('\n');
-            const newFileDiff = `--- /dev/null\n+++ b/${targetFilename}\n@@ -0,0 +1,${rawLines.length} @@\n` + rawLines.map(l => `+${l}`).join('\n');
-            detectedDiff = newFileDiff;
-            stageDiff(targetFilename, newFileDiff);
-          } else if (detectedCode && targetFilename) {
-            // Asynchronously resolve diff against existing file on disk or active editor
-            (async () => {
-              try {
-                const compRes = await fetch(`${BACKEND_URL}/api/agent/compute-diff`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    target_file: targetFilename,
-                    code_or_snippet: detectedCode,
-                    workspace_path: currentRepoPath,
-                    active_file_content: (activeFile && isSameFileReference(activeFile, targetFilename)) ? activeContent : undefined
-                  })
-                });
-                if (compRes.ok) {
-                  const compData = await compRes.json();
-                  if (compData && compData.diff) {
-                    detectedDiff = compData.diff;
-                    stageDiff(targetFilename, detectedDiff);
-                  }
-                }
-              } catch (e) {
-                console.warn('[compute-diff in onStreamFinished failed]', e);
-              }
-            })();
-          }
-        }
       }
 
       // Detect code change intent in user query or response
@@ -2546,10 +2606,13 @@
           const capturedCode = detectedCode;
           const capturedTarget = targetFilename || getPrimaryRepoFile(lastUserQuery || fullText);
           const capturedGoal = lastUserQuery || 'Apply generated code changes';
+          const capturedTargets = allExtractedBlocks.length > 0 ? allExtractedBlocks.map(b => b.file_path) : (capturedTarget ? [capturedTarget] : []);
 
           actionDiv.querySelector('.btn-run-in-agent').addEventListener('click', async () => {
             switchTab('agent');
-            const agentTaskLabel = capturedTarget ? `Apply changes for ${capturedTarget}` : capturedGoal;
+            const agentTaskLabel = capturedTargets.length > 1
+              ? `Apply changes across ${capturedTargets.length} files (${capturedTargets.join(', ')})`
+              : (capturedTarget ? `Apply changes for ${capturedTarget}` : capturedGoal);
             if (agentGoalInput) {
               agentGoalInput.value = agentTaskLabel;
               resizeAgentGoalInput();
@@ -2558,6 +2621,8 @@
               pregeneratedDiff: detectedDiff,
               pregeneratedCode: capturedCode,
               targetFile: capturedTarget,
+              targetFiles: capturedTargets,
+              stagedFiles: (stagedMultiFiles && stagedMultiFiles.length > 0) ? stagedMultiFiles : null,
               sourceGoal: capturedGoal
             });
           });
@@ -3167,36 +3232,50 @@
         }
       ];
     }
-    // 7. Standard single-file modification (3 Steps)
+    // 7. Standard modification (multi-file or single-file) (3 Steps)
     else {
+      const allDetectedFiles = getAllFilesFromGoal(cleanGoal);
+      const isMultiTarget = allDetectedFiles.length > 1;
+      const targetLabel = isMultiTarget ? allDetectedFiles.join(', ') : `'${resolvedTarget}'`;
+
       steps = [
         {
           id: 1,
           action: 'scan',
-          title: `1. Correlate symbols and anchor lines in '${resolvedTarget}'`,
-          progress: `Correlating symbols in '${resolvedTarget}'...`,
-          detail: `Correlated symbols in '${resolvedTarget}'.`
+          title: `1. Correlate symbols and anchor lines in ${targetLabel}`,
+          progress: `Correlating symbols in ${targetLabel}...`,
+          detail: `Correlated symbols in ${targetLabel}.`
         },
         {
           id: 2,
           action: 'synthesize',
-          title: isFromChat ? `2. Apply surgical changes and compute unified diff for '${resolvedTarget}'` : `2. Synthesize surgical code solution and compute unified diff for '${resolvedTarget}'`,
+          title: isFromChat
+            ? `2. Apply surgical changes and compute unified diff for ${targetLabel}`
+            : (isMultiTarget
+                ? `2. Synthesize surgical code solution across ${targetLabel}`
+                : `2. Synthesize surgical code solution and compute unified diff for ${targetLabel}`),
           progress: `Querying ${currentModel} for surgical code changes...`,
-          detail: `Synthesized surgical solution for '${resolvedTarget}'.`
+          detail: isMultiTarget
+            ? `Synthesized surgical solution across ${targetLabel}.`
+            : `Synthesized surgical solution for ${targetLabel}.`
         },
         {
           id: 3,
           action: 'verify',
-          title: `3. Run AST syntax validation & verify zero regressions in '${resolvedTarget}'`,
+          title: `3. Run AST syntax validation & verify zero regressions in ${targetLabel}`,
           progress: `Verifying syntax and AST integrity...`,
           detail: `Syntax and AST verification passed. Changes ready for inspection in Diff tab.`
         }
       ];
     }
 
+    const allGoalFiles = getAllFilesFromGoal(cleanGoal);
+    const resolvedTargetFiles = allGoalFiles.length > 0 ? allGoalFiles : (resolvedTarget ? [resolvedTarget] : []);
+
     return {
       goal: cleanGoal,
       target_file: resolvedTarget,
+      target_files: resolvedTargetFiles,
       folder_name: folderName,
       total_steps: steps.length,
       steps: steps
@@ -3235,10 +3314,10 @@
     // Generate dynamic execution plan
     const repoActiveFile = getActiveEditorFileInRepo();
     const repoActiveContent = getActiveEditorContentInRepo();
-    const explicitGoalFile = getExplicitFileFromGoal(goal);
+    const allGoalFiles = getAllFilesFromGoal(goal);
     const candidateTarget = (chatPayload && chatPayload.targetFile)
       ? chatPayload.targetFile
-      : (explicitGoalFile || (repoActiveFile ? repoActiveFile.replace(/\\/g, '/').split('/').pop() : undefined));
+      : (allGoalFiles.length > 0 ? allGoalFiles[0] : (repoActiveFile ? repoActiveFile.replace(/\\/g, '/').split('/').pop() : undefined));
 
     // Fast-path resolution for Chat code: ensure pregeneratedDiff is computed and ready BEFORE running steps
     if (isFromChat && chatPayload && chatPayload.pregeneratedCode && !chatPayload.pregeneratedDiff) {
@@ -3292,6 +3371,7 @@
             goal: goal,
             workspace_path: currentRepoPath,
             target_file: candidateTarget,
+            target_files: allGoalFiles.length > 0 ? allGoalFiles : undefined,
             active_file: repoActiveFile || undefined,
             active_file_content: repoActiveContent || undefined,
             model_name: currentModel
@@ -3316,9 +3396,15 @@
     appendTerminalLog(`[plan] Dynamic plan: ${totalSteps} steps created for '${goal.slice(0, 45)}'`);
 
     let effectiveGoal = goal;
+    let planTargetFiles = (plan && Array.isArray(plan.target_files) && plan.target_files.length > 0)
+      ? [...plan.target_files]
+      : (allGoalFiles.length > 0 ? [...allGoalFiles] : []);
+    if (chatPayload && Array.isArray(chatPayload.targetFiles) && chatPayload.targetFiles.length > 0) {
+      planTargetFiles = Array.from(new Set([...planTargetFiles, ...chatPayload.targetFiles]));
+    }
     let confirmedTargetFile = (chatPayload && chatPayload.targetFile)
       ? chatPayload.targetFile
-      : (explicitGoalFile || (plan && plan.target_file) || (repoActiveFile ? repoActiveFile.replace(/\\/g, '/').split('/').pop() : null) || getPrimaryRepoFile(goal));
+      : ((plan && plan.target_file) || (planTargetFiles.length > 0 ? planTargetFiles[0] : null) || (repoActiveFile ? repoActiveFile.replace(/\\/g, '/').split('/').pop() : null) || getPrimaryRepoFile(goal));
 
     try {
       for (let i = 0; i < steps.length; i++) {
@@ -3332,7 +3418,7 @@
         setAgentProgress(progressPct, `Step ${stepNum} of ${totalSteps}: ${currentStep.progress || currentStep.title}...`);
 
         let stepRes = null;
-        if (stepAction === 'synthesize' && isFromChat && chatPayload && (chatPayload.pregeneratedDiff || chatPayload.pregeneratedCode)) {
+        if (stepAction === 'synthesize' && isFromChat && chatPayload && (chatPayload.pregeneratedDiff || chatPayload.pregeneratedCode || (chatPayload.stagedFiles && chatPayload.stagedFiles.length > 0))) {
           // Fast-path: Directly use pre-generated code/diff from Chat without redundant LLM re-generation
           let finalChatDiff = chatPayload.pregeneratedDiff;
           if (!finalChatDiff && chatPayload.pregeneratedCode) {
@@ -3340,18 +3426,22 @@
             finalChatDiff = `--- /dev/null\n+++ b/${confirmedTargetFile}\n@@ -0,0 +1,${rawLines.length} @@\n` + rawLines.map(l => `+${l}`).join('\n');
             chatPayload.pregeneratedDiff = finalChatDiff;
           }
+          const stagedFromChat = (chatPayload.stagedFiles && chatPayload.stagedFiles.length > 0) ? chatPayload.stagedFiles : null;
           stepRes = {
             step_id: currentStep.id,
             status: 'done',
             target_file: confirmedTargetFile,
-            diff: finalChatDiff,
+            diff: finalChatDiff || (stagedFromChat ? stagedFromChat[0].diff : ''),
+            staged_files: stagedFromChat,
             valid: true,
-            log: `Staged exact code from Chat directly for '${confirmedTargetFile}'.`
+            log: (stagedFromChat && stagedFromChat.length > 1)
+              ? `Staged exact changes from Chat across ${stagedFromChat.length} files (${stagedFromChat.map(s => s.file_path).join(', ')}).`
+              : `Staged exact code from Chat directly for '${confirmedTargetFile}'.`
           };
-          appendTerminalLog(`[fast-path] Staged exact changes from Chat for '${confirmedTargetFile}' (LLM re-query bypassed).`);
+          appendTerminalLog(`[fast-path] Staged exact changes from Chat ${stagedFromChat && stagedFromChat.length > 1 ? `across ${stagedFromChat.length} files` : `for '${confirmedTargetFile}'`} (LLM re-query bypassed).`);
         } else {
-          // Execute step with effectiveGoal (the user prompt), confirmedTargetFile, and stepAction
-          stepRes = await executeStep(currentStep.id, effectiveGoal, confirmedTargetFile, stepAction, totalSteps);
+          // Execute step with effectiveGoal (the user prompt), confirmedTargetFile, stepAction, and all candidate target files
+          stepRes = await executeStep(currentStep.id, effectiveGoal, confirmedTargetFile, stepAction, totalSteps, planTargetFiles);
         }
         if (!isAgentRunning) return;
 
@@ -3392,19 +3482,30 @@
           appendTerminalLog(`[step ${stepNum}/${totalSteps}] ${detailMsg}`);
         }
 
+        // Propagate target files discovered in Step 1 (scan) forward to synthesis and validation steps
+        if (stepAction === 'scan' && stepRes && Array.isArray(stepRes.target_files) && stepRes.target_files.length > 0) {
+          planTargetFiles = Array.from(new Set([...planTargetFiles, ...stepRes.target_files]));
+          if (!confirmedTargetFile && planTargetFiles.length > 0) {
+            confirmedTargetFile = planTargetFiles[0];
+          }
+        }
+
         // Handle diff staging
         if (stepAction === 'synthesize' || stepAction === 'delete') {
           let diffToStage = stepRes.diff;
           const targetFilename = stepRes.target_file || confirmedTargetFile || (diffToStage ? extractDiffFilename(diffToStage) : '') || getPrimaryRepoFile(effectiveGoal);
 
-          if (isFromChat && chatPayload) {
-            diffToStage = chatPayload.pregeneratedDiff || diffToStage;
+          if (isFromChat && chatPayload && chatPayload.pregeneratedDiff) {
+            diffToStage = chatPayload.pregeneratedDiff;
           }
 
-          if (diffToStage) {
+          if (diffToStage || (stepRes.staged_files && stepRes.staged_files.length > 0)) {
             stageDiff(targetFilename, diffToStage, stepRes.staged_files);
             const diffType = stepAction === 'delete' ? 'deletion' : 'surgical';
-            appendTerminalLog(`[diff] Staged ${diffType} diff for ${targetFilename} in Diff Reviewer tab.`);
+            const targetDesc = (stepRes.staged_files && stepRes.staged_files.length > 1)
+              ? `across ${stepRes.staged_files.length} files (${stepRes.staged_files.map(s => s.file_path).join(', ')})`
+              : `for ${targetFilename}`;
+            appendTerminalLog(`[diff] Staged ${diffType} diff ${targetDesc} in Diff Reviewer tab.`);
           }
         }
       }
@@ -3457,11 +3558,30 @@
     }
   }
 
-  async function executeStep(stepId, goal, targetFile = null, stepAction = null, totalSteps = 3) {
+  async function executeStep(stepId, goal, targetFile = null, stepAction = null, totalSteps = 3, planTargetFiles = null) {
     const repoActiveFile = getActiveEditorFileInRepo();
     const repoActiveContent = getActiveEditorContentInRepo();
-    const explicitGoalFile = getExplicitFileFromGoal(goal);
-    const finalTarget = targetFile || explicitGoalFile || (repoActiveFile ? repoActiveFile.replace(/\\/g, '/').split('/').pop() : undefined) || getPrimaryRepoFile(goal);
+    const allGoalFiles = getAllFilesFromGoal(goal);
+
+    // Combine candidate target files from planTargetFiles, allGoalFiles, targetFile
+    const candidateFilesSet = new Set();
+    if (Array.isArray(planTargetFiles) && planTargetFiles.length > 0) {
+      planTargetFiles.forEach(f => candidateFilesSet.add(f));
+    }
+    allGoalFiles.forEach(f => candidateFilesSet.add(f));
+    if (targetFile) candidateFilesSet.add(targetFile);
+
+    let stepTargetFiles = Array.from(candidateFilesSet);
+    if (stepTargetFiles.length === 0 && repoActiveFile) {
+      const activeName = repoActiveFile.replace(/\\/g, '/').split('/').pop();
+      if (activeName) stepTargetFiles.push(activeName);
+    }
+
+    const finalTarget = (stepTargetFiles.length > 0) ? stepTargetFiles[0] : (targetFile || getPrimaryRepoFile(goal));
+
+    // Scope parameterization: The LLM decides scope naturally based on context and prompt instructions.
+    // If multiple candidate files are identified or scope is unconstrained, enable multi-file modifications.
+    const stepAllowMulti = stepTargetFiles.length > 1 || (stepTargetFiles.length === 0);
 
     // Step Action: Streaming synthesis route for real-time live terminal tokens
     if (stepAction === 'synthesize') {
@@ -3478,7 +3598,9 @@
             active_file: repoActiveFile || undefined,
             active_file_content: repoActiveContent || undefined,
             cursor_line: repoActiveFile ? activeEditorCursorLine : undefined,
-            target_file: finalTarget
+            target_file: finalTarget,
+            allow_multi_file: stepAllowMulti,
+            target_files: stepTargetFiles
           })
         });
 
@@ -3535,7 +3657,9 @@
           active_file: repoActiveFile || undefined,
           active_file_content: repoActiveContent || undefined,
           cursor_line: repoActiveFile ? activeEditorCursorLine : undefined,
-          target_file: finalTarget
+          target_file: finalTarget,
+          allow_multi_file: stepAllowMulti,
+          target_files: stepTargetFiles
         })
       });
       if (res.ok) return await res.json();
@@ -3559,7 +3683,9 @@
             active_file: repoActiveFile || undefined,
             active_file_content: repoActiveContent || undefined,
             cursor_line: repoActiveFile ? activeEditorCursorLine : undefined,
-            target_file: finalTarget
+            target_file: finalTarget,
+            allow_multi_file: stepAllowMulti,
+            target_files: stepTargetFiles
           });
           setTimeout(() => {
             window.removeEventListener('message', handler);
@@ -3874,6 +4000,7 @@
   const btnDiffViewMode = document.getElementById('btn-diff-view-mode');
   const diffModeLabel = document.getElementById('diff-mode-label');
   const diffFileSelector = document.getElementById('diff-file-selector');
+  const btnAcceptAllDiff = document.getElementById('btn-accept-all-diff');
 
   // Domain 4: 3-Way Merge Conflict Guard Elements
   const diffConflictPill = document.getElementById('diff-conflict-pill');
@@ -4182,6 +4309,28 @@
   }
 
   function stageDiff(filename, diffText, stagedFiles = null, forceEditedState = null, baseContent = null) {
+    let activeFile = filename;
+    let activeDiff = diffText;
+
+    if (stagedFiles && stagedFiles.length > 0) {
+      let matched = stagedFiles.find(sf => isSameFileReference(sf.file_path || sf.file, filename));
+      if (!matched) {
+        matched = stagedFiles[0];
+        activeFile = matched.file_path || matched.file || filename;
+      }
+      if (matched && matched.diff) {
+        activeDiff = matched.diff;
+      }
+    } else if (stagedMultiFiles && stagedMultiFiles.length > 0) {
+      let matched = stagedMultiFiles.find(sf => isSameFileReference(sf.file_path, filename));
+      if (matched && matched.diff) {
+        activeDiff = matched.diff;
+      }
+    }
+
+    filename = activeFile;
+    diffText = activeDiff;
+
     if (forceEditedState !== null) {
       stagedDiffIsEdited = forceEditedState;
     } else if (!stagedDiffData || stagedDiffData.file !== filename) {
@@ -4239,19 +4388,6 @@
       hideConflictGuardPill();
     }
 
-    try {
-      localStorage.setItem('clay_staged_diff', JSON.stringify({
-        file: filename,
-        diff: diffText,
-        stagedFiles: (stagedFiles && stagedFiles.length > 0) ? stagedFiles : [{ file_path: filename, diff: diffText }]
-      }));
-    } catch (e) { }
-    if (stagedFiles && stagedFiles.length > 0) {
-      stagedMultiFiles = stagedFiles;
-    } else if (!stagedMultiFiles || stagedMultiFiles.length === 0) {
-      stagedMultiFiles = [{ file_path: filename, diff: diffText }];
-    }
-
     const lines = diffText.split('\n');
     let adds = 0;
     let dels = 0;
@@ -4260,30 +4396,115 @@
       if (l.startsWith('-') && !l.startsWith('---')) dels++;
     });
 
+    if (stagedFiles && stagedFiles.length > 0) {
+      stagedMultiFiles = stagedFiles.map(sf => {
+        const fp = sf.file_path || sf.file || filename;
+        const d = sf.diff !== undefined ? sf.diff : (isSameFileReference(fp, filename) ? diffText : '');
+        const lAdds = sf.adds !== undefined ? sf.adds : (d ? d.split('\n').filter(l => l.startsWith('+') && !l.startsWith('+++')).length : 0);
+        const lDels = sf.dels !== undefined ? sf.dels : (d ? d.split('\n').filter(l => l.startsWith('-') && !l.startsWith('---')).length : 0);
+        const existing = stagedMultiFiles ? stagedMultiFiles.find(item => isSameFileReference(item.file_path, fp)) : null;
+        return {
+          file_path: fp,
+          diff: d,
+          applied: existing ? existing.applied : Boolean(sf.applied),
+          adds: lAdds,
+          dels: lDels,
+          error: existing ? existing.error : (sf.error || null)
+        };
+      });
+    } else if (stagedMultiFiles && stagedMultiFiles.length > 0) {
+      const existing = stagedMultiFiles.find(item => isSameFileReference(item.file_path, filename));
+      if (existing) {
+        existing.diff = diffText;
+        existing.adds = adds;
+        existing.dels = dels;
+      }
+    } else {
+      stagedMultiFiles = [{ file_path: filename, diff: diffText, applied: false, adds: adds, dels: dels, error: null }];
+    }
+
+    try {
+      localStorage.setItem('clay_staged_diff', JSON.stringify({
+        file: filename,
+        diff: diffText,
+        stagedFiles: stagedMultiFiles
+      }));
+    } catch (e) { }
+
+    const unappliedList = stagedMultiFiles.filter(f => !f.applied && f.diff);
     if (diffSummaryLabel) {
       diffSummaryLabel.textContent = stagedMultiFiles.length > 1
-        ? `Reviewing (${stagedMultiFiles.length} files): ${filename}`
+        ? `Reviewing (${unappliedList.length}/${stagedMultiFiles.length} pending): ${filename}`
         : `Reviewing: ${filename}`;
     }
     if (diffBadgeAdd) diffBadgeAdd.textContent = `+${adds}`;
     if (diffBadgeDel) diffBadgeDel.textContent = `-${dels}`;
     if (diffActionBar) diffActionBar.style.display = 'flex';
 
-    // Multi-file selector chips
+    // Update Apply All and Accept Patch buttons
+    if (btnAcceptDiff) {
+      const activeBase = filename ? filename.replace(/\\/g, '/').split('/').pop() : 'Patch';
+      if (stagedMultiFiles.length > 1 && unappliedList.length > 1) {
+        btnAcceptDiff.textContent = `Apply ${activeBase}`;
+      } else {
+        btnAcceptDiff.textContent = 'Accept & Apply Patch';
+      }
+    }
+
+    if (btnAcceptAllDiff) {
+      if (stagedMultiFiles.length > 1 && unappliedList.length > 0) {
+        btnAcceptAllDiff.style.display = 'inline-flex';
+        btnAcceptAllDiff.textContent = `Apply All (${unappliedList.length})`;
+      } else {
+        btnAcceptAllDiff.style.display = 'none';
+      }
+    }
+
+    // Multi-file selector chips with status badges and single discard
     if (diffFileSelector) {
       if (stagedMultiFiles.length > 1) {
         diffFileSelector.style.display = 'flex';
-        diffFileSelector.innerHTML = stagedMultiFiles.map((sf, idx) => `
-          <button type="button" class="diff-file-chip ${sf.file_path === filename ? 'active' : ''}" data-file-idx="${idx}">
-            ${escapeHtml(sf.file_path)}
-          </button>
-        `).join('');
+        diffFileSelector.innerHTML = stagedMultiFiles.map((sf, idx) => {
+          const isActive = isSameFileReference(sf.file_path, filename);
+          const isApplied = Boolean(sf.applied);
+          const hasError = Boolean(sf.error);
+          const statusIcon = isApplied ? '✓' : (hasError ? '✖' : '●');
+          const statusClass = isApplied ? 'is-done' : (hasError ? 'is-err' : 'is-pending');
+          const fName = sf.file_path ? sf.file_path.replace(/\\/g, '/').split('/').pop() : 'file';
+          return `
+            <div class="diff-file-chip ${isActive ? 'active' : ''} ${isApplied ? 'is-applied' : ''}" data-file-idx="${idx}" title="${escapeHtml(sf.file_path)}">
+              <span class="diff-chip-status ${statusClass}">${statusIcon}</span>
+              <span class="diff-chip-name">${escapeHtml(fName)}</span>
+              <span class="diff-chip-metrics"><span class="chip-add">+${sf.adds || 0}</span> <span class="chip-del">-${sf.dels || 0}</span></span>
+              <button type="button" class="btn-chip-discard" data-discard-idx="${idx}" title="Discard changes for this file">✕</button>
+            </div>
+          `;
+        }).join('');
+
         diffFileSelector.querySelectorAll('.diff-file-chip').forEach(chip => {
-          chip.addEventListener('click', () => {
+          chip.addEventListener('click', (e) => {
+            if (e.target.closest('.btn-chip-discard')) return;
             const idx = parseInt(chip.getAttribute('data-file-idx'), 10);
             const chosen = stagedMultiFiles[idx];
             if (chosen) {
               stageDiff(chosen.file_path, chosen.diff, stagedMultiFiles);
+            }
+          });
+        });
+
+        diffFileSelector.querySelectorAll('.btn-chip-discard').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const dIdx = parseInt(btn.getAttribute('data-discard-idx'), 10);
+            if (dIdx >= 0 && dIdx < stagedMultiFiles.length) {
+              const discarded = stagedMultiFiles.splice(dIdx, 1)[0];
+              showToast(`Discarded staged changes for ${discarded.file_path}`, 'info', 2000);
+              if (stagedMultiFiles.length === 0) {
+                clearStagedDiff();
+              } else {
+                const nextFile = stagedMultiFiles[Math.min(dIdx, stagedMultiFiles.length - 1)];
+                stageDiff(nextFile.file_path, nextFile.diff, stagedMultiFiles);
+              }
             }
           });
         });
@@ -4415,9 +4636,27 @@
           });
           const data = await res.json();
           if (res.ok && data.status === 'success') {
-            showToast(`Patch applied cleanly to ${data.filename || stagedDiffData.file}`, 'success');
-            clearStagedDiff();
+            const appliedFile = data.filename || stagedDiffData.file;
+            showToast(`Patch applied cleanly to ${appliedFile}`, 'success');
             loadRepoTree(currentRepoPath);
+
+            if (stagedMultiFiles && stagedMultiFiles.length > 0) {
+              const matched = stagedMultiFiles.find(f => isSameFileReference(f.file_path, appliedFile));
+              if (matched) {
+                matched.applied = true;
+              }
+              const remaining = stagedMultiFiles.filter(f => !f.applied && f.diff);
+              if (remaining.length > 0) {
+                const nextFile = remaining[0];
+                stageDiff(nextFile.file_path, nextFile.diff, stagedMultiFiles);
+                showToast(`Applied ${appliedFile}. ${remaining.length} file(s) remaining for review.`, 'info', 3000);
+              } else {
+                showToast('All staged file patches applied cleanly!', 'success', 3500);
+                clearStagedDiff();
+              }
+            } else {
+              clearStagedDiff();
+            }
           } else {
             showToast(data.detail || data.message || 'Error applying patch', 'error');
           }
@@ -4434,9 +4673,71 @@
     });
   }
 
+  if (btnAcceptAllDiff) {
+    btnAcceptAllDiff.addEventListener('click', async () => {
+      const unapplied = stagedMultiFiles.filter(f => !f.applied && f.diff);
+      if (unapplied.length === 0) {
+        showToast('All staged files are already applied', 'info', 2000);
+        return;
+      }
+      btnAcceptAllDiff.disabled = true;
+      btnAcceptAllDiff.textContent = 'Applying...';
+
+      if (isVsCode) {
+        vscode.postMessage({
+          command: 'applyAllPatches',
+          patches: unapplied.map(f => ({ file_path: f.file_path, diff: f.diff })),
+          workspacePath: currentRepoPath
+        });
+        setTimeout(() => {
+          if (btnAcceptAllDiff) btnAcceptAllDiff.disabled = false;
+        }, 3000);
+      } else {
+        try {
+          const res = await fetch(`${BACKEND_URL}/api/agent/apply-all-patches`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              patches: unapplied.map(f => ({ file_path: f.file_path, diff: f.diff })),
+              workspace_path: currentRepoPath
+            })
+          });
+          const data = await res.json();
+          if (res.ok && (data.status === 'success' || data.status === 'partial')) {
+            for (const r of (data.results || [])) {
+              const matched = stagedMultiFiles.find(f => isSameFileReference(f.file_path, r.file_path));
+              if (matched) {
+                if (r.applied) matched.applied = true;
+                else matched.error = r.message;
+              }
+            }
+            if (data.status === 'success' || stagedMultiFiles.every(f => f.applied)) {
+              showToast(`Applied all ${data.applied_count} patches successfully!`, 'success');
+              clearStagedDiff();
+              loadRepoTree(currentRepoPath);
+            } else {
+              showToast(`Applied ${data.applied_count} of ${data.total_count} patches. Some files encountered errors.`, 'warning', 4000);
+              const remaining = stagedMultiFiles.filter(f => !f.applied);
+              if (remaining.length > 0) {
+                stageDiff(remaining[0].file_path, remaining[0].diff, stagedMultiFiles);
+              }
+            }
+          } else {
+            showToast(data.detail || data.message || 'Error applying patches', 'error');
+          }
+        } catch (e) {
+          showToast(`Failed: ${e.message}`, 'error');
+        } finally {
+          if (btnAcceptAllDiff) btnAcceptAllDiff.disabled = false;
+        }
+      }
+    });
+  }
+
   function clearStagedDiff() {
     stagedDiffData = null;
     stagedDiffIsEdited = false;
+    stagedMultiFiles = [];
     hideConflictGuardPill();
     try {
       localStorage.removeItem('clay_staged_diff');
@@ -4445,6 +4746,8 @@
     const dot = diffTabBtn?.querySelector('.diff-staged-dot');
     if (dot) dot.remove();
     if (diffActionBar) diffActionBar.style.display = 'none';
+    if (btnAcceptAllDiff) btnAcceptAllDiff.style.display = 'none';
+    if (diffFileSelector) diffFileSelector.style.display = 'none';
     if (diffSummaryLabel) diffSummaryLabel.textContent = 'Staged Changes // 0 files';
     if (diffBadgeAdd) diffBadgeAdd.textContent = '+0';
     if (diffBadgeDel) diffBadgeDel.textContent = '-0';
@@ -6749,7 +7052,7 @@
       case 'streamComplete':
         setChatGeneratingState(false);
         onStreamFinished(accumulatedRawText, msg.citations);
-        if (msg.diff) {
+        if (msg.diff && (!stagedMultiFiles || stagedMultiFiles.length <= 1)) {
           const targetFilename = extractDiffFilename(msg.diff) || getPrimaryRepoFile();
           stageDiff(targetFilename, msg.diff);
         }
@@ -6759,11 +7062,58 @@
         stopChatGeneration(false);
         break;
 
-      case 'patchApplied':
-        showToast(`Patch applied cleanly to ${msg.file}`, 'success');
-        clearStagedDiff();
+      case 'patchApplied': {
+        const appliedFile = msg.file;
+        showToast(`Patch applied cleanly to ${appliedFile}`, 'success');
         loadRepoTree(currentRepoPath);
+
+        if (stagedMultiFiles && stagedMultiFiles.length > 0) {
+          const matched = stagedMultiFiles.find(f => isSameFileReference(f.file_path, appliedFile));
+          if (matched) {
+            matched.applied = true;
+          }
+          const remaining = stagedMultiFiles.filter(f => !f.applied && f.diff);
+          if (remaining.length > 0) {
+            const nextFile = remaining[0];
+            stageDiff(nextFile.file_path, nextFile.diff, stagedMultiFiles);
+            showToast(`Applied ${appliedFile}. ${remaining.length} file(s) remaining for review.`, 'info', 3000);
+          } else {
+            showToast('All staged file patches applied cleanly!', 'success', 3500);
+            clearStagedDiff();
+          }
+        } else {
+          clearStagedDiff();
+        }
         break;
+      }
+
+      case 'allPatchesApplied': {
+        const results = msg.results || [];
+        let allOk = true;
+        for (const r of results) {
+          const matched = stagedMultiFiles.find(f => isSameFileReference(f.file_path, r.file_path));
+          if (matched) {
+            if (r.applied) {
+              matched.applied = true;
+            } else {
+              matched.error = r.message || 'Patch failed';
+              allOk = false;
+            }
+          }
+        }
+        loadRepoTree(currentRepoPath);
+        if (allOk || stagedMultiFiles.every(f => f.applied)) {
+          showToast(`All ${msg.applied_count || results.length} patches applied successfully!`, 'success', 4000);
+          clearStagedDiff();
+        } else {
+          const remaining = stagedMultiFiles.filter(f => !f.applied && f.diff);
+          showToast(`Applied ${msg.applied_count || 0} of ${msg.total_count || results.length} patches. Check remaining files.`, 'warning', 4500);
+          if (remaining.length > 0) {
+            stageDiff(remaining[0].file_path, remaining[0].diff, stagedMultiFiles);
+          }
+        }
+        break;
+      }
 
       case 'fileOpened':
         if (msg.symbol) {

@@ -482,10 +482,10 @@ class SurgicalDiffBuilder:
             code_body = code_match.group(1).strip()
         elif not generated_text.strip().startswith("I'm unable") and not generated_text.strip().startswith("I cannot"):
             raw_code = generated_text.strip()
-            prefixes = ("def ", "class ", "import ", "from ", "#!", "async def ", "function ", "const ", "let ", "var ", "func ", "fn ", "pub ", "interface ", "export ", "type ", "struct ", "package ", "<", "/*", "//", '"""', "'''", "print", "return ", "console.", "echo ")
+            prefixes = ("def ", "class ", "import ", "from ", "#", "//", "/*", "--", ";", "@", "#!", "async def ", "function ", "const ", "let ", "var ", "func ", "fn ", "pub ", "interface ", "export ", "type ", "struct ", "package ", "use ", "include ", "<", '"""', "'''", "print", "return ", "console.", "echo ")
             if any(raw_code.startswith(p) for p in prefixes):
                 code_body = raw_code
-            elif "=" in raw_code and len(raw_code.splitlines()) <= 5:
+            elif any(kw in raw_code for kw in ("def ", "class ", "import ", "from ", "return ", "function ", "const ", "var ", "let ", "=")):
                 code_body = raw_code
             elif len(raw_code.splitlines()) <= 5 and not any(raw_code.lower().startswith(p) for p in ("here is", "sure", "i have", "the following", "note:", "sorry", "i cannot")):
                 code_body = raw_code
@@ -499,7 +499,7 @@ class SurgicalDiffBuilder:
                         diff_iter = difflib.unified_diff(
                             orig_lines,
                             test_applied,
-                            fromfile=f"a/{filename}",
+                            fromfile=f"a/{filename}" if orig_lines else "/dev/null",
                             tofile=f"b/{filename}",
                             lineterm=""
                         )
@@ -513,7 +513,7 @@ class SurgicalDiffBuilder:
                 diff_iter = difflib.unified_diff(
                     orig_lines,
                     spliced,
-                    fromfile=f"a/{filename}",
+                    fromfile=f"a/{filename}" if orig_lines else "/dev/null",
                     tofile=f"b/{filename}",
                     lineterm=""
                 )
@@ -524,7 +524,7 @@ class SurgicalDiffBuilder:
             diff_iter = difflib.unified_diff(
                 orig_lines,
                 code_lines,
-                fromfile=f"a/{filename}",
+                fromfile=f"a/{filename}" if orig_lines else "/dev/null",
                 tofile=f"b/{filename}",
                 lineterm=""
             )
@@ -1817,6 +1817,238 @@ class PatchEngine:
             return [{"file_path": extracted, "diff": diff_text.strip()}]
 
         return result
+
+    @classmethod
+    def build_multi_surgical_diff(
+        cls,
+        file_orig_lines_map: Dict[str, List[str]],
+        generated_text: str,
+        default_filename: str = "",
+        allow_multi_file: bool = True,
+        authorized_files: Optional[List[str]] = None,
+        preferred_line: Optional[int] = None
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """
+        Coordinates surgical diff generation across one or more files based on scope authorization.
+        
+        If allow_multi_file is False:
+            Strictly restricts diff generation to default_filename. If the model emitted changes
+            for other files, they are pruned to ensure single-file scope safety.
+            
+        If allow_multi_file is True:
+            Detects all file targets from unified diff headers, SEARCH/REPLACE blocks with File: markers,
+            or file-tagged code blocks. Validates each file against its corresponding orig_lines.
+            
+        Returns:
+            (combined_diff_text, list_of_staged_files)
+        """
+        clean_gen = (generated_text or "").strip()
+        if not clean_gen:
+            return "", []
+
+        auth_set = set()
+        if authorized_files:
+            for af in authorized_files:
+                auth_set.add(af.replace("\\", "/").lower())
+                auth_set.add(Path(af).name.lower())
+
+        def is_file_authorized(fpath: str) -> bool:
+            if not fpath:
+                return True
+            clean_name = Path(fpath.replace("\\", "/")).name.lower()
+            if not clean_name or clean_name in (".", "..", "file", "filename", "unknown", "none"):
+                return False
+            # Must look like a valid source or config filename
+            if "." not in clean_name:
+                return False
+            return True
+
+        # 1. Try unified diff multi-file split
+        split_chunks = cls.split_multi_file_diff(clean_gen)
+        valid_chunks = [c for c in split_chunks if c.get("diff") and (c.get("diff").startswith("---") or "@@" in c.get("diff"))]
+
+        if valid_chunks and (len(valid_chunks) > 1 or (valid_chunks[0].get("file_path") and valid_chunks[0].get("file_path") != default_filename)):
+            filtered_chunks = []
+            for chunk in valid_chunks:
+                fpath = chunk.get("file_path") or default_filename
+                if is_file_authorized(fpath):
+                    filtered_chunks.append(chunk)
+
+            if filtered_chunks:
+                staged = []
+                for chunk in filtered_chunks:
+                    fpath = chunk.get("file_path") or default_filename
+                    cdiff = chunk.get("diff", "")
+                    orig = file_orig_lines_map.get(fpath)
+                    if orig is None:
+                        orig = file_orig_lines_map.get(Path(fpath).name, [])
+
+                    valid, healed_diff, _ = cls.validate_and_heal_diff(orig, cdiff, fpath)
+                    final_diff = healed_diff if (valid and healed_diff) else cdiff
+
+                    adds = sum(1 for l in final_diff.splitlines() if l.startswith("+") and not l.startswith("+++"))
+                    dels = sum(1 for l in final_diff.splitlines() if l.startswith("-") and not l.startswith("---"))
+
+                    staged.append({
+                        "file_path": fpath,
+                        "diff": final_diff,
+                        "valid": valid,
+                        "adds": adds,
+                        "dels": dels,
+                        "applied": False
+                    })
+
+                combined = "\n\n".join(s["diff"] for s in staged if s.get("diff"))
+                return combined, staged
+
+        # 2. Extract multiple markdown code blocks with file indicators
+        code_block_pattern = re.compile(r"```([a-zA-Z0-9_\-\.:/]+)?\s*\n([\s\S]*?)```")
+        matches = list(code_block_pattern.finditer(clean_gen))
+        if matches:
+            code_sections: List[Dict[str, str]] = []
+            seen_files = set()
+            for m in matches:
+                header_info = (m.group(1) or "").strip()
+                block_content = m.group(2).strip()
+                if not block_content or header_info.lower() in ("mermaid", "json", "bash", "sh", "terminal", "output", "text"):
+                    continue
+
+                found_filename = None
+                # Check header e.g. ```python:calc.py, ```python calc.py, or ```calc.py
+                if header_info:
+                    parts = re.split(r"[:\s]+", header_info)
+                    for p in parts:
+                        p_cand = p.strip().strip("`'\"")
+                        if "." in p_cand and not p_cand.startswith(".") and not re.match(r"^\d", p_cand):
+                            found_filename = p_cand
+                            break
+
+                # Check first 5 non-empty lines of block content: e.g. # calc.py, // app.py, or File: calc.py
+                if not found_filename and block_content:
+                    non_empty = [l.strip() for l in block_content.splitlines() if l.strip()]
+                    for check_line in non_empty[:5]:
+                        fn_match = re.search(r"^(?:#|\/\/|\/\*|<!--|--|;)\s*(?:File:?|filepath:?|path:?|filename:?)?\s*([A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)", check_line, re.IGNORECASE)
+                        if fn_match:
+                            cand = fn_match.group(1).strip()
+                            if "." in cand and not cand.startswith("."):
+                                found_filename = cand
+                                break
+
+                # Check preceding text before the code block (up to 300 chars back)
+                if not found_filename:
+                    pre_text = clean_gen[max(0, m.start() - 300):m.start()].strip()
+                    pre_lines = [l.strip() for l in pre_text.splitlines() if l.strip()]
+                    if pre_lines:
+                        last_line = pre_lines[-1]
+                        pre_fn_match = re.search(r"(?:###|\*\*|File:?|Target:?|Path:?|In|Update|Create)?\s*[`'\"]?([A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)[`'\"]?", last_line, re.IGNORECASE)
+                        if pre_fn_match:
+                            cand = pre_fn_match.group(1).strip()
+                            if "." in cand and not cand.startswith("."):
+                                found_filename = cand
+
+                # Positional fallback to authorized_files if model omitted filename header on a block
+                if not found_filename and authorized_files:
+                    remaining_auth = [af for af in authorized_files if af.replace("\\", "/") not in seen_files and Path(af).name not in seen_files]
+                    if remaining_auth:
+                        found_filename = remaining_auth[0]
+
+                if found_filename and is_file_authorized(found_filename):
+                    norm_fn = found_filename.replace("\\", "/")
+                    if norm_fn not in seen_files:
+                        seen_files.add(norm_fn)
+                        code_sections.append({
+                            "file_path": found_filename,
+                            "content": block_content
+                        })
+
+            if len(code_sections) >= 2 or (len(code_sections) == 1 and default_filename and Path(code_sections[0]["file_path"]).name.lower() != Path(default_filename).name.lower()):
+                staged = []
+                for sec in code_sections:
+                    fpath = sec["file_path"]
+                    s_content = sec["content"]
+                    orig = file_orig_lines_map.get(fpath)
+                    if orig is None:
+                        orig = file_orig_lines_map.get(Path(fpath).name, [])
+
+                    wrapped_content = s_content if s_content.startswith("```") else f"```{Path(fpath).suffix.lstrip('.') or 'python'}\n{s_content}\n```"
+                    file_diff = cls.build_surgical_diff(orig, wrapped_content, fpath, preferred_line=preferred_line)
+                    valid, healed_diff, _ = cls.validate_and_heal_diff(orig, file_diff, fpath)
+                    final_diff = healed_diff if (valid and healed_diff) else file_diff
+
+                    adds = sum(1 for l in final_diff.splitlines() if l.startswith("+") and not l.startswith("+++"))
+                    dels = sum(1 for l in final_diff.splitlines() if l.startswith("-") and not l.startswith("---"))
+
+                    staged.append({
+                        "file_path": fpath,
+                        "diff": final_diff,
+                        "valid": valid,
+                        "adds": adds,
+                        "dels": dels,
+                        "applied": False
+                    })
+
+                if staged:
+                    combined = "\n\n".join(s["diff"] for s in staged if s.get("diff"))
+                    return combined, staged
+
+        # 3. Check for File: or comment-delimited sections in raw text
+        file_delim_re = re.compile(
+            r"(?:^|\n)(?:###\s*(?:File|Target|Path):?|File:?|//\s*(?:File|filepath):?|#\s*(?:File|filepath)?:?|<!--\s*File:?)\s*([A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)(?:\s*-->)?",
+            re.IGNORECASE
+        )
+        splits = list(file_delim_re.finditer(clean_gen))
+        if len(splits) >= 2:
+            staged = []
+            for i in range(len(splits)):
+                match_file = splits[i].group(1).strip()
+                start_pos = splits[i].end()
+                end_pos = splits[i + 1].start() if i + 1 < len(splits) else len(clean_gen)
+                section_text = clean_gen[start_pos:end_pos].strip()
+
+                if not is_file_authorized(match_file):
+                    continue
+
+                orig = file_orig_lines_map.get(match_file) or file_orig_lines_map.get(Path(match_file).name, [])
+                wrapped_sec = section_text if section_text.startswith("```") else f"```{Path(match_file).suffix.lstrip('.') or 'python'}\n{section_text}\n```"
+                file_diff = cls.build_surgical_diff(orig, wrapped_sec, match_file, preferred_line=preferred_line)
+                valid, healed_diff, _ = cls.validate_and_heal_diff(orig, file_diff, match_file)
+                final_diff = healed_diff if (valid and healed_diff) else file_diff
+
+                adds = sum(1 for l in final_diff.splitlines() if l.startswith("+") and not l.startswith("+++"))
+                dels = sum(1 for l in final_diff.splitlines() if l.startswith("-") and not l.startswith("---"))
+
+                staged.append({
+                    "file_path": match_file,
+                    "diff": final_diff,
+                    "valid": valid,
+                    "adds": adds,
+                    "dels": dels,
+                    "applied": False
+                })
+
+            if staged:
+                combined = "\n\n".join(s["diff"] for s in staged if s.get("diff"))
+                return combined, staged
+
+        # 4. Fallback: single file diff against default_filename
+        target_f = default_filename or (authorized_files[0] if authorized_files else "solution.py")
+        orig = file_orig_lines_map.get(target_f) or file_orig_lines_map.get(Path(target_f).name, [])
+        single_diff = cls.build_surgical_diff(orig, clean_gen, target_f, preferred_line=preferred_line)
+        valid, healed_diff, _ = cls.validate_and_heal_diff(orig, single_diff, target_f)
+        final_diff = healed_diff if (valid and healed_diff) else single_diff
+
+        adds = sum(1 for l in final_diff.splitlines() if l.startswith("+") and not l.startswith("+++"))
+        dels = sum(1 for l in final_diff.splitlines() if l.startswith("-") and not l.startswith("---"))
+
+        staged_item = {
+            "file_path": target_f,
+            "diff": final_diff,
+            "valid": valid,
+            "adds": adds,
+            "dels": dels,
+            "applied": False
+        }
+        return final_diff, [staged_item]
 
     @classmethod
     def compute_intra_line_diff(cls, old_line: str, new_line: str) -> Dict[str, Any]:
