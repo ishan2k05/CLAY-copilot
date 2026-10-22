@@ -765,6 +765,10 @@
         if (connectionTypeDesc) {
           connectionTypeDesc.textContent = 'Direct cloud access to Ollama Cloud models. Authenticated via Bearer token.';
         }
+        const connTip = document.getElementById('connection-type-tooltip');
+        if (connTip) {
+          connTip.title = 'Direct cloud access to Ollama Cloud models. Authenticated via Bearer token.';
+        }
         showToast('Switched to Ollama Cloud (API Key)', 'info');
       } else {
         if (hostInput && hostInput.value === 'https://ollama.com/api') {
@@ -772,6 +776,10 @@
         }
         if (connectionTypeDesc) {
           connectionTypeDesc.textContent = 'Runs against local background Ollama (http://127.0.0.1:11434). Zero API keys required.';
+        }
+        const connTip = document.getElementById('connection-type-tooltip');
+        if (connTip) {
+          connTip.title = 'Runs against local background Ollama (http://127.0.0.1:11434). Zero API keys required.';
         }
         showToast('Switched to Ollama Local (Daemon)', 'info');
       }
@@ -1558,8 +1566,8 @@
     }
 
     try {
-      fetch(`${BACKEND_URL}/api/chat/abort`, { method: 'POST' }).catch(() => {});
-    } catch {}
+      fetch(`${BACKEND_URL}/api/chat/abort`, { method: 'POST' }).catch(() => { });
+    } catch { }
 
     if (chatAbortController) {
       try {
@@ -1595,9 +1603,66 @@
   let mentionDebounceTimer = null;
   let mentionAtTriggerIndex = -1;
 
+  // Slash Command Registry & State
+  const SLASH_COMMANDS = [
+    {
+      name: '/explain',
+      badge: 'EXPLAIN',
+      desc: 'Explains current cursor function in plain terms',
+      template: 'Explain this code and the function at the cursor in plain terms. Walk through the logic flow, key parameters, assumptions, and potential edge cases.'
+    },
+    {
+      name: '/test',
+      badge: 'TEST',
+      desc: 'Generates unit tests for the active selection',
+      template: 'Generate clean, comprehensive unit tests for this code. Cover typical usage, edge cases, error conditions, and mock external dependencies cleanly.'
+    },
+    {
+      name: '/refactor',
+      badge: 'REFACTOR',
+      desc: 'Proposes clean code patterns and complexity reduction',
+      template: 'Refactor this code to improve clarity, maintainability, and reduce cognitive complexity while strictly preserving its existing behavior and public API.'
+    },
+    {
+      name: '/doc',
+      badge: 'DOCS',
+      desc: 'Generates docstrings and typing annotations',
+      template: 'Generate clear, complete docstrings and typing annotations for this code following standard language conventions (e.g. Google docstring style / JSDoc).'
+    },
+    {
+      name: '/fix',
+      badge: 'FIX',
+      desc: 'Repairs active compiler errors and linter warnings',
+      template: 'Diagnose and fix the reported language errors, linter warnings, or runtime faults in this code. Explain the root cause briefly and provide a clean, corrected implementation.'
+    },
+    {
+      name: '/review',
+      badge: 'REVIEW',
+      desc: 'Audits security, complexity, and performance',
+      template: 'Perform a comprehensive code review covering: 1) Security vulnerabilities and sanitization, 2) Algorithmic efficiency and memory hotspots, 3) Cognitive complexity and code smells. Categorize findings by Severity (Critical, Warning, Suggestion) and provide concrete fixes.'
+    },
+    {
+      name: '/types',
+      badge: 'TYPES',
+      desc: 'Generates strict type annotations and data models',
+      template: 'Add strict, idiomatic type annotations to this code (TypeScript interfaces/types or Python type hints/dataclasses/Pydantic schemas). Infer precise parameter and return types without altering runtime behavior.'
+    }
+  ];
+
+  let slashAutocompleteItems = [];
+  let slashSelectedIndex = -1;
+  let isSlashPopupVisible = false;
+  let slashTriggerIndex = -1;
+  let activeSlashCommand = null;
+  let activeEditorSelectedText = '';
+  let activeEditorSelectionRange = null;
+  let activeEditorDiagnostics = [];
+
   const mentionChipsTray = document.getElementById('mention-chips-tray');
   const mentionAutocompletePopup = document.getElementById('mention-autocomplete-popup');
   const mentionAutocompleteList = document.getElementById('mention-autocomplete-list');
+  const slashAutocompletePopup = document.getElementById('slash-autocomplete-popup');
+  const slashAutocompleteList = document.getElementById('slash-autocomplete-list');
 
   function renderMentionChipsTray() {
     if (!mentionChipsTray) return;
@@ -1610,14 +1675,16 @@
     mentionChipsTray.style.display = 'flex';
     mentionChipsTray.innerHTML = pinnedMentions.map((m, idx) => {
       const typeClass = `mention-chip-${m.type || 'file'}`;
-      const badgeText = m.type === 'symbol'
-        ? `[${(m.kind || 'SYM').toUpperCase()}]`
-        : (m.type === 'folder' ? '[DIR]' : '[FILE]');
+      const badgeText = m.type === 'command'
+        ? `[${m.badge || 'ACTION'}]`
+        : (m.type === 'symbol'
+          ? `[${(m.kind || 'SYM').toUpperCase()}]`
+          : (m.type === 'folder' ? '[DIR]' : '[FILE]'));
       return `
         <div class="mention-chip ${typeClass}" data-idx="${idx}" title="${escapeHtml(m.path || m.name)}">
           <span class="mention-chip-badge">${badgeText}</span>
           <span class="mention-chip-name">${escapeHtml(m.name)}</span>
-          <button type="button" class="btn-remove-chip" data-idx="${idx}" title="Remove pinned mention" aria-label="Remove">
+          <button type="button" class="btn-remove-chip" data-idx="${idx}" title="Remove pinned item" aria-label="Remove">
             <svg viewBox="0 0 10 10" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1.8">
               <line x1="1" y1="1" x2="9" y2="9"/>
               <line x1="9" y1="1" x2="1" y2="9"/>
@@ -1632,7 +1699,13 @@
         e.stopPropagation();
         const idx = parseInt(btn.getAttribute('data-idx'), 10);
         if (!isNaN(idx) && idx >= 0 && idx < pinnedMentions.length) {
-          pinnedMentions.splice(idx, 1);
+          const removed = pinnedMentions.splice(idx, 1)[0];
+          if (removed && removed.type === 'command') {
+            activeSlashCommand = null;
+            if (chatInput) {
+              chatInput.placeholder = 'Start typing to mold CLAY (@ mention, / action)';
+            }
+          }
           renderMentionChipsTray();
           if (chatInput) chatInput.focus();
         }
@@ -1651,9 +1724,110 @@
 
   function showMentionPopup() {
     isMentionPopupVisible = true;
+    hideSlashPopup();
     if (mentionAutocompletePopup) {
       mentionAutocompletePopup.style.display = 'flex';
     }
+  }
+
+  function hideSlashPopup() {
+    isSlashPopupVisible = false;
+    slashSelectedIndex = -1;
+    slashTriggerIndex = -1;
+    if (slashAutocompletePopup) {
+      slashAutocompletePopup.style.display = 'none';
+    }
+  }
+
+  function showSlashPopup() {
+    isSlashPopupVisible = true;
+    hideMentionPopup();
+    if (slashAutocompletePopup) {
+      slashAutocompletePopup.style.display = 'flex';
+    }
+  }
+
+  function renderSlashList(items) {
+    if (!slashAutocompleteList) return;
+    if (!items || items.length === 0) {
+      slashAutocompleteList.innerHTML = '<div class="slash-autocomplete-empty">No matching actions found</div>';
+      showSlashPopup();
+      slashSelectedIndex = -1;
+      return;
+    }
+
+    slashSelectedIndex = 0;
+    slashAutocompleteList.innerHTML = items.map((cmd, idx) => `
+      <div class="slash-autocomplete-item ${idx === 0 ? 'selected' : ''}" data-cmd="${escapeHtml(cmd.name)}">
+        <span class="slash-item-badge">[${escapeHtml(cmd.badge)}]</span>
+        <span class="slash-item-name">${escapeHtml(cmd.name)}</span>
+        <span class="slash-item-desc">${escapeHtml(cmd.desc)}</span>
+      </div>
+    `).join('');
+
+    slashAutocompleteList.querySelectorAll('.slash-autocomplete-item').forEach(el => {
+      el.addEventListener('click', () => {
+        const cmdName = el.getAttribute('data-cmd');
+        const targetCmd = SLASH_COMMANDS.find(c => c.name === cmdName);
+        if (targetCmd) {
+          pinSlashCommand(targetCmd);
+        }
+      });
+    });
+
+    showSlashPopup();
+  }
+
+  function updateSlashSelection() {
+    if (!slashAutocompleteList) return;
+    const items = slashAutocompleteList.querySelectorAll('.slash-autocomplete-item');
+    items.forEach((it, idx) => {
+      if (idx === slashSelectedIndex) {
+        it.classList.add('selected');
+        it.scrollIntoView({ block: 'nearest' });
+      } else {
+        it.classList.remove('selected');
+      }
+    });
+  }
+
+  function pinSlashCommand(cmd) {
+    if (!cmd) return;
+
+    // Remove the /<query> trigger from chatInput if typed
+    if (chatInput && slashTriggerIndex >= 0) {
+      const val = chatInput.value;
+      const before = val.slice(0, slashTriggerIndex);
+      const after = val.slice(chatInput.selectionStart);
+      chatInput.value = (before + after).trimStart();
+      chatInput.selectionStart = before.length;
+      chatInput.selectionEnd = before.length;
+      chatInput.style.height = 'auto';
+      chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
+    }
+
+    activeSlashCommand = cmd;
+
+    // Remove any existing command chips to prevent duplicate commands
+    pinnedMentions = pinnedMentions.filter(m => m.type !== 'command');
+
+    // Pin command chip at the beginning of the context tray
+    pinnedMentions.unshift({
+      type: 'command',
+      name: cmd.name,
+      badge: cmd.badge,
+      desc: cmd.desc,
+      template: cmd.template
+    });
+
+    renderMentionChipsTray();
+    hideSlashPopup();
+
+    if (chatInput) {
+      chatInput.placeholder = `Provide optional instructions for ${cmd.name} (or press Enter)...`;
+      chatInput.focus();
+    }
+    showToast(`Action active: ${cmd.name}`, 'info', 1400);
   }
 
   function getInstantLocalMentionMatches(query) {
@@ -1837,34 +2011,80 @@
   async function sendChatMessage() {
     if (!chatInput) return;
     const text = chatInput.value.trim();
-    if (!text) return;
+    if (!text && !activeSlashCommand) return;
 
     await dispatchChatMessage(text);
   }
 
   async function dispatchChatMessage(text) {
-    if (!text) return;
+    if (!text && !activeSlashCommand) return;
     setChatGeneratingState(true);
 
     // Hide empty state immediately
     hideChatEmptyState();
+
+    // Preserve active slash command before resetting
+    const currentCommand = activeSlashCommand;
+    activeSlashCommand = null;
+
+    if (chatInput) {
+      chatInput.placeholder = 'Start typing to mold CLAY (@ mention, / action)';
+    }
 
     // Copy currently pinned mentions and reset tray
     const mentionsPayload = [...pinnedMentions];
     pinnedMentions = [];
     renderMentionChipsTray();
     hideMentionPopup();
+    hideSlashPopup();
+
+    // Determine user display text vs enriched prompt for LLM
+    const rawInput = text ? text.trim() : '';
+    const displayText = rawInput || (currentCommand ? currentCommand.name : '');
+
+    let promptForLlm = rawInput;
+    if (currentCommand) {
+      if (promptForLlm) {
+        promptForLlm = `[Action: ${currentCommand.name} - ${currentCommand.desc}]\nUser Instruction: ${promptForLlm}\nAction Directive: ${currentCommand.template}`;
+      } else {
+        promptForLlm = `[Action: ${currentCommand.name} - ${currentCommand.desc}]\nAction Directive: ${currentCommand.template}`;
+      }
+    }
+
+    if (activeEditorSelectedText && activeEditorSelectedText.trim()) {
+      const lineRangeStr = activeEditorSelectionRange
+        ? `lines ${activeEditorSelectionRange.startLine}-${activeEditorSelectionRange.endLine}`
+        : 'selected lines';
+      const fileName = activeEditorFile ? activeEditorFile.split(/[\\/]/).pop() : 'active editor';
+      promptForLlm += `\n\n[Active Selection in ${fileName} (${lineRangeStr})]:\n\`\`\`\n${activeEditorSelectedText.trim()}\n\`\`\``;
+    }
+
+    if (currentCommand && currentCommand.name === '/fix') {
+      const fileName = activeEditorFile ? activeEditorFile.split(/[\\/]/).pop() : 'active editor';
+      if (activeEditorDiagnostics && activeEditorDiagnostics.length > 0) {
+        const diagSummary = activeEditorDiagnostics
+          .map(d => `- Line ${d.line} [${d.severity}] (${d.source}${d.code !== undefined && d.code !== null ? ' ' + d.code : ''}): ${d.message}`)
+          .join('\n');
+        promptForLlm += `\n\n[Active LSP Diagnostics in ${fileName}]:\n${diagSummary}\n\nInstructions: Fix the diagnostic errors and warnings reported above. Explain root causes concisely and provide the corrected code.`;
+      } else {
+        promptForLlm += `\n\n[Active LSP Diagnostics in ${fileName}]: None detected by language server.\nInstructions: Perform static analysis to detect hidden runtime bugs, null/type errors, unhandled exceptions, and logic flaws, and provide targeted fixes.`;
+      }
+    } else if (currentCommand && currentCommand.name === '/review') {
+      promptForLlm += `\n\n[Code Review Focus Areas]:\n1. Security: Check for injection vulnerabilities, unsanitized inputs, improper authorization, and data exposure.\n2. Performance & Efficiency: Identify unnecessary computations, memory leaks, I/O bottlenecks, and inefficient loops.\n3. Clean Code & Architecture: Point out high cyclomatic complexity, code duplication, and maintainability concerns.\nProvide actionable recommendations categorized by Severity (Critical, Warning, Suggestion) and show concrete code improvements.`;
+    } else if (currentCommand && currentCommand.name === '/types') {
+      promptForLlm += `\n\n[Type Synthesis Directive]:\nAdd strict, comprehensive typing annotations to this code according to modern language standards (e.g. TypeScript strict types/interfaces, Python typing hints/dataclasses/Pydantic schemas). Ensure all function signatures, parameters, return values, and data structures are fully and accurately typed without altering runtime behavior.`;
+    }
 
     // Append user message with pinned context pills
-    lastUserQuery = text;
-    appendUserMessage(text, mentionsPayload);
+    lastUserQuery = promptForLlm;
+    appendUserMessage(displayText, mentionsPayload);
     if (chatInput) {
       chatInput.value = '';
       chatInput.style.height = 'auto';
     }
 
     // Create assistant streaming placeholder with prompt-aware dynamic reasoning
-    createAssistantCard(mentionsPayload, text);
+    createAssistantCard(mentionsPayload, promptForLlm);
 
     const pathFromInput = inputRepoPath ? inputRepoPath.value.trim() : '';
     if (pathFromInput) {
@@ -1877,7 +2097,7 @@
     // Scope parameterization: evaluate target files from mentions and prompt text
     // The LLM decides scope naturally based on context and prompt instructions
     const fileMentions = mentionsPayload.filter(m => m.type === 'file');
-    const filesFromText = getAllFilesFromGoal(text);
+    const filesFromText = getAllFilesFromGoal(promptForLlm);
     const targetFilesSet = new Set(fileMentions.map(m => m.path || m.name));
     for (const f of filesFromText) {
       targetFilesSet.add(f);
@@ -1896,7 +2116,7 @@
     if (isVsCode) {
       vscode.postMessage({
         command: 'userQuery',
-        text,
+        text: promptForLlm,
         history: historyPayload,
         workspace_path: currentRepoPath,
         security_mode: currentSecurityMode,
@@ -1915,7 +2135,7 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            query: text,
+            query: promptForLlm,
             history: historyPayload,
             workspace_path: currentRepoPath,
             security_mode: currentSecurityMode,
@@ -2014,6 +2234,30 @@
         }
       }
 
+      if (isSlashPopupVisible && slashAutocompleteItems.length > 0) {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          slashSelectedIndex = (slashSelectedIndex + 1) % slashAutocompleteItems.length;
+          updateSlashSelection();
+          return;
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          slashSelectedIndex = (slashSelectedIndex - 1 + slashAutocompleteItems.length) % slashAutocompleteItems.length;
+          updateSlashSelection();
+          return;
+        } else if (e.key === 'Enter' || e.key === 'Tab') {
+          e.preventDefault();
+          if (slashSelectedIndex >= 0 && slashAutocompleteItems[slashSelectedIndex]) {
+            pinSlashCommand(slashAutocompleteItems[slashSelectedIndex]);
+          }
+          return;
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          hideSlashPopup();
+          return;
+        }
+      }
+
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         if (isChatStreaming) {
@@ -2028,11 +2272,11 @@
       chatInput.style.height = 'auto';
       chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
 
-      // Check for @ trigger
       const cursorPos = chatInput.selectionStart;
       const textBefore = chatInput.value.slice(0, cursorPos);
-      const atIdx = textBefore.lastIndexOf('@');
 
+      // Check for @ mention trigger
+      const atIdx = textBefore.lastIndexOf('@');
       if (atIdx >= 0 && (atIdx === 0 || /\s/.test(textBefore[atIdx - 1]))) {
         const query = textBefore.slice(atIdx + 1);
         if (!/\s/.test(query)) {
@@ -2052,23 +2296,47 @@
           return;
         }
       }
-
       hideMentionPopup();
+
+      // Check for / slash action trigger
+      const slashIdx = textBefore.lastIndexOf('/');
+      if (slashIdx >= 0 && (slashIdx === 0 || /\s/.test(textBefore[slashIdx - 1]))) {
+        const slashQuery = textBefore.slice(slashIdx + 1).toLowerCase();
+        if (!/\s/.test(slashQuery)) {
+          slashTriggerIndex = slashIdx;
+          slashAutocompleteItems = SLASH_COMMANDS.filter(cmd =>
+            cmd.name.toLowerCase().includes('/' + slashQuery) ||
+            cmd.badge.toLowerCase().includes(slashQuery) ||
+            cmd.desc.toLowerCase().includes(slashQuery)
+          );
+          renderSlashList(slashAutocompleteItems);
+          return;
+        }
+      }
+      hideSlashPopup();
     });
 
-    // Close mention popup if clicking outside
+    // Close popups if clicking outside
     document.addEventListener('click', (e) => {
       if (isMentionPopupVisible && mentionAutocompletePopup && !mentionAutocompletePopup.contains(e.target) && e.target !== chatInput) {
         hideMentionPopup();
+      }
+      if (isSlashPopupVisible && slashAutocompletePopup && !slashAutocompletePopup.contains(e.target) && e.target !== chatInput) {
+        hideSlashPopup();
       }
     });
   }
 
   function clearChatSession() {
-    // Clear pinned mentions
+    // Clear pinned mentions and active slash command
     pinnedMentions = [];
+    activeSlashCommand = null;
+    if (chatInput) {
+      chatInput.placeholder = 'Start typing to mold CLAY (@ mention, / action)';
+    }
     renderMentionChipsTray();
     hideMentionPopup();
+    hideSlashPopup();
 
     if (messageList) {
       // Remove all user and assistant chat bubbles and action blocks
@@ -2221,9 +2489,11 @@
       const badgesContainer = document.createElement('div');
       badgesContainer.className = 'user-pinned-badges';
       badgesContainer.innerHTML = mentions.map((m) => {
-        const bText = m.type === 'symbol'
-          ? `[${(m.kind || 'SYM').toUpperCase()}]`
-          : (m.type === 'folder' ? '[DIR]' : '[FILE]');
+        const bText = m.type === 'command'
+          ? `[${m.badge || 'ACTION'}]`
+          : (m.type === 'symbol'
+            ? `[${(m.kind || 'SYM').toUpperCase()}]`
+            : (m.type === 'folder' ? '[DIR]' : '[FILE]'));
         return `<span class="user-pinned-pill"><span style="font-family: var(--font-pixel); font-size: 7px; font-weight: 700;">${bText}</span> ${escapeHtml(m.name)}</span>`;
       }).join('');
       bubble.appendChild(badgesContainer);
@@ -2472,16 +2742,24 @@
 
       if (targetFilename) {
         targetFilename = targetFilename.replace(/(\.[a-zA-Z0-9]+)\1+$/gi, '$1');
+        if (!isValidTargetFilename(targetFilename)) {
+          targetFilename = null;
+        }
       }
 
       // Multi-code-block and multi-file extraction from cleaned answerText (excluding thinking block)
       const codeBlockRegex = /```(?!mermaid\b)([a-zA-Z0-9_\-\.:/]+)?\s*\n([\s\S]*?)```/gi;
+      const ignoredCodeLangs = [
+        'mermaid', 'json', 'bash', 'sh', 'terminal', 'output', 'text',
+        'powershell', 'ps1', 'cmd', 'bat', 'shell', 'zsh', 'console', 'dos'
+      ];
       const allExtractedBlocks = [];
       let blockMatch;
       while ((blockMatch = codeBlockRegex.exec(answerText)) !== null) {
         const header = (blockMatch[1] || '').trim();
         const code = (blockMatch[2] || '').trim();
-        if (!code || ['mermaid', 'json', 'bash', 'sh', 'terminal', 'output', 'text'].includes(header.toLowerCase())) {
+        const headerFirstWord = (header.split(/[\s:]+/)[0] || '').toLowerCase();
+        if (!code || ignoredCodeLangs.includes(header.toLowerCase()) || (ignoredCodeLangs.includes(headerFirstWord) && !header.includes('.'))) {
           continue;
         }
 
@@ -2507,20 +2785,40 @@
             if (preM && preM[1].includes('.')) fn = preM[1].trim();
           }
         }
-        allExtractedBlocks.push({ file_path: fn || targetFilename || 'file', code: code });
+        if (fn && isValidTargetFilename(fn)) {
+          allExtractedBlocks.push({ file_path: fn, code: code });
+        } else {
+          allExtractedBlocks.push({ file_path: null, code: code });
+        }
       }
 
-      const detectedCode = allExtractedBlocks.length > 0 ? allExtractedBlocks.map(b => b.code).join('\n\n') : null;
       const activeFile = getActiveEditorFileInRepo();
       const activeContent = getActiveEditorContentInRepo();
       const activeBaseFilename = activeFile ? activeFile.replace(/\\/g, '/').split('/').pop() : null;
-      if (!targetFilename) {
-        targetFilename = (allExtractedBlocks[0] && allExtractedBlocks[0].file_path) || getPrimaryRepoFile(lastUserQuery || answerText) || activeBaseFilename || repoActiveFilename || 'solution.py';
+
+      // Resolve primary targetFilename using valid candidate filenames only (never dummy names like 'file')
+      if (!targetFilename || !isValidTargetFilename(targetFilename)) {
+        const firstValidFromBlocks = allExtractedBlocks.find(b => b.file_path && isValidTargetFilename(b.file_path))?.file_path;
+        const candidatePrimary = getPrimaryRepoFile(lastUserQuery || answerText);
+        targetFilename = firstValidFromBlocks ||
+          (isValidTargetFilename(candidatePrimary) ? candidatePrimary : null) ||
+          (isValidTargetFilename(activeBaseFilename) ? activeBaseFilename : null) ||
+          (isValidTargetFilename(repoActiveFilename) ? repoActiveFilename : null) ||
+          null;
       }
 
+      // If exactly one code block was extracted without an inline filename, attach targetFilename if valid
+      if (allExtractedBlocks.length === 1 && !allExtractedBlocks[0].file_path && targetFilename && isValidTargetFilename(targetFilename)) {
+        allExtractedBlocks[0].file_path = targetFilename;
+      }
+
+      // Strictly reject any block with a fallback name like 'file' or lacking a file extension (. in name)
+      const validStagedBlocks = allExtractedBlocks.filter(b => b.file_path && isValidTargetFilename(b.file_path));
+      const detectedCode = validStagedBlocks.length > 0 ? validStagedBlocks.map(b => b.code).join('\n\n') : null;
+
       // 1. Immediate staging for fast UI feedback
-      if (allExtractedBlocks.length > 1) {
-        const initialStaged = allExtractedBlocks.map(b => {
+      if (validStagedBlocks.length > 1) {
+        const initialStaged = validStagedBlocks.map(b => {
           const rawLines = b.code.split('\n');
           const d = `--- /dev/null\n+++ b/${b.file_path}\n@@ -0,0 +1,${rawLines.length} @@\n` + rawLines.map(l => `+${l}`).join('\n');
           return {
@@ -2532,22 +2830,22 @@
           };
         });
         stageDiff(initialStaged[0].file_path, initialStaged[0].diff, initialStaged);
-      } else if (detectedDiff && targetFilename) {
+      } else if (detectedDiff && targetFilename && isValidTargetFilename(targetFilename)) {
         stageDiff(targetFilename, detectedDiff);
-      } else if (allExtractedBlocks.length === 1 && targetFilename) {
-        const b = allExtractedBlocks[0];
+      } else if (validStagedBlocks.length === 1 && targetFilename && isValidTargetFilename(targetFilename)) {
+        const b = validStagedBlocks[0];
         const rawLines = b.code.split('\n');
         const initialDiff = `--- /dev/null\n+++ b/${targetFilename}\n@@ -0,0 +1,${rawLines.length} @@\n` + rawLines.map(l => `+${l}`).join('\n');
         stageDiff(targetFilename, initialDiff);
       }
 
       // 2. Asynchronously compute exact surgical unified diffs across all target files
-      if (allExtractedBlocks.length > 0 || (detectedDiff && targetFilename)) {
+      if (validStagedBlocks.length > 0 || (detectedDiff && targetFilename && isValidTargetFilename(targetFilename))) {
         (async () => {
           try {
             const isTargetActive = streamActiveFile && isSameFileReference(streamActiveFile, targetFilename);
-            const compTargetFiles = allExtractedBlocks.length > 1 ? allExtractedBlocks.map(b => b.file_path) : (lastChatTargetFiles || undefined);
-            const compAllowMulti = allExtractedBlocks.length > 1 || Boolean(lastChatAllowMulti);
+            const compTargetFiles = validStagedBlocks.length > 1 ? validStagedBlocks.map(b => b.file_path) : (lastChatTargetFiles || undefined);
+            const compAllowMulti = validStagedBlocks.length > 1 || Boolean(lastChatAllowMulti);
             const compRes = await fetch(`${BACKEND_URL}/api/agent/compute-diff`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -2564,9 +2862,11 @@
             if (compRes.ok) {
               const compData = await compRes.json();
               if (compData && compData.staged_files && compData.staged_files.length > 0) {
-                const firstF = compData.staged_files[0];
-                stageDiff(firstF.file_path, firstF.diff, compData.staged_files);
-              } else if (compData && compData.diff && compData.diff.trim().length > 0) {
+                const validCompFiles = compData.staged_files.filter(f => f && isValidTargetFilename(f.file_path));
+                if (validCompFiles.length > 0) {
+                  stageDiff(validCompFiles[0].file_path, validCompFiles[0].diff, validCompFiles);
+                }
+              } else if (compData && compData.diff && compData.diff.trim().length > 0 && isValidTargetFilename(targetFilename)) {
                 stageDiff(targetFilename, compData.diff);
               }
             }
@@ -2604,9 +2904,9 @@
           }
 
           const capturedCode = detectedCode;
-          const capturedTarget = targetFilename || getPrimaryRepoFile(lastUserQuery || fullText);
+          const capturedTarget = (isValidTargetFilename(targetFilename) ? targetFilename : null) || (isValidTargetFilename(getPrimaryRepoFile(lastUserQuery || fullText)) ? getPrimaryRepoFile(lastUserQuery || fullText) : null);
           const capturedGoal = lastUserQuery || 'Apply generated code changes';
-          const capturedTargets = allExtractedBlocks.length > 0 ? allExtractedBlocks.map(b => b.file_path) : (capturedTarget ? [capturedTarget] : []);
+          const capturedTargets = validStagedBlocks.length > 0 ? validStagedBlocks.map(b => b.file_path) : (isValidTargetFilename(capturedTarget) ? [capturedTarget] : []);
 
           actionDiv.querySelector('.btn-run-in-agent').addEventListener('click', async () => {
             switchTab('agent');
@@ -3252,8 +3552,8 @@
           title: isFromChat
             ? `2. Apply surgical changes and compute unified diff for ${targetLabel}`
             : (isMultiTarget
-                ? `2. Synthesize surgical code solution across ${targetLabel}`
-                : `2. Synthesize surgical code solution and compute unified diff for ${targetLabel}`),
+              ? `2. Synthesize surgical code solution across ${targetLabel}`
+              : `2. Synthesize surgical code solution and compute unified diff for ${targetLabel}`),
           progress: `Querying ${currentModel} for surgical code changes...`,
           detail: isMultiTarget
             ? `Synthesized surgical solution across ${targetLabel}.`
@@ -3544,10 +3844,10 @@
         vscode.postMessage({ command: 'abortTerminalCommand' });
       } else {
         const headers = SESSION_TOKEN ? { 'X-Clay-Auth-Token': SESSION_TOKEN } : {};
-        fetch(`${BACKEND_URL}/api/agent/abort`, { method: 'POST', headers }).catch(() => {});
-        fetch(`${BACKEND_URL}/api/agent/terminal/abort`, { method: 'POST', headers }).catch(() => {});
+        fetch(`${BACKEND_URL}/api/agent/abort`, { method: 'POST', headers }).catch(() => { });
+        fetch(`${BACKEND_URL}/api/agent/terminal/abort`, { method: 'POST', headers }).catch(() => { });
       }
-    } catch (e) {}
+    } catch (e) { }
 
     if (userTriggered) {
       if (agentTerminalStatus) {
@@ -4109,6 +4409,26 @@
     return text.includes('<<<<<<<') || text.includes('=======') || text.includes('>>>>>>>') || text.includes('(CONFLICT)');
   }
 
+  function isValidTargetFilename(name) {
+    if (!name || typeof name !== 'string') return false;
+    const clean = name.replace(/\\/g, '/').split('/').pop().trim();
+    if (!clean) return false;
+    const lower = clean.toLowerCase();
+    if (['file', 'filename', 'unknown', 'none', '.', '..'].includes(lower)) {
+      return false;
+    }
+    // Must contain a file extension (. in name)
+    if (!clean.includes('.')) {
+      return false;
+    }
+    const parts = clean.split('.');
+    const ext = parts.pop().trim();
+    if (!ext) {
+      return false;
+    }
+    return true;
+  }
+
   function isSameFileReference(f1, f2) {
     if (!f1 || !f2) return false;
     const clean1 = f1.replace(/\\/g, '/').toLowerCase();
@@ -4309,6 +4629,15 @@
   }
 
   function stageDiff(filename, diffText, stagedFiles = null, forceEditedState = null, baseContent = null) {
+    if (stagedFiles && Array.isArray(stagedFiles)) {
+      stagedFiles = stagedFiles.filter(sf => sf && isValidTargetFilename(sf.file_path || sf.file));
+      if (stagedFiles.length === 0 && !isValidTargetFilename(filename)) {
+        return;
+      }
+    } else if (!isValidTargetFilename(filename)) {
+      return;
+    }
+
     let activeFile = filename;
     let activeDiff = diffText;
 
@@ -4454,6 +4783,8 @@
     if (btnAcceptAllDiff) {
       if (stagedMultiFiles.length > 1 && unappliedList.length > 0) {
         btnAcceptAllDiff.style.display = 'inline-flex';
+        btnAcceptAllDiff.style.alignItems = 'center';
+        btnAcceptAllDiff.style.justifyContent = 'center';
         btnAcceptAllDiff.textContent = `Apply All (${unappliedList.length})`;
       } else {
         btnAcceptAllDiff.style.display = 'none';
@@ -7156,7 +7487,28 @@
           if (msg.content !== undefined) {
             activeEditorContent = msg.content;
           }
+          activeEditorSelectedText = msg.selectedText || '';
+          activeEditorSelectionRange = msg.selectionRange || null;
+          activeEditorDiagnostics = msg.diagnostics || [];
           if (detectedSystem) applySystemInfo(detectedSystem);
+        }
+        break;
+
+      case 'activeSelectionChanged':
+        if (msg.file) {
+          activeEditorFile = msg.file;
+        }
+        if (msg.line !== undefined) {
+          activeEditorCursorLine = msg.line;
+        }
+        activeEditorSelectedText = msg.selectedText || '';
+        activeEditorSelectionRange = msg.selectionRange || null;
+        activeEditorDiagnostics = msg.diagnostics || [];
+        break;
+
+      case 'activeDiagnosticsChanged':
+        if (msg.file && (!activeEditorFile || isSameFileReference(activeEditorFile, msg.file))) {
+          activeEditorDiagnostics = msg.diagnostics || [];
         }
         break;
 
@@ -7481,7 +7833,7 @@
                 <div style="display:flex; justify-content:space-between; align-items:center; width: 100%;">
                   <span class="diff-hunk-title">... ${escapeHtml(item.text)}</span>
                   <div class="diff-hunk-actions">
-                    <button type="button" class="btn-hunk-action btn-hunk-discard" data-hunk-idx="${item.hunkIdx}" title="Discard this hunk">✗ Discard</button>
+                    <button type="button" class="btn-hunk-action btn-hunk-discard" data-hunk-idx="${item.hunkIdx}" title="Discard this hunk">Discard</button>
                   </div>
                 </div>
               </td>
@@ -7562,7 +7914,7 @@
               <span>${escapeHtml(item.text)}</span>
             </div>
             <div class="diff-hunk-actions">
-              <button type="button" class="btn-hunk-action btn-hunk-discard" data-hunk-idx="${item.hunkIdx}" title="Discard this hunk">✗ Discard</button>
+              <button type="button" class="btn-hunk-action btn-hunk-discard" data-hunk-idx="${item.hunkIdx}" title="Discard this hunk">Discard</button>
             </div>
           </div>
         `;

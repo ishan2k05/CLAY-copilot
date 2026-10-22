@@ -44,6 +44,55 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         });
     }
 
+    private _getEditorDiagnostics(document: vscode.TextDocument, selection?: vscode.Selection): Array<{
+        line: number;
+        severity: string;
+        message: string;
+        source: string;
+        code?: string | number;
+    }> {
+        try {
+            const raw = vscode.languages.getDiagnostics(document.uri);
+            if (!raw || raw.length === 0) {
+                return [];
+            }
+
+            const filtered = raw.filter(d =>
+                d.severity === vscode.DiagnosticSeverity.Error ||
+                d.severity === vscode.DiagnosticSeverity.Warning
+            );
+
+            if (filtered.length === 0) {
+                return [];
+            }
+
+            let targetDiags = filtered;
+            if (selection && !selection.isEmpty) {
+                const intersecting = filtered.filter(d => d.range.intersection(selection) !== undefined);
+                if (intersecting.length > 0) {
+                    targetDiags = intersecting;
+                }
+            }
+
+            targetDiags.sort((a, b) => {
+                if (a.severity !== b.severity) {
+                    return a.severity - b.severity;
+                }
+                return a.range.start.line - b.range.start.line;
+            });
+
+            return targetDiags.slice(0, 10).map(d => ({
+                line: d.range.start.line + 1,
+                severity: d.severity === vscode.DiagnosticSeverity.Error ? 'ERROR' : 'WARNING',
+                message: d.message,
+                source: d.source || 'compiler',
+                code: typeof d.code === 'object' ? d.code.value : d.code
+            }));
+        } catch {
+            return [];
+        }
+    }
+
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
         _context: vscode.WebviewViewResolveContext,
@@ -59,11 +108,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (editor?.document && editor.document.uri.scheme === 'file') {
                 this._lastActiveDocument = editor.document;
                 const cursorLine = editor.selection ? editor.selection.active.line + 1 : undefined;
+                const selection = editor.selection;
+                const selectedText = selection && !selection.isEmpty ? editor.document.getText(selection) : undefined;
+                const selectionRange = selection && !selection.isEmpty ? {
+                    startLine: selection.start.line + 1,
+                    endLine: selection.end.line + 1
+                } : undefined;
+                const diagnostics = this._getEditorDiagnostics(editor.document, editor.selection);
                 this._view?.webview.postMessage({
                     command: 'activeFileChanged',
                     file: editor.document.uri.fsPath,
                     line: cursorLine,
-                    content: editor.document.getText()
+                    content: editor.document.getText(),
+                    selectedText,
+                    selectionRange,
+                    diagnostics
                 });
 
                 // Auto-sync workspace if active editor belongs to an open workspace folder
@@ -78,6 +137,43 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             path: currentFolder
                         });
                     }
+                }
+            }
+        });
+
+        vscode.window.onDidChangeTextEditorSelection((e) => {
+            if (e.textEditor?.document && e.textEditor.document.uri.scheme === 'file') {
+                const editor = e.textEditor;
+                const cursorLine = editor.selection ? editor.selection.active.line + 1 : undefined;
+                const selection = editor.selection;
+                const selectedText = selection && !selection.isEmpty ? editor.document.getText(selection) : undefined;
+                const selectionRange = selection && !selection.isEmpty ? {
+                    startLine: selection.start.line + 1,
+                    endLine: selection.end.line + 1
+                } : undefined;
+                const diagnostics = this._getEditorDiagnostics(editor.document, editor.selection);
+                this._view?.webview.postMessage({
+                    command: 'activeSelectionChanged',
+                    file: editor.document.uri.fsPath,
+                    line: cursorLine,
+                    selectedText,
+                    selectionRange,
+                    diagnostics
+                });
+            }
+        });
+
+        vscode.languages.onDidChangeDiagnostics((e) => {
+            const activeEditor = vscode.window.activeTextEditor;
+            if (activeEditor?.document && activeEditor.document.uri.scheme === 'file') {
+                const hasMatch = e.uris.some(u => u.fsPath === activeEditor.document.uri.fsPath);
+                if (hasMatch) {
+                    const diagnostics = this._getEditorDiagnostics(activeEditor.document, activeEditor.selection);
+                    this._view?.webview.postMessage({
+                        command: 'activeDiagnosticsChanged',
+                        file: activeEditor.document.uri.fsPath,
+                        diagnostics
+                    });
                 }
             }
         });
@@ -172,11 +268,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 // When un-minimized / restored to visibility, update active file context if needed
                 if (this._lastActiveDocument?.uri.fsPath) {
                     const cursorLine = vscode.window.activeTextEditor?.selection ? vscode.window.activeTextEditor.selection.active.line + 1 : undefined;
+                    const diagnostics = this._getEditorDiagnostics(this._lastActiveDocument, vscode.window.activeTextEditor?.selection);
                     this._view?.webview.postMessage({
                         command: 'activeFileChanged',
                         file: this._lastActiveDocument.uri.fsPath,
                         line: cursorLine,
-                        content: this._lastActiveDocument.getText()
+                        content: this._lastActiveDocument.getText(),
+                        diagnostics
                     });
                 }
             }
@@ -219,10 +317,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             if (this._lastActiveDocument?.uri.fsPath) {
                 const cursorLine = vscode.window.activeTextEditor?.selection ? vscode.window.activeTextEditor.selection.active.line + 1 : undefined;
+                const diagnostics = this._getEditorDiagnostics(this._lastActiveDocument, vscode.window.activeTextEditor?.selection);
                 this._view?.webview.postMessage({
                     command: 'activeFileChanged',
                     file: this._lastActiveDocument.uri.fsPath,
-                    line: cursorLine
+                    line: cursorLine,
+                    diagnostics
                 });
             }
 
@@ -1429,7 +1529,6 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
         <!-- Section 0: Theme & IDE Bindings -->
         <div class="settings-section">
             <div class="settings-section-title">Theme &amp; IDE Bindings</div>
-            <div class="settings-section-desc">Choose between the signature CLAY warm palette or adopt native VS Code editor tokens (var(--vscode-editor-background)).</div>
             <div class="theme-binding-grid" id="theme-mode-selector">
                 <div class="theme-binding-card active" data-theme="claude" id="card-theme-claude">
                     <div class="theme-binding-badge">DEFAULT</div>
@@ -1449,7 +1548,7 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
                         </svg>
                         IDE PALETTE
                     </div>
-                    <div class="theme-binding-desc">Binds live to IDE editor tokens (var(--vscode-editor-background), foreground, diffs &amp; borders).</div>
+                    <div class="theme-binding-desc">Binds live to IDE editor tokens (background, foreground, diffs &amp; borders).</div>
                 </div>
             </div>
         </div>
@@ -1459,19 +1558,30 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
         <!-- Section 1: Agent Security Mode -->
         <div class="settings-section">
             <div class="settings-section-title">Agent security mode</div>
-            <div class="settings-section-desc">Select one of the three options. Agent settings and permissions can be further customized below.</div>
             <div class="security-mode-grid" id="security-mode-selector">
-                <div class="security-mode-card" data-mode="full">
-                    <div class="security-mode-title">Full access</div>
-                    <div class="security-mode-desc">Executes shell commands across your system and modifies workspace files directly without containment or command safety filters.</div>
+                <div class="security-mode-card" data-mode="full" title="Executes shell commands across your system and modifies workspace files directly without containment or command safety filters.">
+                    <div class="security-mode-title">
+                        Full access
+                        <span class="settings-info-tooltip" title="Executes shell commands across your system and modifies workspace files directly without containment or command safety filters.">
+                            <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="7"/><line x1="8" y1="7" x2="8" y2="12"/><circle cx="8" cy="4.5" r="0.8" fill="currentColor"/></svg>
+                        </span>
+                    </div>
                 </div>
-                <div class="security-mode-card active" data-mode="sandboxed">
-                    <div class="security-mode-title">Sandboxed</div>
-                    <div class="security-mode-desc">Confines execution to active workspace, blocks destructive OS commands via safety guardrails, and gates network access.</div>
+                <div class="security-mode-card active" data-mode="sandboxed" title="Confines execution to active workspace, blocks destructive OS commands via safety guardrails, and gates network access.">
+                    <div class="security-mode-title">
+                        Sandboxed
+                        <span class="settings-info-tooltip" title="Confines execution to active workspace, blocks destructive OS commands via safety guardrails, and gates network access.">
+                            <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="7"/><line x1="8" y1="7" x2="8" y2="12"/><circle cx="8" cy="4.5" r="0.8" fill="currentColor"/></svg>
+                        </span>
+                    </div>
                 </div>
-                <div class="security-mode-card" data-mode="strict">
-                    <div class="security-mode-title">Strict</div>
-                    <div class="security-mode-desc">Zero-trust read-only containment: permits only non-mutating test &amp; diagnostic commands with strict file and secret isolation.</div>
+                <div class="security-mode-card" data-mode="strict" title="Zero-trust read-only containment: permits only non-mutating test &amp; diagnostic commands with strict file and secret isolation.">
+                    <div class="security-mode-title">
+                        Strict
+                        <span class="settings-info-tooltip" title="Zero-trust read-only containment: permits only non-mutating test &amp; diagnostic commands with strict file and secret isolation.">
+                            <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="7"/><line x1="8" y1="7" x2="8" y2="12"/><circle cx="8" cy="4.5" r="0.8" fill="currentColor"/></svg>
+                        </span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1547,7 +1657,6 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
                         <option value="gemma4:31b-cloud">gemma4:31b-cloud</option>
                         <option value="gemma4:cloud">gemma4:cloud</option>
                     </select>
-                    <div class="settings-subtext">Zero API keys required. Authenticated via local Ollama.</div>
                 </div>
 
                 <button class="btn-secondary-action" id="btn-test-ollama" style="margin-bottom: 12px;">
@@ -1594,7 +1703,7 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
                 <div class="settings-row" style="margin-top: 6px; margin-bottom: 12px;">
                     <div class="settings-row-info">
                         <div class="settings-row-title">Zero-Leak Privacy Guard</div>
-                        <div class="settings-row-desc">Redacts secrets and tokens prior to transmission</div>
+                        <div class="settings-row-desc">Redacts secrets and tokens prior to transmission.</div>
                     </div>
                     <label class="toggle-switch">
                         <input type="checkbox" id="chk-privacy-guard" checked>
@@ -1623,6 +1732,15 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
             <div class="mention-autocomplete-list" id="mention-autocomplete-list"></div>
         </div>
 
+        <!-- Floating Slash Command Autocomplete Popup -->
+        <div class="slash-autocomplete-popup" id="slash-autocomplete-popup" style="display: none;">
+            <div class="slash-autocomplete-header">
+                <span class="slash-autocomplete-title">SLASH ACTIONS</span>
+                <span class="slash-autocomplete-hint">ARROWS NAVIGATE // ENTER TO SELECT</span>
+            </div>
+            <div class="slash-autocomplete-list" id="slash-autocomplete-list"></div>
+        </div>
+
         <!-- Pixel Style Transparent Jump Down Button (Centered) -->
         <button class="chat-jump-down-btn" id="btn-chat-jump-down" title="Jump to bottom" aria-label="Jump to latest message">
             <svg viewBox="0 0 10 10" width="10" height="10" fill="currentColor" shape-rendering="crispEdges">
@@ -1630,9 +1748,10 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
             </svg>
         </button>
         <div class="input-container">
-            <!-- Pinned Mentions Chips Tray (Option B) -->
+            <!-- Pinned Mentions & Action Chips Tray -->
             <div class="mention-chips-tray" id="mention-chips-tray" style="display: none;"></div>
-            <textarea class="chat-textarea" id="chat-input" placeholder="Start typing to mold CLAY (@ to mention file or symbol)"></textarea>
+
+            <textarea class="chat-textarea" id="chat-input" placeholder="Start typing to mold CLAY (@ mention, / action)"></textarea>
             <div class="input-toolbar">
                 <div class="input-meta-hint">
                     <span class="pill-dot"></span> <span id="input-model-hint">CLAY // gemma4:31b-cloud</span>

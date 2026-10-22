@@ -1854,7 +1854,7 @@ class PatchEngine:
 
         def is_file_authorized(fpath: str) -> bool:
             if not fpath:
-                return True
+                return False
             clean_name = Path(fpath.replace("\\", "/")).name.lower()
             if not clean_name or clean_name in (".", "..", "file", "filename", "unknown", "none"):
                 return False
@@ -1909,8 +1909,13 @@ class PatchEngine:
             seen_files = set()
             for m in matches:
                 header_info = (m.group(1) or "").strip()
-                block_content = m.group(2).strip()
-                if not block_content or header_info.lower() in ("mermaid", "json", "bash", "sh", "terminal", "output", "text"):
+                header_clean = header_info.lower().strip()
+                header_first_word = re.split(r"[:\s]+", header_clean)[0] if header_clean else ""
+                ignored_langs = {
+                    "mermaid", "json", "bash", "sh", "terminal", "output", "text",
+                    "powershell", "ps1", "cmd", "bat", "shell", "zsh", "console", "dos"
+                }
+                if not block_content or header_clean in ignored_langs or (header_first_word in ignored_langs and "." not in header_clean):
                     continue
 
                 found_filename = None
