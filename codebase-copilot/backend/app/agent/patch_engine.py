@@ -491,8 +491,15 @@ class SurgicalDiffBuilder:
                 code_body = raw_code
 
         if code_body:
-            # Check if code_body is actually a diff inside a generic code fence
-            if any(l.startswith(("@@", "--- a/", "+++ b/")) for l in code_body.splitlines()):
+            # Check if code_body is actually a diff inside a generic code fence or loose diff snippet
+            is_diff_body = any(l.startswith(("@@", "--- a/", "+++ b/")) for l in code_body.splitlines())
+            if not is_diff_body:
+                code_ls = [l for l in code_body.splitlines() if l.strip()]
+                edit_ls = [l for l in code_ls if (l.startswith("+") or l.startswith("-")) and not l.startswith(("+++", "---"))]
+                if len(edit_ls) >= 2 and (len(edit_ls) / max(1, len(code_ls))) > 0.35:
+                    is_diff_body = True
+
+            if is_diff_body:
                 try:
                     test_applied = PatchEngine._apply_unified_diff(orig_lines, code_body.splitlines(), preferred_line=preferred_line)
                     if test_applied and test_applied != orig_lines:
@@ -807,18 +814,36 @@ class PatchEngine:
 
             if not is_generic:
                 p = Path(clean_name)
+                ws_res = ws.resolve()
                 if p.is_absolute():
-                    if p.exists() or p.parent.exists():
-                        return p.resolve()
+                    p_res = p.resolve()
+                    is_safe = False
                     try:
-                        p.resolve().relative_to(ws.resolve())
-                        return p.resolve()
-                    except ValueError:
+                        p_res.relative_to(ws_res)
+                        is_safe = True
+                    except (ValueError, Exception):
+                        c_norm = str(p_res).replace("\\", "/").rstrip("/").lower()
+                        w_norm = str(ws_res).replace("\\", "/").rstrip("/").lower()
+                        is_safe = c_norm.startswith(w_norm + "/") or c_norm == w_norm
+                    if is_safe:
+                        return p_res
+                    p = Path(p.name)
+                else:
+                    candidate = (ws / p).resolve()
+                    is_safe = False
+                    try:
+                        candidate.relative_to(ws_res)
+                        is_safe = True
+                    except (ValueError, Exception):
+                        c_norm = str(candidate).replace("\\", "/").rstrip("/").lower()
+                        w_norm = str(ws_res).replace("\\", "/").rstrip("/").lower()
+                        is_safe = c_norm.startswith(w_norm + "/") or c_norm == w_norm
+                    if not is_safe:
                         p = Path(p.name)
 
-                direct = ws / p
+                direct = (ws / p).resolve()
                 if direct.exists():
-                    return direct.resolve()
+                    return direct
                 if ws.exists() and ws.is_dir():
                     try:
                         for sub in ws.rglob(p.name):
@@ -827,12 +852,6 @@ class PatchEngine:
                     except Exception:
                         pass
 
-                p_clean = Path(clean_name)
-                if p_clean.exists():
-                    return p_clean.resolve()
-                p_orig = Path(file_path)
-                if p_orig.exists():
-                    return p_orig.resolve()
                 return (ws / p).resolve()
 
             # Map generic placeholder or unlocated extensionless target to actual repo file
@@ -882,6 +901,26 @@ class PatchEngine:
                 if diff_file_path.exists() or not target_path.exists():
                     target_path = diff_file_path
 
+        # Defense-in-depth: Strict Workspace Boundary Enforcement
+        if workspace_path:
+            from ..retrieval.file_resolver import WorkspaceFileResolver
+            ws_root = WorkspaceFileResolver._resolve_root(workspace_path).resolve()
+            t_res = target_path.resolve()
+            is_confined = False
+            try:
+                t_res.relative_to(ws_root)
+                is_confined = True
+            except (ValueError, Exception):
+                t_norm = str(t_res).replace("\\", "/").rstrip("/").lower()
+                w_norm = str(ws_root).replace("\\", "/").rstrip("/").lower()
+                is_confined = t_norm.startswith(w_norm + "/") or t_norm == w_norm
+
+            if not is_confined:
+                return {
+                    "status": "error",
+                    "message": f"Security Error: Target path '{target_path.name}' escapes the active workspace boundary."
+                }
+
         # Guard against writing to an unresolvable generic placeholder without extension
         if (target_path.name.lower() in cls.GENERIC_PLACEHOLDERS 
                 or (not target_path.suffix and not target_path.exists())):
@@ -903,6 +942,19 @@ class PatchEngine:
         is_new_file = (not file_exists or is_empty)
 
         lines_diff = diff_text.splitlines()
+        # Defensive recovery: unwrap diffs that were erroneously prefixed with '+'
+        if any(l.startswith(("+---", "++++ b/", "+@@")) for l in lines_diff):
+            cleaned = []
+            for l in lines_diff:
+                if l.startswith(("+---", "++++ b/", "+@@")):
+                    cleaned.append(l[1:])
+                elif l.startswith("+-"):
+                    cleaned.append(l[1:])
+                else:
+                    cleaned.append(l)
+            lines_diff = cleaned
+            diff_text = "\n".join(lines_diff)
+
         orig_lines: List[str] = []
         original_content = ""
 
@@ -1104,12 +1156,31 @@ class PatchEngine:
         """
         hunk_header_re = re.compile(r"^@@\s*(?:-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?)?\s*@@?")
 
-        has_hunk_headers = any(l.startswith("@@") for l in diff_lines)
+        # Filter out file headers (--- a/..., +++ b/..., diff --git, index) before or between hunks
+        cleaned_diff_lines = []
+        in_hunks = False
+        for line in diff_lines:
+            if line.startswith("@@"):
+                in_hunks = True
+                cleaned_diff_lines.append(line)
+            elif in_hunks:
+                if line.startswith(("--- ", "+++ ")):
+                    # A file header between hunks (e.g. multi-file diff chunk)
+                    continue
+                else:
+                    cleaned_diff_lines.append(line)
+            else:
+                # Before first @@: ignore file header lines
+                if line.startswith(("---", "+++", "diff --git", "index ", "new file mode", "deleted file mode")):
+                    continue
+                cleaned_diff_lines.append(line)
+
+        has_hunk_headers = any(l.startswith("@@") for l in cleaned_diff_lines)
 
         if not has_hunk_headers:
             # Fallback for plain diffs without @@ headers
-            del_lines = [l[1:] for l in diff_lines if l.startswith("-") and not l.startswith("---")]
-            add_lines = [l[1:] for l in diff_lines if l.startswith("+") and not l.startswith("+++")]
+            del_lines = [l[1:] for l in cleaned_diff_lines if l.startswith("-") and not l.startswith("---")]
+            add_lines = [l[1:] for l in cleaned_diff_lines if l.startswith("+") and not l.startswith("+++")]
             if del_lines:
                 del_stripped = [l.strip() for l in del_lines]
                 for idx in range(len(orig_lines) - len(del_lines) + 1):
@@ -1140,14 +1211,14 @@ class PatchEngine:
         # 1. Parse into distinct hunks and decompose into sub-hunks
         all_subhunks: List[Dict[str, Any]] = []
         curr_hunk_lines: List[str] = []
-        curr_start = preferred_line or None
+        curr_start = preferred_line or 1
 
-        for line in diff_lines:
+        for line in cleaned_diff_lines:
             match = hunk_header_re.match(line)
             if match and line.startswith("@@"):
                 if curr_hunk_lines:
                     all_subhunks.extend(cls._split_hunk_lines_into_subhunks(curr_hunk_lines, curr_start))
-                curr_start = int(match.group(1)) if match.group(1) else (preferred_line or None)
+                curr_start = int(match.group(1)) if match.group(1) else (preferred_line or 1)
                 curr_hunk_lines = []
             elif curr_start is not None or not all_subhunks:
                 curr_hunk_lines.append(line)
@@ -1804,10 +1875,23 @@ class PatchEngine:
             if file_path.lower() in cls.GENERIC_PLACEHOLDERS:
                 file_path = ""
 
-            result.append({
-                "file_path": file_path,
-                "diff": chunk
-            })
+            # Clean trailing markdown fences or commentary from chunk
+            cleaned_lines = []
+            for l in chunk.splitlines():
+                if l.strip() == "```" or l.strip().startswith("```"):
+                    break
+                if l.startswith(("---", "+++", "@@", "+", "-", " ", "\\")):
+                    cleaned_lines.append(l)
+                elif not cleaned_lines:
+                    continue
+                else:
+                    break
+            clean_diff = "\n".join(cleaned_lines).strip()
+            if clean_diff:
+                result.append({
+                    "file_path": file_path,
+                    "diff": clean_diff
+                })
 
         if not result and diff_text.strip():
             header_match = re.search(r"\+\+\+\s+(?:b/)?([^\s\n\r]+)", diff_text)
@@ -1867,7 +1951,7 @@ class PatchEngine:
         split_chunks = cls.split_multi_file_diff(clean_gen)
         valid_chunks = [c for c in split_chunks if c.get("diff") and (c.get("diff").startswith("---") or "@@" in c.get("diff"))]
 
-        if valid_chunks and (len(valid_chunks) > 1 or (valid_chunks[0].get("file_path") and valid_chunks[0].get("file_path") != default_filename)):
+        if valid_chunks:
             filtered_chunks = []
             for chunk in valid_chunks:
                 fpath = chunk.get("file_path") or default_filename
@@ -1908,6 +1992,7 @@ class PatchEngine:
             code_sections: List[Dict[str, str]] = []
             seen_files = set()
             for m in matches:
+                block_content = (m.group(2) or "").strip()
                 header_info = (m.group(1) or "").strip()
                 header_clean = header_info.lower().strip()
                 header_first_word = re.split(r"[:\s]+", header_clean)[0] if header_clean else ""
@@ -1919,50 +2004,76 @@ class PatchEngine:
                     continue
 
                 found_filename = None
-                # Check header e.g. ```python:calc.py, ```python calc.py, or ```calc.py
+                # 1. Check code fence header e.g. ```python:calc.py, ```python calc.py, or ```calc.py
                 if header_info:
                     parts = re.split(r"[:\s]+", header_info)
                     for p in parts:
-                        p_cand = p.strip().strip("`'\"")
+                        p_cand = p.strip().strip("`'\"()[]{}")
                         if "." in p_cand and not p_cand.startswith(".") and not re.match(r"^\d", p_cand):
                             found_filename = p_cand
                             break
 
-                # Check first 5 non-empty lines of block content: e.g. # calc.py, // app.py, or File: calc.py
+                # 2. Check first 5 non-empty lines of block content: e.g. # calc.py, // app.py, """ auth.py """, or File: calc.py
                 if not found_filename and block_content:
                     non_empty = [l.strip() for l in block_content.splitlines() if l.strip()]
                     for check_line in non_empty[:5]:
-                        fn_match = re.search(r"^(?:#|\/\/|\/\*|<!--|--|;)\s*(?:File:?|filepath:?|path:?|filename:?)?\s*([A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)", check_line, re.IGNORECASE)
+                        fn_match = re.search(r"^(?:#|\/\/|\/\*|<!--|--|;|'{3}|\"{3})\s*(?:File:?|filepath:?|path:?|filename:?|target:?)?\s*[`'\"\[\(]?([A-Za-z0-9_\-\.\/\\]+\.[A-Za-z0-9]+)[`'\"\]\)]?", check_line, re.IGNORECASE)
                         if fn_match:
-                            cand = fn_match.group(1).strip()
+                            cand = fn_match.group(1).strip().strip("`'\"()[]{}")
                             if "." in cand and not cand.startswith("."):
-                                found_filename = cand
+                                found_filename = cand.replace("\\", "/").strip("/ ")
+                                break
+                        # If authorized_files is given, check if any authorized filename appears in this comment line
+                        if authorized_files:
+                            for af in authorized_files:
+                                af_norm = af.replace("\\", "/").strip("/ ")
+                                af_name = Path(af).name.lower()
+                                if af_norm.lower() in check_line.replace("\\", "/").lower() or re.search(r"\b" + re.escape(af_name) + r"\b", check_line, re.IGNORECASE):
+                                    found_filename = af_norm
+                                    break
+                            if found_filename:
                                 break
 
-                # Check preceding text before the code block (up to 300 chars back)
+                # 3. Check preceding text before the code block
                 if not found_filename:
                     pre_text = clean_gen[max(0, m.start() - 300):m.start()].strip()
                     pre_lines = [l.strip() for l in pre_text.splitlines() if l.strip()]
                     if pre_lines:
                         last_line = pre_lines[-1]
-                        pre_fn_match = re.search(r"(?:###|\*\*|File:?|Target:?|Path:?|In|Update|Create)?\s*[`'\"]?([A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)[`'\"]?", last_line, re.IGNORECASE)
-                        if pre_fn_match:
-                            cand = pre_fn_match.group(1).strip()
+                        explicit_header_match = re.search(
+                            r"(?:#{1,6}\s+|\*{1,3}|`{1,3})?\s*(?:File|Target|Path|Filename|Update|Updated|Create|Created|Modified|In)?\s*:\s*[`'\"]?([A-Za-z0-9_\-\.\/\\]+\.[A-Za-z0-9]+)[`'\"]?",
+                            last_line,
+                            re.IGNORECASE
+                        )
+                        if not explicit_header_match:
+                            explicit_header_match = re.search(
+                                r"(?:#{1,6}\s+|\*\*\s*|[Uu]pdated|[Cc]reated|[Mm]odified|[Ii]n)\s*[`'\"]?([A-Za-z0-9_\-\.\/\\]+\.[A-Za-z0-9]+)[`'\"]?",
+                                last_line,
+                                re.IGNORECASE
+                            )
+                        if not explicit_header_match:
+                            explicit_header_match = re.search(
+                                r"[`'\"]?([A-Za-z0-9_\-\.\/\\]+\.[A-Za-z0-9]+)[`'\"]?\s*(?:\*\*)?\s*:?\s*$",
+                                last_line,
+                                re.IGNORECASE
+                            )
+                        if explicit_header_match:
+                            cand = explicit_header_match.group(1).strip().strip("`'\"()[]{}")
                             if "." in cand and not cand.startswith("."):
-                                found_filename = cand
+                                found_filename = cand.replace("\\", "/").strip("/ ")
 
-                # Positional fallback to authorized_files if model omitted filename header on a block
+                # 4. Positional fallback to authorized_files if model omitted filename header on a block
                 if not found_filename and authorized_files:
-                    remaining_auth = [af for af in authorized_files if af.replace("\\", "/") not in seen_files and Path(af).name not in seen_files]
+                    remaining_auth = [af.replace("\\", "/").strip("/ ") for af in authorized_files if af.replace("\\", "/").strip("/ ").lower() not in seen_files]
                     if remaining_auth:
                         found_filename = remaining_auth[0]
 
                 if found_filename and is_file_authorized(found_filename):
-                    norm_fn = found_filename.replace("\\", "/")
+                    norm_fn = found_filename.replace("\\", "/").strip("/ ")
                     if norm_fn not in seen_files:
                         seen_files.add(norm_fn)
                         code_sections.append({
-                            "file_path": found_filename,
+                            "file_path": norm_fn,
                             "content": block_content
                         })
 
@@ -1973,7 +2084,16 @@ class PatchEngine:
                     s_content = sec["content"]
                     orig = file_orig_lines_map.get(fpath)
                     if orig is None:
-                        orig = file_orig_lines_map.get(Path(fpath).name, [])
+                        orig = file_orig_lines_map.get(fpath.replace("/", "\\"))
+                    if orig is None:
+                        orig = file_orig_lines_map.get(fpath.replace("\\", "/"))
+                    if orig is None:
+                        bname = Path(fpath).name.lower()
+                        matching = [v for k, v in file_orig_lines_map.items() if Path(k).name.lower() == bname and v is not None]
+                        if len(matching) == 1:
+                            orig = matching[0]
+                    if orig is None:
+                        orig = []
 
                     wrapped_content = s_content if s_content.startswith("```") else f"```{Path(fpath).suffix.lstrip('.') or 'python'}\n{s_content}\n```"
                     file_diff = cls.build_surgical_diff(orig, wrapped_content, fpath, preferred_line=preferred_line)
@@ -1998,7 +2118,7 @@ class PatchEngine:
 
         # 3. Check for File: or comment-delimited sections in raw text
         file_delim_re = re.compile(
-            r"(?:^|\n)(?:###\s*(?:File|Target|Path):?|File:?|//\s*(?:File|filepath):?|#\s*(?:File|filepath)?:?|<!--\s*File:?)\s*([A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)(?:\s*-->)?",
+            r"(?:^|\n)(?:###\s*(?:File|Target|Path):?|File:?|//\s*(?:File|filepath):?|#\s*(?:File|filepath)?:?|<!--\s*File:?)\s*([A-Za-z0-9_\-\.\/\\]+\.[A-Za-z0-9]+)(?:\s*-->)?",
             re.IGNORECASE
         )
         splits = list(file_delim_re.finditer(clean_gen))

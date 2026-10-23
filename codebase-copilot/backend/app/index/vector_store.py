@@ -82,7 +82,11 @@ class LocalVectorStore:
             if self._mem_conn is None:
                 self._mem_conn = sqlite3.connect(":memory:", check_same_thread=False)
             return self._mem_conn
-        return sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA busy_timeout=30000;")
+        return conn
 
     def _sync_init_db(self):
         if self.db_path != ":memory:":

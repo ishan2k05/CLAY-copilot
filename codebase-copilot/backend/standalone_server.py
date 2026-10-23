@@ -1049,13 +1049,32 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
             target_path = PatchEngine.resolve_target_path(file_path, str(ws_path))
             orig_lines = []
             active_content = body.get("active_file_content")
-            if active_content is not None:
+            active_f = body.get("active_file")
+
+            is_target_active = False
+            if active_f:
+                act_p = Path(active_f)
+                if target_path:
+                    try:
+                        if act_p.resolve() == target_path.resolve():
+                            is_target_active = True
+                    except Exception:
+                        pass
+                if not is_target_active:
+                    if act_p.name.lower() == Path(file_path).name.lower() or act_p.name.lower() == target_path.name.lower():
+                        is_target_active = True
+            elif active_content is not None and not (target_path.exists() and target_path.is_file()):
+                is_target_active = True
+
+            if is_target_active and active_content is not None:
                 orig_lines = active_content.splitlines()
                 live_file_buffers[file_path] = active_content
                 live_file_buffers[target_path.name] = active_content
             elif target_path.exists() and target_path.is_file():
                 try:
                     orig_lines = target_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+                    live_file_buffers[file_path] = "\n".join(orig_lines)
+                    live_file_buffers[target_path.name] = "\n".join(orig_lines)
                 except Exception:
                     orig_lines = []
             elif file_path in live_file_buffers:
@@ -1537,26 +1556,61 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                 target_symbols = []
                 preferred_line = body.get("cursor_line")
                 act_content = body.get("active_file_content")
+                act_f = body.get("active_file")
 
-                # 1. Prioritize active_file_content directly from the editor buffer if provided
-                if act_content is not None and act_content.strip():
+                # Helper to check if active_file strictly refers to target_filename/target_path_obj
+                is_target_active_file = False
+                if act_f:
+                    act_p = Path(act_f)
+                    if target_path_obj:
+                        try:
+                            if act_p.resolve() == target_path_obj.resolve():
+                                is_target_active_file = True
+                        except Exception:
+                            pass
+                    if not is_target_active_file and target_filename:
+                        if act_p.name.lower() == Path(target_filename).name.lower():
+                            is_target_active_file = True
+
+                # Keep live buffer updated for the active file itself (if verified inside workspace)
+                if act_f and act_content is not None and is_path_in_workspace(act_f, ws_path):
+                    act_p = Path(act_f)
+                    live_file_buffers[act_p.name] = act_content
+                    try:
+                        live_file_buffers[str(act_p.resolve())] = act_content
+                    except Exception:
+                        live_file_buffers[str(act_p)] = act_content
+
+                # 1. Prioritize active_file_content ONLY if active_file strictly matches the target file
+                if is_target_active_file and act_content is not None and act_content.strip():
                     raw_file_content = act_content
                     if target_filename:
                         live_file_buffers[target_filename] = raw_file_content
                     if target_path_obj:
-                        live_file_buffers[str(target_path_obj)] = raw_file_content
+                        try:
+                            live_file_buffers[str(target_path_obj.resolve())] = raw_file_content
+                        except Exception:
+                            live_file_buffers[str(target_path_obj)] = raw_file_content
+                # 2. Otherwise read target file directly from disk (ground truth)
                 elif target_path_obj and target_path_obj.exists() and target_path_obj.is_file():
                     try:
                         raw_file_content = target_path_obj.read_text(encoding="utf-8", errors="ignore")
+                        # Keep live_file_buffers in sync with fresh disk content for target
+                        if target_filename:
+                            live_file_buffers[target_filename] = raw_file_content
+                        try:
+                            live_file_buffers[str(target_path_obj.resolve())] = raw_file_content
+                        except Exception:
+                            pass
                     except Exception:
                         raw_file_content = ""
-
-                # Check live in-memory buffer if disk is empty or unread
-                if not raw_file_content.strip():
-                    if target_filename in live_file_buffers and live_file_buffers[target_filename].strip():
-                        raw_file_content = live_file_buffers[target_filename]
-                    elif target_path_obj and str(target_path_obj) in live_file_buffers and live_file_buffers[str(target_path_obj)].strip():
-                        raw_file_content = live_file_buffers[str(target_path_obj)]
+                # 3. Check live in-memory buffer specifically for target file (never for active_file if different)
+                elif target_filename and target_filename in live_file_buffers and live_file_buffers[target_filename].strip():
+                    raw_file_content = live_file_buffers[target_filename]
+                elif target_path_obj and str(target_path_obj) in live_file_buffers and live_file_buffers[str(target_path_obj)].strip():
+                    raw_file_content = live_file_buffers[str(target_path_obj)]
+                else:
+                    raw_file_content = ""
 
                 orig_lines = raw_file_content.splitlines() if raw_file_content else []
                 is_new_file = not (target_path_obj and target_path_obj.exists() and target_path_obj.is_file()) and not raw_file_content.strip()
@@ -1612,25 +1666,40 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                 if target_filename and target_filename not in all_targets:
                     all_targets.insert(0, target_filename)
 
+                # Build file_orig_lines_map strictly from ground-truth disk / isolated live buffers
                 file_orig_lines_map = {}
                 for at in all_targets:
-                    at_obj = accessible.get(at) or (Path(ws_path) / at)
+                    at_clean = str(at).replace("\\", "/").strip("./")
+                    at_obj = PatchEngine.resolve_target_path(at_clean, ws_path)
+                    if not at_obj or not at_obj.exists():
+                        at_obj = accessible.get(at) or accessible.get(at_clean) or accessible.get(Path(at_clean).name) or (Path(ws_path) / at_clean)
+
                     lines = []
-                    if at in live_file_buffers:
-                        lines = live_file_buffers[at].splitlines()
-                    elif at_obj.name in live_file_buffers:
-                        lines = live_file_buffers[at_obj.name].splitlines()
-                    elif at_obj.exists() and at_obj.is_file():
+                    # 1. Ground truth: read exact file directly from disk first
+                    if at_obj and at_obj.exists() and at_obj.is_file():
                         try:
                             lines = at_obj.read_text(encoding="utf-8", errors="ignore").splitlines()
                         except Exception:
                             lines = []
-                    elif at == target_filename and raw_file_content:
-                        lines = raw_file_content.splitlines()
+
+                    # 2. Only override if active file strictly matches this specific target file
+                    if act_f and is_path_in_workspace(act_f, ws_path):
+                        act_p = Path(act_f)
+                        if (act_p.name.lower() == Path(at_clean).name.lower() or (at_obj and act_p.resolve() == at_obj.resolve())) and act_content is not None and act_content.strip():
+                            lines = act_content.splitlines()
+
+                    # 3. Live buffer fallback only if file is newly created in memory
+                    elif not lines:
+                        if at_clean in live_file_buffers and live_file_buffers[at_clean].strip():
+                            lines = live_file_buffers[at_clean].splitlines()
+                        elif at_obj and at_obj.name in live_file_buffers and live_file_buffers[at_obj.name].strip():
+                            lines = live_file_buffers[at_obj.name].splitlines()
 
                     file_orig_lines_map[at] = lines
-                    file_orig_lines_map[at_obj.name] = lines
-                    file_orig_lines_map[str(at_obj)] = lines
+                    file_orig_lines_map[at_clean] = lines
+                    if at_obj:
+                        file_orig_lines_map[at_obj.name] = lines
+                        file_orig_lines_map[str(at_obj)] = lines
 
                 if len(all_targets) > 1:
                     multi_contexts = []
@@ -1763,8 +1832,8 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                 is_valid = all(s.get("valid", True) for s in staged_files) if staged_files else True
                 err_msg = next((s.get("error") for s in staged_files if s.get("error")), None)
 
-                # Extract filename from diff header if present
-                if final_diff:
+                # Only extract filename from diff header if single file diff
+                if final_diff and (not staged_files or len(staged_files) <= 1):
                     header_match = re.search(r"\+\+\+\s+(?:b/)?([^\s\n\r]+)", final_diff)
                     if header_match and header_match.group(1) != "/dev/null":
                         target_filename = Path(header_match.group(1)).name

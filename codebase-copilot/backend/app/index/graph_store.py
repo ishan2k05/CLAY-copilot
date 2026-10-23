@@ -18,8 +18,15 @@ class SQLiteGraphStore:
         self.db_path = db_path
         self.has_fts = True
 
+    def _get_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA busy_timeout=30000;")
+        return conn
+
     def _sync_init_db(self):
-        with sqlite3.connect(self.db_path) as db:
+        with self._get_connection() as db:
             db.execute("""
                 CREATE TABLE IF NOT EXISTS symbols (
                     id TEXT PRIMARY KEY,
@@ -65,7 +72,7 @@ class SQLiteGraphStore:
 
     def _sync_clear_all(self):
         self._sync_init_db()
-        with sqlite3.connect(self.db_path) as db:
+        with self._get_connection() as db:
             db.execute("DELETE FROM relationships;")
             db.execute("DELETE FROM symbols;")
             if getattr(self, "has_fts", True):
@@ -80,14 +87,24 @@ class SQLiteGraphStore:
 
     def _sync_delete_file_symbols(self, file_path: str):
         self._sync_init_db()
-        with sqlite3.connect(self.db_path) as db:
+        with self._get_connection() as db:
             norm = str(Path(file_path).resolve())
-            fname = Path(file_path).name
-            db.execute("DELETE FROM relationships WHERE file_path = ? OR file_path = ? OR file_path LIKE ?", (norm, file_path, f"%{fname}"))
-            db.execute("DELETE FROM symbols WHERE file_path = ? OR file_path = ? OR file_path LIKE ?", (norm, file_path, f"%{fname}"))
+            orig = str(file_path)
+            # Match exact path variants (Windows vs POSIX slashes) for this specific file only
+            candidates = tuple(set([
+                norm,
+                norm.replace("\\", "/"),
+                norm.replace("/", "\\"),
+                orig,
+                orig.replace("\\", "/"),
+                orig.replace("/", "\\")
+            ]))
+            placeholders = ",".join("?" for _ in candidates)
+            db.execute(f"DELETE FROM relationships WHERE file_path IN ({placeholders});", candidates)
+            db.execute(f"DELETE FROM symbols WHERE file_path IN ({placeholders});", candidates)
             if getattr(self, "has_fts", True):
                 try:
-                    db.execute("DELETE FROM chunks_fts WHERE file_path = ? OR file_path = ? OR file_path LIKE ?", (norm, file_path, f"%{fname}"))
+                    db.execute(f"DELETE FROM chunks_fts WHERE file_path IN ({placeholders});", candidates)
                 except Exception:
                     pass
             db.commit()
@@ -99,7 +116,7 @@ class SQLiteGraphStore:
         await asyncio.to_thread(self._sync_init_db)
 
     def _sync_insert_batch(self, symbols: List[SymbolNode], relationships: List[RelationshipEdge]):
-        with sqlite3.connect(self.db_path) as db:
+        with self._get_connection() as db:
             db.executemany("""
                 INSERT OR REPLACE INTO symbols (id, name, symbol_type, file_path, start_line, end_line, docstring, parent_symbol)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -122,7 +139,7 @@ class SQLiteGraphStore:
     def _sync_index_chunks_bm25(self, chunks: List[Any]):
         if not getattr(self, "has_fts", True) or not chunks:
             return
-        with sqlite3.connect(self.db_path) as db:
+        with self._get_connection() as db:
             try:
                 db.executemany("""
                     INSERT INTO chunks_fts (chunk_id, file_path, symbol_name, content)
@@ -145,7 +162,7 @@ class SQLiteGraphStore:
         if not tokens:
             return []
         match_query = " OR ".join(f'"{t}"*' for t in tokens[:12])
-        with sqlite3.connect(self.db_path) as db:
+        with self._get_connection() as db:
             db.row_factory = sqlite3.Row
             try:
                 cursor = db.execute("""
@@ -163,7 +180,7 @@ class SQLiteGraphStore:
         return await asyncio.to_thread(self._sync_bm25_search, query, limit)
 
     def _sync_find_symbols(self, query: str, limit: int) -> List[Dict[str, Any]]:
-        with sqlite3.connect(self.db_path) as db:
+        with self._get_connection() as db:
             db.row_factory = sqlite3.Row
             cursor = db.execute("SELECT * FROM symbols WHERE name LIKE ? LIMIT ?", (f"%{query}%", limit))
             return [dict(row) for row in cursor.fetchall()]
@@ -172,7 +189,7 @@ class SQLiteGraphStore:
         return await asyncio.to_thread(self._sync_find_symbols, query, limit)
 
     def _sync_get_all_symbols(self, limit: int = 500) -> List[Dict[str, Any]]:
-        with sqlite3.connect(self.db_path) as db:
+        with self._get_connection() as db:
             db.row_factory = sqlite3.Row
             cursor = db.execute("""
                 SELECT id, name, symbol_type, file_path, start_line, end_line, docstring, parent_symbol
@@ -186,7 +203,7 @@ class SQLiteGraphStore:
         return await asyncio.to_thread(self._sync_get_all_symbols, limit)
 
     def _sync_get_call_graph(self, symbol_name: str) -> Dict[str, Any]:
-        with sqlite3.connect(self.db_path) as db:
+        with self._get_connection() as db:
             db.row_factory = sqlite3.Row
             cur1 = db.execute("SELECT target_symbol, relation_type FROM relationships WHERE source_symbol LIKE ?", (f"%{symbol_name}%",))
             callees = [dict(r) for r in cur1.fetchall()]

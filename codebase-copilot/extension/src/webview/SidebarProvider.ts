@@ -974,13 +974,44 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const activeEditor = vscode.window.activeTextEditor;
                     const candidateFile = data.active_file || (activeEditor?.document?.uri?.scheme === 'file' ? activeEditor.document.uri.fsPath : undefined);
                     const activeFile = this._isFileInWorkspace(candidateFile, workspace) ? candidateFile : undefined;
-                    const cursorLine = activeFile && (data.cursor_line !== undefined ? data.cursor_line : (activeEditor?.selection?.active?.line !== undefined ? activeEditor.selection.active.line + 1 : undefined));
-                    const activeFileContent = activeFile ? (data.active_file_content || (activeEditor?.document?.uri?.scheme === 'file' ? activeEditor.document.getText() : (this._lastActiveDocument ? this._lastActiveDocument.getText() : undefined))) : undefined;
+                    const isTargetActive = Boolean(activeFile && data.target_file && this._isSameFile(activeFile, data.target_file));
+                    const cursorLine = isTargetActive && (data.cursor_line !== undefined ? data.cursor_line : (activeEditor?.selection?.active?.line !== undefined ? activeEditor.selection.active.line + 1 : undefined));
+
+                    // Look for target document among open VS Code documents to get live buffer if open
+                    let targetDocContent: string | undefined;
+                    const targetPathResolved = data.target_file
+                        ? (path.isAbsolute(data.target_file) ? data.target_file : path.resolve(workspace || '', data.target_file))
+                        : activeFile;
+
+                    if (data.target_file) {
+                        const matchingDoc = vscode.workspace.textDocuments.find(d =>
+                            d.uri.scheme === 'file' && this._isSameFile(d.fileName, data.target_file)
+                        );
+                        if (matchingDoc) {
+                            targetDocContent = matchingDoc.getText();
+                        } else if (targetPathResolved && fs.existsSync(targetPathResolved)) {
+                            try {
+                                targetDocContent = fs.readFileSync(targetPathResolved, 'utf-8');
+                            } catch {}
+                        }
+                    }
+
+                    // Only take active editor content if active editor is STRICTLY viewing target_file
+                    const isStrictActiveTarget = Boolean(
+                        activeEditor?.document?.uri?.scheme === 'file' &&
+                        data.target_file &&
+                        this._isSameFile(activeEditor.document.uri.fsPath, data.target_file)
+                    );
+
+                    const activeFileContent = isStrictActiveTarget
+                        ? (activeEditor?.document?.getText() || data.active_file_content || targetDocContent)
+                        : (targetDocContent || (isTargetActive ? data.active_file_content : undefined));
+
                     const res = await this._backendClient.executeAgentStep(
                         data.step_id,
                         data.goal,
                         workspace,
-                        activeFile,
+                        isTargetActive ? activeFile : targetPathResolved,
                         cursorLine,
                         data.target_file,
                         data.step_action,
@@ -1014,6 +1045,29 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
             }
         });
+    }
+
+    private _isSameFile(f1: string | undefined, f2: string | undefined): boolean {
+        if (!f1 || !f2) return false;
+        try {
+            const p1 = path.resolve(f1).toLowerCase();
+            const p2 = path.resolve(f2).toLowerCase();
+            if (p1 === p2) return true;
+        } catch {}
+        const clean1 = f1.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
+        const clean2 = f2.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
+        if (clean1 === clean2) return true;
+        if (clean1.endsWith('/' + clean2) || clean2.endsWith('/' + clean1)) {
+            return true;
+        }
+        const hasDir1 = clean1.includes('/');
+        const hasDir2 = clean2.includes('/');
+        if (!hasDir1 || !hasDir2) {
+            const b1 = path.basename(f1).toLowerCase();
+            const b2 = path.basename(f2).toLowerCase();
+            return b1 === b2;
+        }
+        return false;
     }
 
     private _isFileInWorkspace(filePath: string | undefined, workspacePath: string | undefined): boolean {
@@ -1114,24 +1168,68 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
         }
 
-        // 3. ChildProcess Execution directly in selected workspace directory
+        // 3. ChildProcess Execution directly in selected workspace directory via cp.spawn
         return new Promise((resolve) => {
-            const finalCmd = isWindows
-                ? `powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command "${cmdClean.replace(/"/g, '`"')}"`
-                : cmdClean;
+            let child: cp.ChildProcess;
+            if (isWindows) {
+                const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', cmdClean];
+                child = cp.spawn('powershell.exe', args, {
+                    cwd: cwd,
+                    windowsHide: true,
+                    stdio: ['ignore', 'pipe', 'pipe']
+                });
+            } else {
+                const shell = process.env.SHELL || '/bin/sh';
+                child = cp.spawn(shell, ['-c', cmdClean], {
+                    cwd: cwd,
+                    stdio: ['ignore', 'pipe', 'pipe']
+                });
+            }
 
-            cp.exec(finalCmd, {
-                cwd: cwd,
-                timeout: 35000,
-                windowsHide: true,
-                maxBuffer: 10 * 1024 * 1024
-            }, (err, stdout, stderr) => {
-                const exitCode = err ? (typeof err.code === 'number' ? err.code : 1) : 0;
-                const errDetail = stderr || (err ? (err.message || String(err)) : '');
+            let stdout = '';
+            let stderr = '';
+            const timeoutMs = 35000;
+
+            const timer = setTimeout(() => {
+                try {
+                    if (isWindows && child.pid) {
+                        cp.execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: 'ignore' });
+                    } else {
+                        child.kill('SIGKILL');
+                    }
+                } catch {}
+                resolve({
+                    exit_code: -1,
+                    stdout: stdout,
+                    stderr: 'Command timed out after 35 seconds.',
+                    passed: false,
+                    os: osType,
+                    workspace: cwd
+                });
+            }, timeoutMs);
+
+            child.stdout?.on('data', (d) => { stdout += d.toString(); });
+            child.stderr?.on('data', (d) => { stderr += d.toString(); });
+
+            child.on('error', (err) => {
+                clearTimeout(timer);
+                resolve({
+                    exit_code: -1,
+                    stdout: stdout,
+                    stderr: err.message || String(err),
+                    passed: false,
+                    os: osType,
+                    workspace: cwd
+                });
+            });
+
+            child.on('close', (code) => {
+                clearTimeout(timer);
+                const exitCode = typeof code === 'number' ? code : 0;
                 resolve({
                     exit_code: exitCode,
-                    stdout: stdout || '',
-                    stderr: errDetail,
+                    stdout: stdout,
+                    stderr: stderr,
                     passed: exitCode === 0,
                     os: osType,
                     workspace: cwd

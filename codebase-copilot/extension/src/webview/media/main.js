@@ -1935,14 +1935,21 @@
     mentionAutocompleteList.innerHTML = items.map((it, idx) => {
       const badgeCls = it.type === 'symbol' ? 'badge-symbol' : (it.type === 'folder' ? 'badge-folder' : 'badge-file');
       const badgeTxt = it.type === 'symbol' ? (it.kind || 'SYM').toUpperCase() : (it.type === 'folder' ? 'DIR' : 'FILE');
-      const detailTxt = it.type === 'symbol'
-        ? `${it.path}:${it.line || 1}`
-        : (it.path || '');
+      let detailTxt = '';
+      if (it.type === 'symbol') {
+        detailTxt = `${it.path}:${it.line || 1}`;
+      } else if (it.path) {
+        const cleanPath = it.path.replace(/^[./\\]+/, '').replace(/[/\\]+$/, '');
+        const cleanName = (it.name || '').replace(/^[./\\]+/, '').replace(/[/\\]+$/, '');
+        if (cleanPath && cleanPath !== cleanName) {
+          detailTxt = it.path;
+        }
+      }
       return `
         <div class="mention-autocomplete-item ${idx === 0 ? 'selected' : ''}" data-idx="${idx}">
           <span class="mention-item-badge ${badgeCls}">[${badgeTxt}]</span>
           <span class="mention-item-name">${escapeHtml(it.name)}</span>
-          <span class="mention-item-detail">${escapeHtml(detailTxt)}</span>
+          ${detailTxt ? `<span class="mention-item-detail">${escapeHtml(detailTxt)}</span>` : ''}
         </div>
       `;
     }).join('');
@@ -2770,9 +2777,15 @@
           fn = header;
         }
         if (!fn && code) {
+          const diffMatch = code.match(/(?:\+\+\+\s+(?:b\/)?|---\s+(?:a\/)?)([A-Za-z0-9_\-\.\/\\\:]+\.[A-Za-z0-9]+)/);
+          if (diffMatch && diffMatch[1] && diffMatch[1] !== '/dev/null') {
+            fn = diffMatch[1].trim();
+          }
+        }
+        if (!fn && code) {
           const lines = code.split('\n').map(l => l.trim()).filter(Boolean);
           for (const cl of lines.slice(0, 5)) {
-            const flm = cl.match(/^(?:#|\/\/|\/\*|<!--|--|;)\s*(?:File:?|filepath:?|path:?|filename:?)?\s*([A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)/i);
+            const flm = cl.match(/^(?:#|\/\/|\/\*|<!--|--|;)\s*(?:File:?|filepath:?|path:?|filename:?)?\s*([A-Za-z0-9_\-\.\/\\\:]+\.[A-Za-z0-9]+)/i);
             if (flm) { fn = flm[1].trim(); break; }
           }
         }
@@ -2781,14 +2794,17 @@
           const lines = pre.split('\n').filter(l => l.trim());
           if (lines.length > 0) {
             const lastLine = lines[lines.length - 1];
-            const preM = lastLine.match(/(?:###|\*\*|File:?|Target:?|Path:?|In|Update|Create)?\s*[`'\"]?([A-Za-z0-9_\-\.\/]+\.[A-Za-z0-9]+)[`'\"]?/i);
+            const preM = lastLine.match(/(?:###|\*\*|File:?|Target:?|Path:?|In|Update|Updated|Create|Created|Modified)?\s*[`'\"]?([A-Za-z0-9_\-\.\/\\\:]+\.[A-Za-z0-9]+)[`'\"]?/i);
             if (preM && preM[1].includes('.')) fn = preM[1].trim();
           }
         }
+        if (fn) {
+          fn = fn.replace(/\\/g, '/').replace(/^\/+/, '');
+        }
         if (fn && isValidTargetFilename(fn)) {
-          allExtractedBlocks.push({ file_path: fn, code: code });
+          allExtractedBlocks.push({ file_path: fn, code: code, lang: header });
         } else {
-          allExtractedBlocks.push({ file_path: null, code: code });
+          allExtractedBlocks.push({ file_path: null, code: code, lang: header });
         }
       }
 
@@ -2816,16 +2832,34 @@
       const validStagedBlocks = allExtractedBlocks.filter(b => b.file_path && isValidTargetFilename(b.file_path));
       const detectedCode = validStagedBlocks.length > 0 ? validStagedBlocks.map(b => b.code).join('\n\n') : null;
 
+      function isBlockDiff(b) {
+        if (!b || !b.code) return false;
+        const l = (b.lang || '').toLowerCase();
+        if (l === 'diff' || l === 'patch') return true;
+        const codeTrimmed = b.code.trim();
+        if (codeTrimmed.startsWith('---') || codeTrimmed.includes('\n--- a/') || codeTrimmed.includes('\n--- /dev/null') || codeTrimmed.includes('@@')) return true;
+        const lines = codeTrimmed.split('\n');
+        const editLines = lines.filter(line => (line.startsWith('+') || line.startsWith('-')) && !line.startsWith('+++') && !line.startsWith('---'));
+        return (editLines.length >= 2 && editLines.length / Math.max(1, lines.length) > 0.3);
+      }
+
       // 1. Immediate staging for fast UI feedback
       if (validStagedBlocks.length > 1) {
         const initialStaged = validStagedBlocks.map(b => {
           const rawLines = b.code.split('\n');
-          const d = `--- /dev/null\n+++ b/${b.file_path}\n@@ -0,0 +1,${rawLines.length} @@\n` + rawLines.map(l => `+${l}`).join('\n');
+          let d = b.code;
+          if (!isBlockDiff(b)) {
+            d = `--- /dev/null\n+++ b/${b.file_path}\n@@ -0,0 +1,${rawLines.length} @@\n` + rawLines.map(l => `+${l}`).join('\n');
+          } else if (!b.code.startsWith('---') && !b.code.includes('@@')) {
+            d = `--- a/${b.file_path}\n+++ b/${b.file_path}\n@@\n` + b.code;
+          }
+          const adds = (d.split('\n').filter(l => l.startsWith('+') && !l.startsWith('+++'))).length;
+          const dels = (d.split('\n').filter(l => l.startsWith('-') && !l.startsWith('---'))).length;
           return {
             file_path: b.file_path,
             diff: d,
-            adds: rawLines.length,
-            dels: 0,
+            adds: adds || rawLines.length,
+            dels: dels || 0,
             applied: false
           };
         });
@@ -2835,7 +2869,12 @@
       } else if (validStagedBlocks.length === 1 && targetFilename && isValidTargetFilename(targetFilename)) {
         const b = validStagedBlocks[0];
         const rawLines = b.code.split('\n');
-        const initialDiff = `--- /dev/null\n+++ b/${targetFilename}\n@@ -0,0 +1,${rawLines.length} @@\n` + rawLines.map(l => `+${l}`).join('\n');
+        let initialDiff = b.code;
+        if (!isBlockDiff(b)) {
+          initialDiff = `--- /dev/null\n+++ b/${targetFilename}\n@@ -0,0 +1,${rawLines.length} @@\n` + rawLines.map(l => `+${l}`).join('\n');
+        } else if (!b.code.startsWith('---') && !b.code.includes('@@')) {
+          initialDiff = `--- a/${targetFilename}\n+++ b/${targetFilename}\n@@\n` + b.code;
+        }
         stageDiff(targetFilename, initialDiff);
       }
 
@@ -3622,6 +3661,7 @@
     // Fast-path resolution for Chat code: ensure pregeneratedDiff is computed and ready BEFORE running steps
     if (isFromChat && chatPayload && chatPayload.pregeneratedCode && !chatPayload.pregeneratedDiff) {
       const targetToUse = candidateTarget || 'app.py';
+      const isTargetToUseActive = Boolean(repoActiveFile && isSameFileReference(repoActiveFile, targetToUse));
       appendTerminalLog(`[agent] Resolving diff for chat-generated code for '${targetToUse}'...`);
       try {
         const compRes = await fetch(`${BACKEND_URL}/api/agent/compute-diff`, {
@@ -3631,7 +3671,8 @@
             target_file: targetToUse,
             code_or_snippet: chatPayload.pregeneratedCode,
             workspace_path: currentRepoPath,
-            active_file_content: repoActiveContent || undefined
+            active_file: isTargetToUseActive ? (repoActiveFile || undefined) : undefined,
+            active_file_content: isTargetToUseActive ? (repoActiveContent || undefined) : undefined
           })
         });
         if (compRes.ok) {
@@ -3646,8 +3687,9 @@
 
       // Fallback: If backend compute-diff did not produce a diff, build unified diff from code
       if (!chatPayload.pregeneratedDiff && chatPayload.pregeneratedCode) {
+        const isTargetToUseActive = Boolean(repoActiveFile && isSameFileReference(repoActiveFile, targetToUse));
         const codeLines = chatPayload.pregeneratedCode.split('\n');
-        if (repoActiveContent && repoActiveContent.trim()) {
+        if (isTargetToUseActive && repoActiveContent && repoActiveContent.trim()) {
           const oldLines = repoActiveContent.split('\n');
           chatPayload.pregeneratedDiff = `--- a/${targetToUse}\n+++ b/${targetToUse}\n@@ -1,${oldLines.length} +1,${codeLines.length} @@\n`
             + oldLines.map(l => `-${l}`).join('\n') + '\n'
@@ -3664,6 +3706,7 @@
       plan = planExecutionTasks(goal, isFromChat, chatPayload);
     } else {
       try {
+        const isCandidateActive = Boolean(repoActiveFile && candidateTarget && isSameFileReference(repoActiveFile, candidateTarget));
         const planRes = await fetch(`${BACKEND_URL}/api/agent/plan`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -3672,8 +3715,8 @@
             workspace_path: currentRepoPath,
             target_file: candidateTarget,
             target_files: allGoalFiles.length > 0 ? allGoalFiles : undefined,
-            active_file: repoActiveFile || undefined,
-            active_file_content: repoActiveContent || undefined,
+            active_file: isCandidateActive ? (repoActiveFile || undefined) : undefined,
+            active_file_content: isCandidateActive ? (repoActiveContent || undefined) : undefined,
             model_name: currentModel
           })
         });
@@ -3882,6 +3925,7 @@
     // Scope parameterization: The LLM decides scope naturally based on context and prompt instructions.
     // If multiple candidate files are identified or scope is unconstrained, enable multi-file modifications.
     const stepAllowMulti = stepTargetFiles.length > 1 || (stepTargetFiles.length === 0);
+    const isTargetActive = Boolean(repoActiveFile && finalTarget && isSameFileReference(repoActiveFile, finalTarget));
 
     // Step Action: Streaming synthesis route for real-time live terminal tokens
     if (stepAction === 'synthesize') {
@@ -3895,9 +3939,9 @@
             step_action: stepAction,
             total_steps: totalSteps,
             workspace_path: currentRepoPath,
-            active_file: repoActiveFile || undefined,
-            active_file_content: repoActiveContent || undefined,
-            cursor_line: repoActiveFile ? activeEditorCursorLine : undefined,
+            active_file: isTargetActive ? (repoActiveFile || undefined) : undefined,
+            active_file_content: isTargetActive ? (repoActiveContent || undefined) : undefined,
+            cursor_line: isTargetActive ? activeEditorCursorLine : undefined,
             target_file: finalTarget,
             allow_multi_file: stepAllowMulti,
             target_files: stepTargetFiles
@@ -3954,9 +3998,9 @@
           step_action: stepAction || undefined,
           total_steps: totalSteps,
           workspace_path: currentRepoPath,
-          active_file: repoActiveFile || undefined,
-          active_file_content: repoActiveContent || undefined,
-          cursor_line: repoActiveFile ? activeEditorCursorLine : undefined,
+          active_file: isTargetActive ? (repoActiveFile || undefined) : undefined,
+          active_file_content: isTargetActive ? (repoActiveContent || undefined) : undefined,
+          cursor_line: isTargetActive ? activeEditorCursorLine : undefined,
           target_file: finalTarget,
           allow_multi_file: stepAllowMulti,
           target_files: stepTargetFiles
@@ -3980,9 +4024,9 @@
             total_steps: totalSteps,
             goal,
             workspace_path: currentRepoPath,
-            active_file: repoActiveFile || undefined,
-            active_file_content: repoActiveContent || undefined,
-            cursor_line: repoActiveFile ? activeEditorCursorLine : undefined,
+            active_file: isTargetActive ? (repoActiveFile || undefined) : undefined,
+            active_file_content: isTargetActive ? (repoActiveContent || undefined) : undefined,
+            cursor_line: isTargetActive ? activeEditorCursorLine : undefined,
             target_file: finalTarget,
             allow_multi_file: stepAllowMulti,
             target_files: stepTargetFiles
@@ -4431,12 +4475,20 @@
 
   function isSameFileReference(f1, f2) {
     if (!f1 || !f2) return false;
-    const clean1 = f1.replace(/\\/g, '/').toLowerCase();
-    const clean2 = f2.replace(/\\/g, '/').toLowerCase();
+    const clean1 = f1.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
+    const clean2 = f2.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
     if (clean1 === clean2) return true;
-    const b1 = clean1.split('/').pop();
-    const b2 = clean2.split('/').pop();
-    return b1 === b2;
+    if (clean1.endsWith('/' + clean2) || clean2.endsWith('/' + clean1)) {
+      return true;
+    }
+    const hasDir1 = clean1.includes('/');
+    const hasDir2 = clean2.includes('/');
+    if (!hasDir1 || !hasDir2) {
+      const b1 = clean1.split('/').pop();
+      const b2 = clean2.split('/').pop();
+      return b1 === b2;
+    }
+    return false;
   }
 
   function checkDiffDivergence(currentBufferContent) {
@@ -4738,7 +4790,8 @@
           applied: existing ? existing.applied : Boolean(sf.applied),
           adds: lAdds,
           dels: lDels,
-          error: existing ? existing.error : (sf.error || null)
+          error: existing ? existing.error : (sf.error || null),
+          baseContent: sf.baseContent || (existing ? existing.baseContent : (isSameFileReference(fp, filename) ? resolvedBaseContent : null))
         };
       });
     } else if (stagedMultiFiles && stagedMultiFiles.length > 0) {
@@ -4795,6 +4848,10 @@
     if (diffFileSelector) {
       if (stagedMultiFiles.length > 1) {
         diffFileSelector.style.display = 'flex';
+        const hasDuplicateBasenames = stagedMultiFiles.some((f, i) =>
+          stagedMultiFiles.some((g, j) => i !== j && (f.file_path || '').replace(/\\/g, '/').split('/').pop().toLowerCase() === (g.file_path || '').replace(/\\/g, '/').split('/').pop().toLowerCase())
+        );
+
         diffFileSelector.innerHTML = stagedMultiFiles.map((sf, idx) => {
           const isActive = isSameFileReference(sf.file_path, filename);
           const isApplied = Boolean(sf.applied);
@@ -4802,10 +4859,16 @@
           const statusIcon = isApplied ? '✓' : (hasError ? '✖' : '●');
           const statusClass = isApplied ? 'is-done' : (hasError ? 'is-err' : 'is-pending');
           const fName = sf.file_path ? sf.file_path.replace(/\\/g, '/').split('/').pop() : 'file';
+          let chipLabel = fName;
+          if (hasDuplicateBasenames && sf.file_path) {
+            const normP = sf.file_path.replace(/\\/g, '/').replace(/^\/+/, '');
+            const parts = normP.split('/');
+            chipLabel = parts.length > 1 ? parts.slice(-2).join('/') : normP;
+          }
           return `
             <div class="diff-file-chip ${isActive ? 'active' : ''} ${isApplied ? 'is-applied' : ''}" data-file-idx="${idx}" title="${escapeHtml(sf.file_path)}">
               <span class="diff-chip-status ${statusClass}">${statusIcon}</span>
-              <span class="diff-chip-name">${escapeHtml(fName)}</span>
+              <span class="diff-chip-name">${escapeHtml(chipLabel)}</span>
               <span class="diff-chip-metrics"><span class="chip-add">+${sf.adds || 0}</span> <span class="chip-del">-${sf.dels || 0}</span></span>
               <button type="button" class="btn-chip-discard" data-discard-idx="${idx}" title="Discard changes for this file">✕</button>
             </div>
@@ -4818,7 +4881,7 @@
             const idx = parseInt(chip.getAttribute('data-file-idx'), 10);
             const chosen = stagedMultiFiles[idx];
             if (chosen) {
-              stageDiff(chosen.file_path, chosen.diff, stagedMultiFiles);
+              stageDiff(chosen.file_path, chosen.diff, stagedMultiFiles, null, chosen.baseContent || null);
             }
           });
         });
@@ -4834,7 +4897,7 @@
                 clearStagedDiff();
               } else {
                 const nextFile = stagedMultiFiles[Math.min(dIdx, stagedMultiFiles.length - 1)];
-                stageDiff(nextFile.file_path, nextFile.diff, stagedMultiFiles);
+                stageDiff(nextFile.file_path, nextFile.diff, stagedMultiFiles, null, nextFile.baseContent || null);
               }
             }
           });
@@ -6533,13 +6596,13 @@
     }
 
     selectedRepoFile = filePath;
-    const displayName = fileName || filePath.split(/[\\/]/).pop() || filePath;
+    const displayName = filePath.replace(/\\/g, '/');
 
     if (repoFileTree) {
       repoFileTree.querySelectorAll('.tree-file').forEach(el => {
         const itemRel = el.getAttribute('data-file-path');
         const itemFull = el.getAttribute('data-full-path');
-        if (itemRel === filePath || itemFull === filePath || (itemRel && itemRel.endsWith(displayName))) {
+        if (isSameFileReference(itemRel, filePath) || isSameFileReference(itemFull, filePath)) {
           el.classList.add('selected-file');
         } else {
           el.classList.remove('selected-file');
@@ -6996,12 +7059,10 @@
           }
         }
 
-        const isSelected = selectedRepoFile && (
-          node.path === selectedRepoFile ||
-          fullPath === selectedRepoFile ||
-          node.name === selectedRepoFile ||
-          selectedRepoFile.endsWith(node.name)
-        );
+        const isSelected = Boolean(selectedRepoFile && (
+          isSameFileReference(node.path, selectedRepoFile) ||
+          isSameFileReference(fullPath, selectedRepoFile)
+        ));
 
         return `
           <div class="tree-node tree-file ${isSelected ? 'selected-file' : ''}" style="padding-left: ${indent + 22}px;" data-file-path="${escapeHtml(node.path)}" data-full-path="${escapeHtml(fullPath)}" title="${escapeHtml(fullPath)}&#10;Single-click: Select file to view call hierarchy&#10;Double-click: Open file in IDE">
@@ -8309,13 +8370,18 @@
 
     const isTargetActive = activeEditorFile && isSameFileReference(target, activeEditorFile);
     const activeContentToSend = isTargetActive ? activeEditorContent : undefined;
-    const isUnifiedDiff = rawText.startsWith('---') || rawText.includes('@@');
+    const isUnifiedDiff = rawText.startsWith('---') || rawText.includes('@@') || (wrapper && wrapper.getAttribute('data-is-diff') === 'true');
+    const isLooseDiff = isUnifiedDiff || (function () {
+      const lines = rawText.trim().split('\n');
+      const editLines = lines.filter(l => (l.startsWith('+') || l.startsWith('-')) && !l.startsWith('+++') && !l.startsWith('---'));
+      return editLines.length >= 2 && editLines.length / Math.max(1, lines.length) > 0.3;
+    })();
     const fileExists = currentRepoFilesList && currentRepoFilesList.some(f => f.name && f.name.toLowerCase() === target.toLowerCase());
 
     let finalDiff = rawText;
     let stagedFiles = null;
 
-    if (!isUnifiedDiff && (isCreationIntent || !fileExists || (isTargetActive && (!activeEditorContent || !activeEditorContent.trim())))) {
+    if (!isLooseDiff && (isCreationIntent || !fileExists || (isTargetActive && (!activeEditorContent || !activeEditorContent.trim())))) {
       const rawLines = rawText.split('\n');
       finalDiff = `--- /dev/null\n+++ b/${target}\n@@ -0,0 +1,${rawLines.length} @@\n` + rawLines.map(l => `+${l}`).join('\n');
     } else {
@@ -8341,6 +8407,10 @@
       } catch (err) {
         // fallback to rawText
       }
+    }
+
+    if (finalDiff === rawText && isLooseDiff && !finalDiff.startsWith('---') && !finalDiff.includes('@@')) {
+      finalDiff = `--- a/${target}\n+++ b/${target}\n@@\n` + rawText;
     }
 
     stageDiff(target, finalDiff, stagedFiles);
