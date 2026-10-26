@@ -194,11 +194,21 @@ class LLMInstructionDecomposer:
                             "detail": s.get("detail", f"Step {idx} completed.")
                         })
 
-                    resolved_target_files = parsed_plan.get("target_files", []) or []
-                    if target_files:
-                        for tf in target_files:
-                            if tf not in resolved_target_files:
-                                resolved_target_files.append(tf)
+                    resolved_target_files: List[str] = []
+                    for tf in (target_files or []):
+                        tf_norm = str(tf).replace("\\", "/").strip().lstrip("./")
+                        if tf_norm and tf_norm not in resolved_target_files:
+                            resolved_target_files.append(tf_norm)
+                    for pf in (parsed_plan.get("target_files") or []):
+                        pf_norm = str(pf).replace("\\", "/").strip().lstrip("./")
+                        if not pf_norm or pf_norm in resolved_target_files:
+                            continue
+                        if "/" not in pf_norm and any(
+                            Path(existing).name.lower() == pf_norm.lower()
+                            for existing in resolved_target_files
+                        ):
+                            continue
+                        resolved_target_files.append(pf_norm)
 
                     primary_target = resolved_target_files[0] if resolved_target_files else (active_file or "test.py")
                     target_folders = parsed_plan.get("target_folders", [])

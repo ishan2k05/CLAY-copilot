@@ -102,6 +102,19 @@
     return null;
   }
 
+  function getRepoRelativePath(fullOrRelPath) {
+    if (!fullOrRelPath || typeof fullOrRelPath !== 'string') return null;
+    let norm = fullOrRelPath.replace(/\\/g, '/').trim();
+    if (!norm) return null;
+    const inputEl = document.getElementById('input-repo-path');
+    const inputVal = inputEl ? inputEl.value.trim() : '';
+    const repoRoot = (currentRepoPath && currentRepoPath !== '.' ? currentRepoPath : (inputVal && inputVal !== '.' ? inputVal : '')).replace(/\\/g, '/').replace(/\/+$/, '');
+    if (repoRoot && norm.toLowerCase().startsWith(repoRoot.toLowerCase() + '/')) {
+      norm = norm.slice(repoRoot.length + 1);
+    }
+    return norm.replace(/^\.\//, '').replace(/^\/+/, '');
+  }
+
   function getExplicitFileFromGoal(goalText) {
     if (!goalText || typeof goalText !== 'string') return null;
     const trimmed = goalText.trim();
@@ -119,10 +132,16 @@
       }
     }
     if (currentRepoFilesList && currentRepoFilesList.length > 0) {
-      const lower = trimmed.toLowerCase();
+      const lower = trimmed.toLowerCase().replace(/\\/g, '/');
+      for (const f of currentRepoFilesList) {
+        const relPath = (f.path || f.name || '').replace(/\\/g, '/');
+        if (relPath && lower.includes(relPath.toLowerCase())) {
+          return relPath;
+        }
+      }
       for (const f of currentRepoFilesList) {
         if (f.name && lower.includes(f.name.toLowerCase())) {
-          return f.name;
+          return (f.path || f.name).replace(/\\/g, '/');
         }
       }
     }
@@ -133,26 +152,58 @@
     if (!goalText || typeof goalText !== 'string') return [];
     const trimmed = goalText.trim();
     const cleanFiles = [];
+    const addUniqueFile = (candidate) => {
+      if (!candidate) return;
+      const norm = candidate.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+|\/+$/g, '').trim();
+      if (!norm) return;
+      if (!cleanFiles.some(existing => existing.toLowerCase() === norm.toLowerCase())) {
+        cleanFiles.push(norm);
+      }
+    };
     const fileMatches = trimmed.match(/(?:[a-zA-Z0-9_\-\.\/\\\:]+\.[a-zA-Z0-9_\-]+)/g) || [];
     for (const match of fileMatches) {
       let token = match.trim().replace(/^['"`<(\[]+|['"`>)\]]+$/g, '').replace(/\\/g, '/');
       if (token && token.includes('.') && !token.startsWith('.') && !/^(https?:\/\/|www\.)/i.test(token)) {
         const ext = token.split('.').pop().toLowerCase();
         if (ext && /^[a-zA-Z0-9]{1,10}$/.test(ext) && !['com', 'org', 'net', 'io', 'ai', 'edu', 'gov'].includes(ext)) {
-          const fn = token.split('/').pop();
-          if (fn && !cleanFiles.includes(fn)) cleanFiles.push(fn);
+          const cleanToken = token.replace(/^\.\//, '').replace(/^\/+|\/+$/g, '');
+          const fn = cleanToken.split('/').pop();
+          if (fn && !fn.startsWith('.')) {
+            addUniqueFile(cleanToken);
+          }
         }
       }
     }
     if (Array.isArray(currentRepoFilesList) && currentRepoFilesList.length > 0) {
-      const lower = trimmed.toLowerCase();
+      const lower = trimmed.toLowerCase().replace(/\\/g, '/');
+      const hasStandalonePathMention = (haystack, candidate) => {
+        if (!candidate) return false;
+        const escaped = candidate.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp(`(?<![/\\\\a-zA-Z0-9_.-])${escaped}(?![a-zA-Z0-9_.-])`, 'i');
+        return re.test(haystack);
+      };
       for (const f of currentRepoFilesList) {
-        if (f.name && lower.includes(f.name.toLowerCase())) {
-          if (!cleanFiles.includes(f.name)) cleanFiles.push(f.name);
+        const relPath = (f.path || f.name || '').replace(/\\/g, '/');
+        if (relPath && hasStandalonePathMention(lower, relPath)) {
+          addUniqueFile(relPath);
+        } else if (f.name && hasStandalonePathMention(lower, f.name)) {
+          const hasSpecificSubpath = cleanFiles.some(
+            existing => existing.toLowerCase() === f.name.toLowerCase() || existing.toLowerCase().endsWith('/' + f.name.toLowerCase())
+          );
+          if (!hasSpecificSubpath) {
+            addUniqueFile(relPath || f.name);
+          }
         }
       }
     }
-    return cleanFiles;
+    const qualifiedBasenames = new Set(
+      cleanFiles
+        .filter(cf => cf.includes('/'))
+        .map(cf => cf.split('/').pop().toLowerCase())
+    );
+    return cleanFiles.filter(
+      cf => cf.includes('/') || !qualifiedBasenames.has(cf.toLowerCase())
+    );
   }
 
   const GENERIC_DIFF_PLACEHOLDERS = new Set([
@@ -171,29 +222,33 @@
 
   function extractDiffFilename(diffText) {
     if (!diffText) return null;
+    const normalizeExtractedPath = (raw) => {
+      if (!raw) return null;
+      const norm = getRepoRelativePath(raw.replace(/^(?:a|b)\//, ''));
+      if (!norm) return null;
+      const base = norm.split('/').pop();
+      if (!base || isPlaceholderFilename(base) || isPlaceholderFilename(norm)) return null;
+      return norm;
+    };
     const plusMatch = diffText.match(/\+\+\+\s+(?:b\/)?([^\s\n\r]+)/);
     if (plusMatch && plusMatch[1] && plusMatch[1] !== '/dev/null') {
-      const parts = plusMatch[1].split(/[\\/]/);
-      const cand = parts[parts.length - 1];
-      if (!isPlaceholderFilename(cand)) return cand;
+      const cand = normalizeExtractedPath(plusMatch[1]);
+      if (cand) return cand;
     }
     const minusMatch = diffText.match(/---\s+(?:a\/)?([^\s\n\r]+)/);
     if (minusMatch && minusMatch[1] && minusMatch[1] !== '/dev/null') {
-      const parts = minusMatch[1].split(/[\\/]/);
-      const cand = parts[parts.length - 1];
-      if (!isPlaceholderFilename(cand)) return cand;
+      const cand = normalizeExtractedPath(minusMatch[1]);
+      if (cand) return cand;
     }
     const srMatch = diffText.match(/<{4,}\s*SEARCH(?::|\s+in|\s+for)?\s+([^\s\n\r]+)/i);
     if (srMatch && srMatch[1]) {
-      const parts = srMatch[1].split(/[\\/]/);
-      const cand = parts[parts.length - 1];
-      if (!isPlaceholderFilename(cand)) return cand;
+      const cand = normalizeExtractedPath(srMatch[1]);
+      if (cand) return cand;
     }
     const fileCommentMatch = diffText.match(/^(?:#|\/\/|\/\*)\s*([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+)/m);
     if (fileCommentMatch && fileCommentMatch[1]) {
-      const parts = fileCommentMatch[1].split(/[\\/]/);
-      const cand = parts[parts.length - 1];
-      if (!isPlaceholderFilename(cand)) return cand;
+      const cand = normalizeExtractedPath(fileCommentMatch[1]);
+      if (cand) return cand;
     }
     return null;
   }
@@ -272,12 +327,18 @@
         return detectedFolder.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
       }
 
-      // Check if any existing file is mentioned in hintText
+      // Check if any existing file is mentioned in hintText (prefer exact relative path match first)
       if (currentRepoFilesList && currentRepoFilesList.length > 0) {
-        const lower = trimmed.toLowerCase();
+        const lower = trimmed.toLowerCase().replace(/\\/g, '/');
+        for (const f of currentRepoFilesList) {
+          const relPath = (f.path || f.name || '').replace(/\\/g, '/');
+          if (relPath && lower.includes(relPath.toLowerCase())) {
+            return relPath;
+          }
+        }
         for (const f of currentRepoFilesList) {
           if (f.name && lower.includes(f.name.toLowerCase())) {
-            return f.name;
+            return (f.path || f.name).replace(/\\/g, '/');
           }
         }
       }
@@ -285,10 +346,10 @@
 
     if (currentRepoFilesList && currentRepoFilesList.length > 0) {
       const pyFile = currentRepoFilesList.find(f => f.name && f.name.endsWith('.py'));
-      if (pyFile) return pyFile.name;
+      if (pyFile) return (pyFile.path || pyFile.name).replace(/\\/g, '/');
       const srcFile = currentRepoFilesList.find(f => f.name && /\.(js|ts|jsx|tsx|json|html|css|md|rs|go|cpp|c|java|sql|sh)$/i.test(f.name));
-      if (srcFile) return srcFile.name;
-      return currentRepoFilesList[0].name;
+      if (srcFile) return (srcFile.path || srcFile.name).replace(/\\/g, '/');
+      return (currentRepoFilesList[0].path || currentRepoFilesList[0].name).replace(/\\/g, '/');
     }
     return '';
   }
@@ -464,6 +525,15 @@
   const privacyPatterns = document.getElementById('input-privacy-patterns');
   const btnSaveSettings = document.getElementById('btn-save-all-settings');
   const crumbStatus = document.getElementById('crumb-status');
+  if (crumbStatus) {
+    crumbStatus.addEventListener('click', () => {
+      if (vscode) {
+        vscode.postMessage({ command: 'testOllamaConnection' });
+      }
+      const isOnline = crumbStatus.classList.contains('is-live');
+      showToast(isOnline ? 'Backend connected (Live)' : 'Backend offline. Rechecking connection...', isOnline ? 'success' : 'warning', 1800);
+    });
+  }
   const welcomeModelText = document.getElementById('welcome-model-text');
   const inputModelHint = document.getElementById('input-model-hint');
 
@@ -504,7 +574,7 @@
     privacyPatterns.value = currentPrivacyPatterns;
   }
 
-  // 0. Theme & IDE Bindings (CLAY Palette vs. IDE Palette Tokens)
+  // 0. Theme & IDE Bindings (Classic Palette vs. Modern Palette vs. IDE Palette Tokens)
   let currentThemeMode = localStorage.getItem('clay_theme_mode') || 'claude';
   const themeCards = document.querySelectorAll('.theme-binding-card');
 
@@ -515,10 +585,17 @@
     } catch (e) { }
 
     const isNative = mode === 'vscode';
+    const isModern = mode === 'modern';
+
     if (isNative) {
       document.body.classList.add('vscode-native');
+      document.body.classList.remove('clay-modern');
+    } else if (isModern) {
+      document.body.classList.add('clay-modern');
+      document.body.classList.remove('vscode-native');
     } else {
       document.body.classList.remove('vscode-native');
+      document.body.classList.remove('clay-modern');
     }
 
     themeCards.forEach((c) => {
@@ -831,8 +908,10 @@
       if (statusText) statusText.textContent = 'Connected (Ollama Live)';
       if (latencyText) latencyText.textContent = `${data.latency_ms || 3} ms`;
       if (crumbStatus) {
-        crumbStatus.className = 'pill pill-teal';
-        crumbStatus.innerHTML = '<span class="pill-dot"></span>Live';
+        crumbStatus.className = 'pill-status-circle is-live';
+        crumbStatus.title = 'Live // Backend Connected (Click to re-test)';
+        crumbStatus.setAttribute('aria-label', 'Backend status: Live');
+        crumbStatus.innerHTML = '';
       }
 
       // Populate models dropdown dynamically
@@ -868,8 +947,10 @@
       if (statusText) statusText.textContent = 'Disconnected / Offline';
       if (latencyText) latencyText.textContent = 'err';
       if (crumbStatus) {
-        crumbStatus.className = 'pill pill-red';
-        crumbStatus.innerHTML = '<span class="pill-dot"></span>Offline';
+        crumbStatus.className = 'pill-status-circle is-offline';
+        crumbStatus.title = 'Offline // Backend Disconnected (Click to re-test)';
+        crumbStatus.setAttribute('aria-label', 'Backend status: Offline');
+        crumbStatus.innerHTML = '';
       }
     }
   }
@@ -1173,14 +1254,20 @@
   // ==========================================
   // Claude Code Dynamic Thinking Drawer (<think>)
   // ==========================================
+  let thinkingPromptCounter = 0;
+
   let activeThinkingState = {
     isInsideThinking: false,
     hasFinishedThinking: false,
     isPreStreaming: false,
     preStreamTimer: null,
+    stepTimers: [],
+    phaseInterval: null,
     startTime: 0,
     timerInterval: null,
     elapsedSec: 0,
+    elapsedFormatted: '',
+    summaryMeta: '',
     drawerEl: null,
     bodyEl: null,
     cardsContainerEl: null,
@@ -1188,28 +1275,55 @@
     thoughtPreEl: null,
     titleEl: null,
     stopwatchEl: null,
+    metaEl: null,
     stepEl: null,
     toggleBtn: null,
     cardEl: null
   };
 
-  function resetActiveThinkingState() {
-    if (activeThinkingState) {
-      if (activeThinkingState.timerInterval) {
-        clearInterval(activeThinkingState.timerInterval);
-      }
-      if (activeThinkingState.preStreamTimer) {
-        clearTimeout(activeThinkingState.preStreamTimer);
-      }
+  function formatThinkingDuration(ms) {
+    const clamped = Math.max(100, ms || 0);
+    if (clamped < 10000) {
+      const tenths = (clamped / 1000).toFixed(1);
+      return `${tenths.replace(/\.0$/, '')}s`;
     }
+    return `${Math.round(clamped / 1000)}s`;
+  }
+
+  function clearActiveThinkingTimers() {
+    if (!activeThinkingState) return;
+    if (activeThinkingState.timerInterval) {
+      clearInterval(activeThinkingState.timerInterval);
+      activeThinkingState.timerInterval = null;
+    }
+    if (activeThinkingState.preStreamTimer) {
+      clearTimeout(activeThinkingState.preStreamTimer);
+      activeThinkingState.preStreamTimer = null;
+    }
+    if (activeThinkingState.phaseInterval) {
+      clearInterval(activeThinkingState.phaseInterval);
+      activeThinkingState.phaseInterval = null;
+    }
+    if (Array.isArray(activeThinkingState.stepTimers)) {
+      activeThinkingState.stepTimers.forEach((t) => clearTimeout(t));
+      activeThinkingState.stepTimers = [];
+    }
+  }
+
+  function resetActiveThinkingState() {
+    clearActiveThinkingTimers();
     activeThinkingState = {
       isInsideThinking: false,
       hasFinishedThinking: false,
       isPreStreaming: false,
       preStreamTimer: null,
+      stepTimers: [],
+      phaseInterval: null,
       startTime: 0,
       timerInterval: null,
       elapsedSec: 0,
+      elapsedFormatted: '',
+      summaryMeta: '',
       drawerEl: null,
       bodyEl: null,
       cardsContainerEl: null,
@@ -1217,171 +1331,422 @@
       thoughtPreEl: null,
       titleEl: null,
       stopwatchEl: null,
+      metaEl: null,
       stepEl: null,
       toggleBtn: null,
       cardEl: null
     };
   }
 
+  function pickThinkingVariant(list, seed) {
+    if (!Array.isArray(list) || list.length === 0) return '';
+    return list[Math.abs(seed) % list.length];
+  }
+
   function analyzePromptIntentAndContext(promptText, pinnedList = []) {
     const raw = (promptText || '').trim();
     const clean = normalizeGoalText(raw);
     const lower = clean.toLowerCase();
+    thinkingPromptCounter += 1;
 
-    // 1. Identify target file or symbol
+    let hash = thinkingPromptCounter * 31;
+    for (let i = 0; i < clean.length; i++) {
+      hash = ((hash << 5) - hash + clean.charCodeAt(i)) | 0;
+    }
+    const seed = Math.abs(hash);
+
+    const modelName = currentModel || 'CLAY Core';
+
+    // 1. Identify explicit or active file/symbol context
+    let explicitFile = getPrimaryRepoFile(raw);
+    let activeFileRel = null;
+    const activeRaw = getActiveEditorFileInRepo();
+    if (activeRaw) {
+      activeFileRel = getRepoRelativePath(activeRaw) || activeRaw.replace(/\\/g, '/').split('/').pop();
+    }
+
     let targetEntity = null;
-    let targetType = 'file';
+    let targetBadge = null;
+    let hasExplicitContext = false;
 
     if (pinnedList && pinnedList.length > 0) {
-      const firstPin = pinnedList[0];
-      targetEntity = firstPin.name;
-      targetType = firstPin.type || 'file';
-    } else {
-      const primaryFile = getPrimaryRepoFile(raw);
-      if (primaryFile) {
-        targetEntity = primaryFile;
-        targetType = 'file';
-      } else {
-        const activeFile = getActiveEditorFileInRepo();
-        if (activeFile) {
-          targetEntity = activeFile.replace(/\\/g, '/').split('/').pop();
-          targetType = 'active-file';
-        }
-      }
+      targetEntity = pinnedList[0].name;
+      targetBadge = pinnedList.length > 1
+        ? `${pinnedList[0].name} +${pinnedList.length - 1}`
+        : pinnedList[0].name;
+      hasExplicitContext = true;
+    } else if (explicitFile) {
+      targetEntity = explicitFile;
+      targetBadge = explicitFile;
+      hasExplicitContext = true;
+    } else if (activeFileRel) {
+      targetEntity = activeFileRel;
+      targetBadge = activeFileRel;
     }
 
-    // 2. Identify Action / Intent
-    let actionTitle = 'Codebase Analysis';
-    let actionDetail = 'Processing prompt specifications';
+    // Extract backticked code identifier or error token from prompt if present
+    const codeTokenMatch = raw.match(/`([A-Za-z_][A-Za-z0-9_.:/-]{1,36})`/);
+    const errorTokenMatch = raw.match(/\b([A-Z][A-Za-z0-9_]*(?:Error|Exception|Warning)|ENOENT|EACCES|EPERM|ECONNREFUSED|EINVAL|TypeError|SyntaxError|KeyError|ValueError|AttributeError|NullPointerException)\b/);
+    const extractedSymbol = codeTokenMatch ? codeTokenMatch[1] : (errorTokenMatch ? errorTokenMatch[1] : null);
 
-    if (/\b(fix|bug|error|repair|syntax|fail|failing|broken|issue|patch|indentation|conflict)\b/i.test(lower)) {
-      actionTitle = targetEntity ? `Repair: ${targetEntity}` : 'Bug Diagnosis & Repair';
-      actionDetail = 'Analyzing error patterns, syntax invariants, and patch stability';
+    // 2. Detect short conversational / greeting prompts (e.g. "hi", "hello", "thanks", "hey")
+    const wordCount = clean.split(/\s+/).filter(Boolean).length;
+    const isConversational =
+      !hasExplicitContext &&
+      !extractedSymbol &&
+      wordCount <= 6 &&
+      /^(hi+|hey+|hello+|yo+|sup|hola|good\s+(morning|afternoon|evening|night)|thanks|thank\s+you|thx|ok|okay|cool|nice|great|awesome|who\s+are\s+you|what\s+can\s+you\s+do|help|ping|test)\b[!?.]*$/i.test(clean);
+
+    if (isConversational) {
+      const greetingDetails = [
+        'Direct conversational turn',
+        'Lightweight session exchange',
+        'Fast-path dialogue routing'
+      ];
+      const modelPhases = [
+        'Formulating direct reply...',
+        'Composing concise response...'
+      ];
+      return {
+        isConversational: true,
+        summaryMeta: modelName,
+        steps: [
+          {
+            title: pickThinkingVariant(['Prompt Routing', 'Direct Exchange', 'Session Context'], seed),
+            badge: 'chat',
+            detail: pickThinkingVariant(greetingDetails, seed)
+          },
+          {
+            title: 'Generating Reply',
+            badge: modelName,
+            detail: modelPhases[0],
+            isModelStep: true
+          }
+        ],
+        modelPhases
+      };
+    }
+
+    // 3. Classify technical intent archetype with non-repetitive phrasing pools
+    let step1Title = '';
+    let step1Badge = extractedSymbol || (explicitFile ? explicitFile.split('/').pop() : null);
+    let step1Detail = '';
+    let modelPhases = [];
+
+    if (/\b(fix|bug|error|repair|syntax|fail|failing|broken|issue|patch|indentation|conflict|exception|traceback|crash|undefined|null)\b/i.test(lower)) {
+      step1Title = pickThinkingVariant(['Fault Isolation', 'Root-Cause Triage', 'Diagnostic Scan', 'Bug Localization'], seed);
+      step1Badge = errorTokenMatch ? errorTokenMatch[1] : step1Badge;
+      step1Detail = pickThinkingVariant([
+        'Tracing failure surface, invariants, and call boundaries',
+        'Inspecting error conditions and state mutations',
+        'Analyzing control-flow paths and edge-case guards'
+      ], seed);
+      modelPhases = [
+        'Isolating root cause & failure path...',
+        'Verifying edge-case & regression guards...',
+        'Synthesizing minimal fix...'
+      ];
+    } else if (/\b(style|css|ui|ux|layout|design|restyle|theme|color|border|padding|margin|animation|button|drawer|bar|modal|dark\s*mode|responsive)\b/i.test(lower)) {
+      step1Title = pickThinkingVariant(['UI Component Inspection', 'Visual & DOM Analysis', 'Stylesheet & Layout Scan'], seed);
+      step1Badge = step1Badge || 'ui/styles';
+      step1Detail = pickThinkingVariant([
+        'Mapping DOM hierarchy, theme tokens, and layout constraints',
+        'Evaluating visual hierarchy, spacing, and state transitions',
+        'Auditing CSS specificity and component states'
+      ], seed);
+      modelPhases = [
+        'Aligning visual tokens & contrast...',
+        'Refining layout & transition states...',
+        'Synthesizing UI updates...'
+      ];
+    } else if (/\b(refactor|optimize|clean|speed\s*up|simplify|restructure|improve|deduplicate|modernize|performance)\b/i.test(lower)) {
+      step1Title = pickThinkingVariant(['Complexity & Coupling Scan', 'Structural Audit', 'Optimization Pass'], seed);
+      step1Detail = pickThinkingVariant([
+        'Evaluating cyclomatic complexity, duplication, and hot paths',
+        'Checking call sites and behavior-preservation invariants',
+        'Mapping abstraction boundaries and data structures'
+      ], seed);
+      modelPhases = [
+        'Identifying structural simplifications...',
+        'Verifying call-site compatibility...',
+        'Synthesizing refactored code...'
+      ];
+    } else if (/\b(test|spec|assert|verify|unit\s*test|integration\s*test|pytest|jest|mock|coverage)\b/i.test(lower)) {
+      step1Title = pickThinkingVariant(['Test Matrix Planning', 'Assertion & Coverage Scan', 'Verification Design'], seed);
+      step1Detail = pickThinkingVariant([
+        'Enumerating happy paths, boundary inputs, and failure branches',
+        'Inspecting target signatures and mock dependencies',
+        'Designing deterministic assertions and fixtures'
+      ], seed);
+      modelPhases = [
+        'Mapping boundary & edge conditions...',
+        'Constructing test fixtures & mocks...',
+        'Synthesizing test suite...'
+      ];
+    } else if (/\b(npm|pip|pyinstaller|git|docker|build|compile|bundle|command|powershell|bash|terminal|cli|exe|env|config)\b/i.test(lower)) {
+      step1Title = pickThinkingVariant(['Toolchain & Build Check', 'CLI & Environment Scan', 'Pipeline Inspection'], seed);
+      step1Badge = step1Badge || 'shell';
+      step1Detail = pickThinkingVariant([
+        'Checking workspace paths, build targets, and runtime flags',
+        'Resolving command execution order and binary paths',
+        'Validating package scripts and environment constraints'
+      ], seed);
+      modelPhases = [
+        'Validating command flags & paths...',
+        'Sequencing build steps...',
+        'Formatting execution output...'
+      ];
+    } else if (/\b(scan|audit|review|check\s+for|inconsistenc|compare|difference|vs|tradeoff|suggest)\b/i.test(lower)) {
+      step1Title = pickThinkingVariant(['Cross-File Audit', 'Pattern & Invariant Scan', 'Design Evaluation'], seed);
+      step1Detail = pickThinkingVariant([
+        'Scanning execution flows for edge cases and state mismatches',
+        'Comparing architectural tradeoffs and consistency guarantees',
+        'Auditing cross-module interactions and data contracts'
+      ], seed);
+      modelPhases = [
+        'Cross-checking state & path invariants...',
+        'Weighing design alternatives...',
+        'Compiling structured findings...'
+      ];
     } else if (/\b(implement|create|build|write|add|generate|make|new|scaffold)\b/i.test(lower)) {
-      actionTitle = targetEntity ? `Implement: ${targetEntity}` : 'Feature Synthesis';
-      actionDetail = 'Constructing domain structures, typing models, and logic components';
-    } else if (/\b(refactor|optimize|clean|speed up|simplify|restructure|improve)\b/i.test(lower)) {
-      actionTitle = targetEntity ? `Refactor: ${targetEntity}` : 'Architecture Optimization';
-      actionDetail = 'Evaluating code complexity, algorithmic bounds, and regression safety';
-    } else if (/\b(test|spec|assert|verify|unit test|integration test)\b/i.test(lower)) {
-      actionTitle = targetEntity ? `Test: ${targetEntity}` : 'Test Harness & Verification Plan';
-      actionDetail = 'Formulating test assertions, boundary edge cases, and mocks';
-    } else if (/\b(explain|what does|how does|why|walkthrough|overview|understand)\b/i.test(lower)) {
-      actionTitle = targetEntity ? `Explain: ${targetEntity}` : 'Codebase Inspection';
-      actionDetail = 'Tracing execution lifecycle, data flows, and dependencies';
+      step1Title = pickThinkingVariant(['Feature Blueprint', 'Specification Parsing', 'Module Synthesis Plan'], seed);
+      step1Detail = pickThinkingVariant([
+        'Designing signatures, data flow, and integration hooks',
+        'Mapping domain types, inputs, and error handling',
+        'Structuring implementation components and contracts'
+      ], seed);
+      modelPhases = [
+        'Structuring types & interfaces...',
+        'Wiring core logic & edge cases...',
+        'Synthesizing implementation...'
+      ];
+    } else if (/\b(explain|what\s+does|how\s+does|why|walkthrough|overview|understand|where\s+is|trace)\b/i.test(lower)) {
+      step1Title = pickThinkingVariant(['Execution Trace', 'Codebase Walkthrough', 'Symbol & Flow Lookup'], seed);
+      step1Detail = pickThinkingVariant([
+        'Tracing call hierarchy, data transformations, and side effects',
+        'Following module imports and runtime lifecycle',
+        'Decomposing logic blocks into clear conceptual steps'
+      ], seed);
+      modelPhases = [
+        'Tracing control flow & dependencies...',
+        'Distilling key mechanisms...',
+        'Structuring explanation...'
+      ];
+    } else {
+      step1Title = pickThinkingVariant(['Query Decomposition', 'Intent Analysis', 'Request Scoping', 'Semantic Parsing'], seed);
+      step1Detail = pickThinkingVariant([
+        'Extracting technical constraints and target scope',
+        'Mapping prompt requirements against workspace context',
+        'Resolving entities, symbols, and output format'
+      ], seed);
+      modelPhases = [
+        'Evaluating workspace context...',
+        'Formulating technical response...',
+        'Synthesizing output...'
+      ];
     }
 
-    // Check if domain topic detected (e.g. A*, JWT, LRU, Trie, etc.)
+    // Enrich with algorithmic / domain topic if detected
     const topicInfo = resolveTopicDomain(raw);
     if (topicInfo && topicInfo.topic && topicInfo.topic !== 'Production Software Module') {
-      actionDetail = `${topicInfo.topic} // ${topicInfo.dataStructure}`;
+      step1Badge = step1Badge || topicInfo.topic;
+      step1Detail = `${topicInfo.topic} · ${topicInfo.dataStructure}`;
     }
 
-    // 3. Context Grounding Details
-    let groundingTitle = 'Repository Context';
-    let groundingDetail = 'Querying workspace index and symbol definitions';
+    // 4. Context Grounding Step (Varied & Specific)
+    let groundingTitle = '';
+    let groundingBadge = targetBadge;
+    let groundingDetail = '';
 
     if (pinnedList && pinnedList.length > 0) {
-      groundingTitle = 'Context Grounding';
-      groundingDetail = pinnedList.map(p => `${p.type}: ${p.name}`).join(', ');
-    } else if (targetEntity) {
-      groundingTitle = 'Workspace Grounding';
-      groundingDetail = `${targetEntity} (active reference)`;
+      groundingTitle = pickThinkingVariant(['Pinned Context', 'Explicit Grounding', 'Bound References'], seed);
+      groundingDetail = pinnedList.map((p) => `${p.type || 'ref'}: ${p.name}`).join(' · ');
+    } else if (explicitFile) {
+      groundingTitle = pickThinkingVariant(['Target File Grounding', 'File Buffer Binding', 'Module Context'], seed);
+      groundingDetail = pickThinkingVariant([
+        'Binding file contents and local symbol definitions',
+        'Loading syntax tree and surrounding imports',
+        'Syncing workspace buffer and line ranges'
+      ], seed);
+    } else if (activeFileRel) {
+      groundingTitle = pickThinkingVariant(['Active Buffer Context', 'Workspace Grounding', 'Editor Reference'], seed);
+      groundingDetail = pickThinkingVariant([
+        'Referencing active editor buffer and workspace symbols',
+        'Linking open document context and repo index',
+        'Ground-truthing against active file state'
+      ], seed);
     } else {
-      groundingTitle = 'Hybrid Codebase Retrieval';
-      groundingDetail = 'Searching repository map, graph store, and vector index';
+      const repoCount = Array.isArray(availableRepoFiles) && availableRepoFiles.length > 0
+        ? `${availableRepoFiles.length} files`
+        : 'workspace';
+      groundingTitle = pickThinkingVariant(['Repository Index', 'Hybrid Retrieval', 'Workspace Graph'], seed);
+      groundingBadge = repoCount;
+      groundingDetail = pickThinkingVariant([
+        'Querying symbol graph, file tree, and semantic index',
+        'Scanning repository map for relevant definitions',
+        'Matching query tokens against indexed modules'
+      ], seed);
     }
 
+    const modelStepTitle = pickThinkingVariant(['Model Synthesis', 'Reasoning', 'Inference'], seed);
+    const summaryParts = [];
+    if (targetBadge) summaryParts.push(targetBadge);
+    else if (step1Badge && step1Badge !== 'chat') summaryParts.push(step1Badge);
+
     return {
-      actionTitle,
-      actionDetail,
-      groundingTitle,
-      groundingDetail,
-      modelName: currentModel || 'CLAY Core'
+      isConversational: false,
+      summaryMeta: summaryParts.join(' · '),
+      steps: [
+        {
+          title: step1Title,
+          badge: step1Badge,
+          detail: step1Detail
+        },
+        {
+          title: groundingTitle,
+          badge: groundingBadge,
+          detail: groundingDetail
+        },
+        {
+          title: modelStepTitle,
+          badge: modelName,
+          detail: modelPhases[0],
+          isModelStep: true
+        }
+      ],
+      modelPhases
     };
+  }
+
+  function renderThoughtStepIconHtml(state) {
+    if (state === 'done') {
+      return `
+        <svg viewBox="0 0 12 12" width="9" height="9" fill="currentColor">
+          <path d="M10.28 2.28L4.5 8.06 1.72 5.28a.75.75 0 00-1.06 1.06l3.5 3.5a.75.75 0 001.06 0l6.5-6.5a.75.75 0 00-1.06-1.06z"/>
+        </svg>
+      `;
+    }
+    if (state === 'active') {
+      return `<span class="thought-step-dot"></span>`;
+    }
+    return `<span class="thought-step-ring-pending"></span>`;
+  }
+
+  function transitionThoughtStepState(stepEl, newState) {
+    if (!stepEl) return;
+    stepEl.classList.remove('is-pending', 'is-active', 'is-done');
+    stepEl.classList.add(`is-${newState}`);
+    const iconEl = stepEl.querySelector('.thought-step-icon');
+    if (iconEl) {
+      iconEl.innerHTML = renderThoughtStepIconHtml(newState);
+    }
   }
 
   function startPreStreamingReasoning(cardEl, pinnedList = [], promptText = '') {
     if (!cardEl) return;
+    clearActiveThinkingTimers();
     activeThinkingState.isInsideThinking = true;
     activeThinkingState.isPreStreaming = true;
     activeThinkingState.startTime = Date.now();
+    activeThinkingState.elapsedFormatted = '';
 
     const drawer = createThinkingDrawer(cardEl);
     if (!drawer) return;
 
     const analysis = analyzePromptIntentAndContext(promptText, pinnedList);
+    activeThinkingState.summaryMeta = analysis.summaryMeta || '';
 
     if (activeThinkingState.titleEl) {
-      activeThinkingState.titleEl.textContent = 'Thinking...';
+      activeThinkingState.titleEl.textContent = 'Thinking';
     }
     if (activeThinkingState.stopwatchEl) {
-      activeThinkingState.stopwatchEl.textContent = '(0s)';
+      activeThinkingState.stopwatchEl.textContent = '';
     }
-    if (activeThinkingState.stepEl) {
-      activeThinkingState.stepEl.textContent = analysis.actionTitle;
+    if (activeThinkingState.metaEl) {
+      activeThinkingState.metaEl.textContent = analysis.summaryMeta ? `· ${analysis.summaryMeta}` : '';
+    }
+    if (activeThinkingState.stepEl && analysis.steps.length > 0) {
+      activeThinkingState.stepEl.textContent = analysis.steps[0].title;
     }
 
     if (activeThinkingState.cardsContainerEl) {
-      activeThinkingState.cardsContainerEl.innerHTML = `
-        <div class="thought-step is-done">
-          <span class="thought-step-icon">
-            <svg viewBox="0 0 12 12" width="9" height="9" fill="currentColor">
-              <path d="M10.28 2.28L4.5 8.06 1.72 5.28a.75.75 0 00-1.06 1.06l3.5 3.5a.75.75 0 001.06 0l6.5-6.5a.75.75 0 00-1.06-1.06z"/>
-            </svg>
-          </span>
-          <div class="thought-step-content">
-            <span class="thought-step-title">${escapeHtml(analysis.actionTitle)}</span>
-            <span class="thought-step-detail">${escapeHtml(analysis.actionDetail)}</span>
+      activeThinkingState.cardsContainerEl.innerHTML = analysis.steps.map((step, idx) => {
+        const initialState = idx === 0 ? 'active' : 'pending';
+        const stepIdAttr = step.isModelStep ? 'id="thought-step-model"' : '';
+        const detailIdAttr = step.isModelStep ? 'id="thought-step-model-detail"' : '';
+        const badgeHtml = step.badge
+          ? `<span class="thought-step-badge">${escapeHtml(step.badge)}</span>`
+          : '';
+        return `
+          <div class="thought-step is-${initialState}" data-step-index="${idx}" ${stepIdAttr}>
+            <span class="thought-step-icon">${renderThoughtStepIconHtml(initialState)}</span>
+            <div class="thought-step-content">
+              <div class="thought-step-line">
+                <span class="thought-step-title">${escapeHtml(step.title)}</span>
+                ${badgeHtml}
+                <span class="thought-step-sep">—</span>
+                <span class="thought-step-detail" ${detailIdAttr}>${escapeHtml(step.detail)}</span>
+              </div>
+            </div>
           </div>
-        </div>
-
-        <div class="thought-step is-done">
-          <span class="thought-step-icon">
-            <svg viewBox="0 0 12 12" width="9" height="9" fill="currentColor">
-              <path d="M10.28 2.28L4.5 8.06 1.72 5.28a.75.75 0 00-1.06 1.06l3.5 3.5a.75.75 0 001.06 0l6.5-6.5a.75.75 0 00-1.06-1.06z"/>
-            </svg>
-          </span>
-          <div class="thought-step-content">
-            <span class="thought-step-title">${escapeHtml(analysis.groundingTitle)}</span>
-            <span class="thought-step-detail">${escapeHtml(analysis.groundingDetail)}</span>
-          </div>
-        </div>
-
-        <div class="thought-step is-active" id="thought-step-model">
-          <span class="thought-step-icon">
-            <span class="thought-step-dot"></span>
-          </span>
-          <div class="thought-step-content">
-            <span class="thought-step-title">Reasoning with ${escapeHtml(analysis.modelName)}</span>
-            <span class="thought-step-detail" id="thought-step-model-detail">Evaluating context &amp; formulating solution...</span>
-          </div>
-        </div>
-      `;
+        `;
+      }).join('');
     }
 
-    // Live timer starting at 0s
+    // Staggered progression so steps tick down smoothly instead of appearing pre-checked at 0ms
+    const stepEls = drawer.querySelectorAll('.thought-step');
+    const stepDelays = analysis.steps.length === 2 ? [180] : [220, 520];
+
+    stepDelays.forEach((delayMs, idx) => {
+      const timerId = setTimeout(() => {
+        if (!activeThinkingState.isInsideThinking) return;
+        const prevEl = stepEls[idx];
+        const nextEl = stepEls[idx + 1];
+        if (prevEl) transitionThoughtStepState(prevEl, 'done');
+        if (nextEl) {
+          transitionThoughtStepState(nextEl, 'active');
+          const nextStepData = analysis.steps[idx + 1];
+          if (activeThinkingState.stepEl && nextStepData) {
+            activeThinkingState.stepEl.textContent = nextStepData.title;
+          }
+        }
+      }, delayMs);
+      activeThinkingState.stepTimers.push(timerId);
+    });
+
+    // Live sub-second timer (hidden for the first 150ms so 0s never flashes on screen)
     activeThinkingState.timerInterval = setInterval(() => {
       if (!activeThinkingState.isInsideThinking) return;
-      const s = Math.max(1, Math.round((Date.now() - activeThinkingState.startTime) / 1000));
-      activeThinkingState.elapsedSec = s;
-      if (activeThinkingState.stopwatchEl) {
-        activeThinkingState.stopwatchEl.textContent = `(${s}s)`;
+      const elapsedMs = Date.now() - activeThinkingState.startTime;
+      activeThinkingState.elapsedSec = Math.max(1, Math.round(elapsedMs / 1000));
+      activeThinkingState.elapsedFormatted = formatThinkingDuration(elapsedMs);
+      if (activeThinkingState.stopwatchEl && elapsedMs >= 150) {
+        activeThinkingState.stopwatchEl.textContent = activeThinkingState.elapsedFormatted;
       }
-    }, 1000);
+    }, 100);
 
-    // Dynamic progress transitions during pre-stream
+    // Cycle model reasoning detail phrases so longer waits stay dynamic
+    const phases = Array.isArray(analysis.modelPhases) && analysis.modelPhases.length > 0
+      ? analysis.modelPhases
+      : ['Synthesizing response...'];
+    let phaseIdx = 0;
+    const finalStepDelay = stepDelays[stepDelays.length - 1] || 300;
+
     activeThinkingState.preStreamTimer = setTimeout(() => {
-      if (activeThinkingState.isInsideThinking && activeThinkingState.isPreStreaming) {
-        if (activeThinkingState.stepEl) {
-          activeThinkingState.stepEl.textContent = 'Synthesizing response...';
-        }
+      if (!activeThinkingState.isInsideThinking || !activeThinkingState.isPreStreaming) return;
+      activeThinkingState.phaseInterval = setInterval(() => {
+        if (!activeThinkingState.isInsideThinking || !activeThinkingState.isPreStreaming) return;
+        phaseIdx = (phaseIdx + 1) % phases.length;
+        const nextPhrase = phases[phaseIdx];
         const modelDetail = drawer.querySelector('#thought-step-model-detail');
         if (modelDetail) {
-          modelDetail.textContent = 'Synthesizing response with active model...';
+          modelDetail.textContent = nextPhrase;
         }
-      }
-    }, 600);
+        if (activeThinkingState.stepEl) {
+          activeThinkingState.stepEl.textContent = nextPhrase;
+        }
+      }, 1350);
+    }, finalStepDelay + 300);
   }
 
   function createThinkingDrawer(cardEl) {
@@ -1403,11 +1768,12 @@
               <polygon points="2,1 8,5 2,9"/>
             </svg>
           </span>
-          <span class="thinking-header-title">Thinking...</span>
-          <span class="thinking-stopwatch">(0s)</span>
+          <span class="thinking-header-title">Thinking</span>
+          <span class="thinking-stopwatch"></span>
+          <span class="thinking-header-meta"></span>
         </div>
         <div class="thinking-header-right">
-          <span class="thinking-progress-step">Analyzing query</span>
+          <span class="thinking-progress-step"></span>
           <button type="button" class="btn-thinking-toggle" title="Toggle thoughts" aria-label="Toggle thinking">
             <span class="thinking-toggle-label">Hide</span>
             <svg class="thinking-toggle-icon" viewBox="0 0 10 10" width="7" height="7" fill="currentColor">
@@ -1436,6 +1802,7 @@
 
     const titleEl = drawer.querySelector('.thinking-header-title');
     const stopwatchEl = drawer.querySelector('.thinking-stopwatch');
+    const metaEl = drawer.querySelector('.thinking-header-meta');
     const stepEl = drawer.querySelector('.thinking-progress-step');
     const bodyEl = drawer.querySelector('.thinking-drawer-body');
     const cardsContainerEl = drawer.querySelector('.thought-cards-container');
@@ -1481,6 +1848,7 @@
     activeThinkingState.thoughtPreEl = thoughtPreEl;
     activeThinkingState.titleEl = titleEl;
     activeThinkingState.stopwatchEl = stopwatchEl;
+    activeThinkingState.metaEl = metaEl;
     activeThinkingState.stepEl = stepEl;
     activeThinkingState.toggleBtn = toggleBtn;
     activeThinkingState.cardEl = cardEl;
@@ -1489,14 +1857,12 @@
   }
 
   function finishThinkingDrawer(interrupted = false) {
-    if (activeThinkingState.timerInterval) {
-      clearInterval(activeThinkingState.timerInterval);
-      activeThinkingState.timerInterval = null;
-    }
-    if (activeThinkingState.preStreamTimer) {
-      clearTimeout(activeThinkingState.preStreamTimer);
-      activeThinkingState.preStreamTimer = null;
-    }
+    const elapsedMs = activeThinkingState.startTime
+      ? Math.max(100, Date.now() - activeThinkingState.startTime)
+      : (activeThinkingState.elapsedSec || 1) * 1000;
+    const durationLabel = activeThinkingState.elapsedFormatted || formatThinkingDuration(elapsedMs);
+
+    clearActiveThinkingTimers();
     activeThinkingState.isInsideThinking = false;
     activeThinkingState.hasFinishedThinking = true;
     activeThinkingState.isPreStreaming = false;
@@ -1504,19 +1870,14 @@
     const drawer = activeThinkingState.drawerEl;
     if (!drawer) return;
 
-    // Transition model step to completed
+    // Mark all steps as completed so expanding after completion shows clean checkmarks
+    const allSteps = drawer.querySelectorAll('.thought-step');
+    allSteps.forEach((stepEl) => {
+      transitionThoughtStepState(stepEl, 'done');
+    });
+
     const modelStep = drawer.querySelector('#thought-step-model');
     if (modelStep) {
-      modelStep.classList.remove('is-active');
-      modelStep.classList.add('is-done');
-      const iconEl = modelStep.querySelector('.thought-step-icon');
-      if (iconEl) {
-        iconEl.innerHTML = `
-          <svg viewBox="0 0 12 12" width="9" height="9" fill="currentColor">
-            <path d="M10.28 2.28L4.5 8.06 1.72 5.28a.75.75 0 00-1.06 1.06l3.5 3.5a.75.75 0 001.06 0l6.5-6.5a.75.75 0 00-1.06-1.06z"/>
-          </svg>
-        `;
-      }
       const detail = modelStep.querySelector('#thought-step-model-detail');
       if (detail && (!activeThinkingState.thoughtPreEl || !activeThinkingState.thoughtPreEl.textContent.trim())) {
         detail.textContent = interrupted ? 'Generation cancelled' : 'Complete';
@@ -1526,15 +1887,14 @@
     drawer.classList.remove('is-thinking');
     drawer.classList.add('is-finished');
 
-    // Auto-collapse into sleek summary pill
+    // Auto-collapse into sleek summary line
     drawer.classList.add('is-collapsed');
     drawer.classList.remove('is-expanded');
 
-    const sec = activeThinkingState.elapsedSec || 1;
     if (activeThinkingState.titleEl) {
       activeThinkingState.titleEl.textContent = interrupted
-        ? `Thought for ${sec}s (Interrupted)`
-        : `Thought for ${sec}s`;
+        ? `Thought for ${durationLabel} (interrupted)`
+        : `Thought for ${durationLabel}`;
     }
     if (activeThinkingState.stopwatchEl) {
       activeThinkingState.stopwatchEl.textContent = '';
@@ -2625,12 +2985,13 @@
           createThinkingDrawer(card);
           activeThinkingState.timerInterval = setInterval(() => {
             if (!activeThinkingState.isInsideThinking) return;
-            const s = Math.max(1, Math.round((Date.now() - activeThinkingState.startTime) / 1000));
-            activeThinkingState.elapsedSec = s;
-            if (activeThinkingState.stopwatchEl) {
-              activeThinkingState.stopwatchEl.textContent = `(${s}s)`;
+            const elapsedMs = Date.now() - activeThinkingState.startTime;
+            activeThinkingState.elapsedSec = Math.max(1, Math.round(elapsedMs / 1000));
+            activeThinkingState.elapsedFormatted = formatThinkingDuration(elapsedMs);
+            if (activeThinkingState.stopwatchEl && elapsedMs >= 150) {
+              activeThinkingState.stopwatchEl.textContent = activeThinkingState.elapsedFormatted;
             }
-          }, 1000);
+          }, 100);
         }
 
         const thoughtsSoFar = accumulatedRawText.slice(thinkStartIdx);
@@ -2734,7 +3095,7 @@
       const isCreationQuery = /\b(create|new\s+file|put\s+.*in|write\s+.*in|save\s+as|in\s+a\s+new\s+file|make\s+(?:a\s+)?(?:new\s+)?file)\b/i.test(lastUserQuery || '');
       const queryFile = getPrimaryRepoFile(lastUserQuery || '');
       const streamActiveFile = getActiveEditorFileInRepo();
-      const repoActiveFilename = streamActiveFile ? streamActiveFile.replace(/\\/g, '/').split('/').pop() : null;
+      const repoActiveFilename = streamActiveFile ? getRepoRelativePath(streamActiveFile) : null;
 
       if (diffMatch) {
         detectedDiff = diffMatch[1].trim();
@@ -2810,7 +3171,7 @@
 
       const activeFile = getActiveEditorFileInRepo();
       const activeContent = getActiveEditorContentInRepo();
-      const activeBaseFilename = activeFile ? activeFile.replace(/\\/g, '/').split('/').pop() : null;
+      const activeBaseFilename = activeFile ? getRepoRelativePath(activeFile) : null;
 
       // Resolve primary targetFilename using valid candidate filenames only (never dummy names like 'file')
       if (!targetFilename || !isValidTargetFilename(targetFilename)) {
@@ -2830,7 +3191,16 @@
 
       // Strictly reject any block with a fallback name like 'file' or lacking a file extension (. in name)
       const validStagedBlocks = allExtractedBlocks.filter(b => b.file_path && isValidTargetFilename(b.file_path));
-      const detectedCode = validStagedBlocks.length > 0 ? validStagedBlocks.map(b => b.code).join('\n\n') : null;
+      const detectedCode = validStagedBlocks.length > 0
+        ? (validStagedBlocks.length === 1
+          ? validStagedBlocks[0].code
+          : validStagedBlocks.map(b => {
+            const firstLine = (b.code.split('\n')[0] || '').trim();
+            const hasHeader = b.file_path && firstLine.toLowerCase().includes(b.file_path.toLowerCase());
+            const header = (b.file_path && !hasHeader) ? `# ${b.file_path}\n` : '';
+            return '```' + (b.lang || '') + '\n' + header + b.code + '\n```';
+          }).join('\n\n'))
+        : null;
 
       function isBlockDiff(b) {
         if (!b || !b.code) return false;
@@ -2882,9 +3252,14 @@
       if (validStagedBlocks.length > 0 || (detectedDiff && targetFilename && isValidTargetFilename(targetFilename))) {
         (async () => {
           try {
-            const isTargetActive = streamActiveFile && isSameFileReference(streamActiveFile, targetFilename);
             const compTargetFiles = validStagedBlocks.length > 1 ? validStagedBlocks.map(b => b.file_path) : (lastChatTargetFiles || undefined);
             const compAllowMulti = validStagedBlocks.length > 1 || Boolean(lastChatAllowMulti);
+            const isTargetActive = Boolean(
+              streamActiveFile && (
+                (targetFilename && isSameFileReference(streamActiveFile, targetFilename)) ||
+                (Array.isArray(compTargetFiles) && compTargetFiles.some(tf => isSameFileReference(streamActiveFile, tf)))
+              )
+            );
             const compRes = await fetch(`${BACKEND_URL}/api/agent/compute-diff`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -2894,6 +3269,7 @@
                 allow_multi_file: compAllowMulti,
                 code_or_snippet: answerText,
                 workspace_path: currentRepoPath,
+                active_file: isTargetActive ? (streamActiveFile || undefined) : undefined,
                 active_file_content: isTargetActive ? (activeEditorContent || undefined) : undefined,
                 preferred_line: isTargetActive ? (activeEditorCursorLine || undefined) : undefined
               })
@@ -2943,6 +3319,7 @@
           }
 
           const capturedCode = detectedCode;
+          const capturedBlocks = validStagedBlocks.map(b => ({ ...b }));
           const capturedTarget = (isValidTargetFilename(targetFilename) ? targetFilename : null) || (isValidTargetFilename(getPrimaryRepoFile(lastUserQuery || fullText)) ? getPrimaryRepoFile(lastUserQuery || fullText) : null);
           const capturedGoal = lastUserQuery || 'Apply generated code changes';
           const capturedTargets = validStagedBlocks.length > 0 ? validStagedBlocks.map(b => b.file_path) : (isValidTargetFilename(capturedTarget) ? [capturedTarget] : []);
@@ -2959,9 +3336,10 @@
             await runAgentTask({
               pregeneratedDiff: detectedDiff,
               pregeneratedCode: capturedCode,
+              stagedBlocks: capturedBlocks,
               targetFile: capturedTarget,
               targetFiles: capturedTargets,
-              stagedFiles: (stagedMultiFiles && stagedMultiFiles.length > 0) ? stagedMultiFiles : null,
+              stagedFiles: (stagedMultiFiles && stagedMultiFiles.length > 0) ? stagedMultiFiles.map(sf => ({ ...sf })) : null,
               sourceGoal: capturedGoal
             });
           });
@@ -3656,19 +4034,31 @@
     const allGoalFiles = getAllFilesFromGoal(goal);
     const candidateTarget = (chatPayload && chatPayload.targetFile)
       ? chatPayload.targetFile
-      : (allGoalFiles.length > 0 ? allGoalFiles[0] : (repoActiveFile ? repoActiveFile.replace(/\\/g, '/').split('/').pop() : undefined));
+      : (allGoalFiles.length > 0 ? allGoalFiles[0] : (repoActiveFile ? getRepoRelativePath(repoActiveFile) : undefined));
 
-    // Fast-path resolution for Chat code: ensure pregeneratedDiff is computed and ready BEFORE running steps
-    if (isFromChat && chatPayload && chatPayload.pregeneratedCode && !chatPayload.pregeneratedDiff) {
+    // Fast-path resolution for Chat code: ensure pregeneratedDiff & stagedFiles are computed and ready BEFORE running steps
+    const hasReadyStagedFiles = isFromChat && chatPayload && Array.isArray(chatPayload.stagedFiles) && chatPayload.stagedFiles.length > 0;
+    if (hasReadyStagedFiles && !chatPayload.pregeneratedDiff) {
+      chatPayload.pregeneratedDiff = chatPayload.stagedFiles[0].diff;
+    }
+
+    if (isFromChat && chatPayload && chatPayload.pregeneratedCode && !chatPayload.pregeneratedDiff && !hasReadyStagedFiles) {
       const targetToUse = candidateTarget || 'app.py';
+      const targetFilesList = (chatPayload.targetFiles && chatPayload.targetFiles.length > 0)
+        ? chatPayload.targetFiles
+        : (allGoalFiles.length > 0 ? allGoalFiles : [targetToUse]);
+      const isMultiChat = (targetFilesList && targetFilesList.length > 1) ||
+        (chatPayload.stagedBlocks && chatPayload.stagedBlocks.length > 1);
       const isTargetToUseActive = Boolean(repoActiveFile && isSameFileReference(repoActiveFile, targetToUse));
-      appendTerminalLog(`[agent] Resolving diff for chat-generated code for '${targetToUse}'...`);
+      appendTerminalLog(`[agent] Resolving diff for chat-generated code ${isMultiChat ? `across ${targetFilesList.length} files` : `for '${targetToUse}'`}...`);
       try {
         const compRes = await fetch(`${BACKEND_URL}/api/agent/compute-diff`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             target_file: targetToUse,
+            target_files: targetFilesList,
+            allow_multi_file: isMultiChat,
             code_or_snippet: chatPayload.pregeneratedCode,
             workspace_path: currentRepoPath,
             active_file: isTargetToUseActive ? (repoActiveFile || undefined) : undefined,
@@ -3677,7 +4067,10 @@
         });
         if (compRes.ok) {
           const compData = await compRes.json();
-          if (compData && compData.diff) {
+          if (compData && compData.staged_files && compData.staged_files.length > 0) {
+            chatPayload.stagedFiles = compData.staged_files;
+            chatPayload.pregeneratedDiff = compData.diff || compData.staged_files[0].diff;
+          } else if (compData && compData.diff) {
             chatPayload.pregeneratedDiff = compData.diff;
           }
         }
@@ -3685,18 +4078,29 @@
         console.warn('[compute-diff failed for chat pregeneratedCode]', err);
       }
 
-      // Fallback: If backend compute-diff did not produce a diff, build unified diff from code
-      if (!chatPayload.pregeneratedDiff && chatPayload.pregeneratedCode) {
-        const isTargetToUseActive = Boolean(repoActiveFile && isSameFileReference(repoActiveFile, targetToUse));
-        const codeLines = chatPayload.pregeneratedCode.split('\n');
-        if (isTargetToUseActive && repoActiveContent && repoActiveContent.trim()) {
-          const oldLines = repoActiveContent.split('\n');
-          chatPayload.pregeneratedDiff = `--- a/${targetToUse}\n+++ b/${targetToUse}\n@@ -1,${oldLines.length} +1,${codeLines.length} @@\n`
-            + oldLines.map(l => `-${l}`).join('\n') + '\n'
-            + codeLines.map(l => `+${l}`).join('\n');
+      // Fallback: If backend compute-diff did not produce a diff, build per-file unified diffs from stagedBlocks or code
+      if (!chatPayload.pregeneratedDiff && (!chatPayload.stagedFiles || chatPayload.stagedFiles.length === 0) && chatPayload.pregeneratedCode) {
+        if (chatPayload.stagedBlocks && chatPayload.stagedBlocks.length > 1) {
+          const fallbackStaged = chatPayload.stagedBlocks.map(b => {
+            const fn = b.file_path || targetToUse;
+            const bLines = b.code.replace(/\r\n/g, '\n').split('\n');
+            const d = `--- /dev/null\n+++ b/${fn}\n@@ -0,0 +1,${bLines.length} @@\n` + bLines.map(l => `+${l}`).join('\n');
+            return { file_path: fn, diff: d, adds: bLines.length, dels: 0, applied: false };
+          });
+          chatPayload.stagedFiles = fallbackStaged;
+          chatPayload.pregeneratedDiff = fallbackStaged[0].diff;
         } else {
-          chatPayload.pregeneratedDiff = `--- /dev/null\n+++ b/${targetToUse}\n@@ -0,0 +1,${codeLines.length} @@\n`
-            + codeLines.map(l => `+${l}`).join('\n');
+          const isTargetToUseActive = Boolean(repoActiveFile && isSameFileReference(repoActiveFile, targetToUse));
+          const codeLines = chatPayload.pregeneratedCode.split('\n');
+          if (isTargetToUseActive && repoActiveContent && repoActiveContent.trim()) {
+            const oldLines = repoActiveContent.split('\n');
+            chatPayload.pregeneratedDiff = `--- a/${targetToUse}\n+++ b/${targetToUse}\n@@ -1,${oldLines.length} +1,${codeLines.length} @@\n`
+              + oldLines.map(l => `-${l}`).join('\n') + '\n'
+              + codeLines.map(l => `+${l}`).join('\n');
+          } else {
+            chatPayload.pregeneratedDiff = `--- /dev/null\n+++ b/${targetToUse}\n@@ -0,0 +1,${codeLines.length} @@\n`
+              + codeLines.map(l => `+${l}`).join('\n');
+          }
         }
       }
     }
@@ -3747,7 +4151,7 @@
     }
     let confirmedTargetFile = (chatPayload && chatPayload.targetFile)
       ? chatPayload.targetFile
-      : ((plan && plan.target_file) || (planTargetFiles.length > 0 ? planTargetFiles[0] : null) || (repoActiveFile ? repoActiveFile.replace(/\\/g, '/').split('/').pop() : null) || getPrimaryRepoFile(goal));
+      : ((plan && plan.target_file) || (planTargetFiles.length > 0 ? planTargetFiles[0] : null) || (repoActiveFile ? getRepoRelativePath(repoActiveFile) : null) || getPrimaryRepoFile(goal));
 
     try {
       for (let i = 0; i < steps.length; i++) {
@@ -3810,6 +4214,7 @@
           }
 
           confirmedTargetFile = chosenFile;
+          planTargetFiles = [chosenFile];
           effectiveGoal = `${goal} in ${chosenFile}`;
           appendTerminalLog(`[ambiguity] Target confirmed by user: ${chosenFile}. Resuming execution...`);
           if (agentTerminalStatus) {
@@ -3823,30 +4228,35 @@
           const detailMsg = stepRes.log || currentStep.detail;
           updateStepUI(currentStep.id, 'done', detailMsg);
           appendTerminalLog(`[step ${stepNum}/${totalSteps}] ${detailMsg}`);
-        }
-
-        // Propagate target files discovered in Step 1 (scan) forward to synthesis and validation steps
-        if (stepAction === 'scan' && stepRes && Array.isArray(stepRes.target_files) && stepRes.target_files.length > 0) {
-          planTargetFiles = Array.from(new Set([...planTargetFiles, ...stepRes.target_files]));
-          if (!confirmedTargetFile && planTargetFiles.length > 0) {
-            confirmedTargetFile = planTargetFiles[0];
+          // Propagate target files discovered in Step 1 (scan) forward to synthesis and validation steps
+          if (stepAction === 'scan' && stepRes && Array.isArray(stepRes.target_files) && stepRes.target_files.length > 0) {
+            planTargetFiles = Array.from(new Set([...planTargetFiles, ...stepRes.target_files]));
+            if (!confirmedTargetFile && planTargetFiles.length > 0) {
+              confirmedTargetFile = planTargetFiles[0];
+            }
           }
         }
 
         // Handle diff staging
         if (stepAction === 'synthesize' || stepAction === 'delete') {
           let diffToStage = stepRes.diff;
-          const targetFilename = stepRes.target_file || confirmedTargetFile || (diffToStage ? extractDiffFilename(diffToStage) : '') || getPrimaryRepoFile(effectiveGoal);
+          const stagedFilesToUse = (stepRes.staged_files && stepRes.staged_files.length > 0)
+            ? stepRes.staged_files
+            : ((isFromChat && chatPayload && chatPayload.stagedFiles && chatPayload.stagedFiles.length > 0) ? chatPayload.stagedFiles : null);
+          const targetFilename = (stagedFilesToUse && stagedFilesToUse.length > 0 ? stagedFilesToUse[0].file_path : null)
+            || stepRes.target_file || confirmedTargetFile || (diffToStage ? extractDiffFilename(diffToStage) : '') || getPrimaryRepoFile(effectiveGoal);
 
           if (isFromChat && chatPayload && chatPayload.pregeneratedDiff) {
-            diffToStage = chatPayload.pregeneratedDiff;
+            diffToStage = (stagedFilesToUse && stagedFilesToUse.length > 0 && stagedFilesToUse[0].diff)
+              ? stagedFilesToUse[0].diff
+              : chatPayload.pregeneratedDiff;
           }
 
-          if (diffToStage || (stepRes.staged_files && stepRes.staged_files.length > 0)) {
-            stageDiff(targetFilename, diffToStage, stepRes.staged_files);
+          if (diffToStage || (stagedFilesToUse && stagedFilesToUse.length > 0)) {
+            stageDiff(targetFilename, diffToStage, stagedFilesToUse);
             const diffType = stepAction === 'delete' ? 'deletion' : 'surgical';
-            const targetDesc = (stepRes.staged_files && stepRes.staged_files.length > 1)
-              ? `across ${stepRes.staged_files.length} files (${stepRes.staged_files.map(s => s.file_path).join(', ')})`
+            const targetDesc = (stagedFilesToUse && stagedFilesToUse.length > 1)
+              ? `across ${stagedFilesToUse.length} files (${stagedFilesToUse.map(s => s.file_path).join(', ')})`
               : `for ${targetFilename}`;
             appendTerminalLog(`[diff] Staged ${diffType} diff ${targetDesc} in Diff Reviewer tab.`);
           }
@@ -3907,16 +4317,33 @@
     const allGoalFiles = getAllFilesFromGoal(goal);
 
     // Combine candidate target files from planTargetFiles, allGoalFiles, targetFile
-    const candidateFilesSet = new Set();
+    const rawCandidates = [];
     if (Array.isArray(planTargetFiles) && planTargetFiles.length > 0) {
-      planTargetFiles.forEach(f => candidateFilesSet.add(f));
+      planTargetFiles.forEach(f => { if (f) rawCandidates.push(f); });
     }
-    allGoalFiles.forEach(f => candidateFilesSet.add(f));
-    if (targetFile) candidateFilesSet.add(targetFile);
+    allGoalFiles.forEach(f => { if (f) rawCandidates.push(f); });
+    if (targetFile) rawCandidates.push(targetFile);
+
+    const qualifiedCandidateBases = new Set(
+      rawCandidates
+        .map(f => String(f).replace(/\\/g, '/'))
+        .filter(f => f.includes('/'))
+        .map(f => f.split('/').pop().toLowerCase())
+    );
+
+    const candidateFilesSet = new Set();
+    for (const f of rawCandidates) {
+      const norm = String(f).replace(/\\/g, '/').trim();
+      if (!norm) continue;
+      if (!norm.includes('/') && qualifiedCandidateBases.has(norm.toLowerCase())) {
+        continue;
+      }
+      candidateFilesSet.add(norm);
+    }
 
     let stepTargetFiles = Array.from(candidateFilesSet);
     if (stepTargetFiles.length === 0 && repoActiveFile) {
-      const activeName = repoActiveFile.replace(/\\/g, '/').split('/').pop();
+      const activeName = getRepoRelativePath(repoActiveFile);
       if (activeName) stepTargetFiles.push(activeName);
     }
 
@@ -3925,7 +4352,12 @@
     // Scope parameterization: The LLM decides scope naturally based on context and prompt instructions.
     // If multiple candidate files are identified or scope is unconstrained, enable multi-file modifications.
     const stepAllowMulti = stepTargetFiles.length > 1 || (stepTargetFiles.length === 0);
-    const isTargetActive = Boolean(repoActiveFile && finalTarget && isSameFileReference(repoActiveFile, finalTarget));
+    const isTargetActive = Boolean(
+      repoActiveFile && (
+        (finalTarget && isSameFileReference(repoActiveFile, finalTarget)) ||
+        stepTargetFiles.some(tf => isSameFileReference(repoActiveFile, tf))
+      )
+    );
 
     // Step Action: Streaming synthesis route for real-time live terminal tokens
     if (stepAction === 'synthesize') {
@@ -4475,20 +4907,74 @@
 
   function isSameFileReference(f1, f2) {
     if (!f1 || !f2) return false;
-    const clean1 = f1.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
-    const clean2 = f2.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
+    const clean1 = f1.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '').toLowerCase().trim();
+    const clean2 = f2.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '').toLowerCase().trim();
     if (clean1 === clean2) return true;
+    const hasDir1 = clean1.includes('/');
+    const hasDir2 = clean2.includes('/');
+    const b1 = clean1.split('/').pop();
+    const b2 = clean2.split('/').pop();
+    if (b1 !== b2) return false;
+
+    // Guard against duplicate basenames in stagedMultiFiles or currentRepoFilesList (e.g., src/utils.py vs tests/utils.py)
+    if (Array.isArray(stagedMultiFiles) && stagedMultiFiles.length > 1) {
+      const sameBaseCount = stagedMultiFiles.filter(
+        f => f && f.file_path && f.file_path.replace(/\\/g, '/').split('/').pop().toLowerCase() === b1
+      ).length;
+      if (sameBaseCount > 1) {
+        if (!hasDir1 || !hasDir2) return false;
+        return clean1.endsWith('/' + clean2) || clean2.endsWith('/' + clean1);
+      }
+    }
+    if (Array.isArray(currentRepoFilesList) && currentRepoFilesList.length > 1) {
+      const repoSameBaseCount = currentRepoFilesList.filter(
+        f => f && (f.name || f.path) && (f.name || f.path).replace(/\\/g, '/').split('/').pop().toLowerCase() === b1
+      ).length;
+      if (repoSameBaseCount > 1) {
+        if (!hasDir1 || !hasDir2) return false;
+        return clean1.endsWith('/' + clean2) || clean2.endsWith('/' + clean1);
+      }
+    }
+
     if (clean1.endsWith('/' + clean2) || clean2.endsWith('/' + clean1)) {
       return true;
     }
-    const hasDir1 = clean1.includes('/');
-    const hasDir2 = clean2.includes('/');
     if (!hasDir1 || !hasDir2) {
-      const b1 = clean1.split('/').pop();
-      const b2 = clean2.split('/').pop();
       return b1 === b2;
     }
     return false;
+  }
+
+  function findStagedMultiFileEntry(targetPath) {
+    if (!Array.isArray(stagedMultiFiles) || stagedMultiFiles.length === 0 || !targetPath) return null;
+    const normTarget = targetPath.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '').toLowerCase().trim();
+    // 1. Exact relative path match
+    let matched = stagedMultiFiles.find(
+      f => f && f.file_path && f.file_path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '').toLowerCase().trim() === normTarget
+    );
+    if (matched) return matched;
+    // 2. Suffix match when one is an absolute path containing the relative path
+    if (normTarget.includes('/')) {
+      matched = stagedMultiFiles.find(f => {
+        if (!f || !f.file_path) return false;
+        const fp = f.file_path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '').toLowerCase().trim();
+        return fp.includes('/') && (normTarget.endsWith('/' + fp) || fp.endsWith('/' + normTarget));
+      });
+      if (matched) return matched;
+    }
+    // 3. Disambiguated reference match
+    matched = stagedMultiFiles.find(f => f && isSameFileReference(f.file_path, targetPath));
+    if (matched) return matched;
+    // 4. If targetPath was a bare basename and stagedDiffData.file is currently active with that basename, match active file
+    if (!normTarget.includes('/') && stagedDiffData && stagedDiffData.file) {
+      const activeNorm = stagedDiffData.file.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '').toLowerCase().trim();
+      if (activeNorm.split('/').pop() === normTarget) {
+        matched = stagedMultiFiles.find(
+          f => f && f.file_path && f.file_path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '').toLowerCase().trim() === activeNorm
+        );
+      }
+    }
+    return matched || null;
   }
 
   function checkDiffDivergence(currentBufferContent) {
@@ -4577,8 +5063,19 @@
       stagedDiffData.isDiverged = false;
       hideConflictGuardPill();
     } else if (res.status === 'already_applied') {
-      showToast('All diff changes are already present in editor', 'success');
-      clearStagedDiff();
+      showToast('All diff changes for this file are already present in editor', 'success');
+      if (stagedMultiFiles && stagedMultiFiles.length > 1) {
+        const entry = findStagedMultiFileEntry(stagedDiffData.file);
+        if (entry) entry.applied = true;
+        const remaining = stagedMultiFiles.filter(f => !f.applied && f.diff);
+        if (remaining.length > 0) {
+          stageDiff(remaining[0].file_path, remaining[0].diff, stagedMultiFiles, null, remaining[0].baseContent || null);
+        } else {
+          clearStagedDiff();
+        }
+      } else {
+        clearStagedDiff();
+      }
     } else if (res.status === 'rebased') {
       const updatedBase = stagedDiffData.currentBufferContent || activeEditorContent || '';
       stagedDiffData.diff = res.diff;
@@ -4587,6 +5084,15 @@
       stagedDiffData.baseHash = computeFastHash(updatedBase);
       stagedDiffData.isDiverged = false;
       stagedDiffData.conflicts = [];
+      if (stagedMultiFiles && stagedMultiFiles.length > 0) {
+        const entry = findStagedMultiFileEntry(stagedDiffData.file);
+        if (entry) {
+          entry.diff = res.diff;
+          entry.baseContent = updatedBase;
+          entry.adds = res.diff.split('\n').filter(l => l.startsWith('+') && !l.startsWith('+++')).length;
+          entry.dels = res.diff.split('\n').filter(l => l.startsWith('-') && !l.startsWith('---')).length;
+        }
+      }
       stageDiff(stagedDiffData.file, res.diff, stagedMultiFiles, false, updatedBase);
       showConflictGuardPill('rebased', 'Rebased cleanly to buffer');
       showToast('Diff rebased cleanly to match editor changes', 'success');
@@ -4604,6 +5110,12 @@
       const hCount = document.getElementById('header-conflict-count');
       if (hCount) hCount.textContent = conflictCount;
       if (res.diff) {
+        if (stagedMultiFiles && stagedMultiFiles.length > 0) {
+          const entry = findStagedMultiFileEntry(stagedDiffData.file);
+          if (entry) {
+            entry.diff = res.diff;
+          }
+        }
         stageDiff(stagedDiffData.file, res.diff, stagedMultiFiles, false, stagedDiffData.baseContent);
       }
       showToast(`Warning: ${conflictCount} overlapping edit(s) collide with diff`, 'warning', 4000);
@@ -4660,15 +5172,39 @@
           file_path: stagedDiffData.file,
           diff: stagedDiffData.diff,
           hunk_index: hunkIdx,
-          workspace_path: currentRepoPath
+          workspace_path: currentRepoPath,
+          base_content: stagedDiffData.baseContent || undefined
         })
       });
       const data = await res.json();
       if (res.ok && data.status === 'success') {
         if (!data.diff || !data.diff.trim()) {
-          showToast('All changes in hunk discarded. No remaining diff.', 'info');
-          clearStagedDiff();
+          if (stagedMultiFiles && stagedMultiFiles.length > 1) {
+            const idx = stagedMultiFiles.findIndex(f => f === findStagedMultiFileEntry(stagedDiffData.file));
+            if (idx !== -1) {
+              const removed = stagedMultiFiles.splice(idx, 1)[0];
+              showToast(`All hunks discarded for ${removed.file_path}.`, 'info');
+            }
+            const remaining = stagedMultiFiles.filter(f => !f.applied && f.diff);
+            if (remaining.length > 0) {
+              const nextFile = remaining[0];
+              stageDiff(nextFile.file_path, nextFile.diff, stagedMultiFiles, null, nextFile.baseContent || null);
+            } else {
+              clearStagedDiff();
+            }
+          } else {
+            showToast('All changes in hunk discarded. No remaining diff.', 'info');
+            clearStagedDiff();
+          }
         } else {
+          if (stagedMultiFiles && stagedMultiFiles.length > 0) {
+            const entry = findStagedMultiFileEntry(stagedDiffData.file);
+            if (entry) {
+              entry.diff = data.diff;
+              entry.adds = data.diff.split('\n').filter(l => l.startsWith('+') && !l.startsWith('+++')).length;
+              entry.dels = data.diff.split('\n').filter(l => l.startsWith('-') && !l.startsWith('---')).length;
+            }
+          }
           showToast(`Discarded hunk #${hunkIdx + 1}`, 'info');
           stageDiff(stagedDiffData.file, data.diff, stagedMultiFiles);
         }
@@ -4698,13 +5234,15 @@
       if (!matched) {
         matched = stagedFiles[0];
         activeFile = matched.file_path || matched.file || filename;
-      }
-      if (matched && matched.diff) {
+        if (matched && matched.diff) {
+          activeDiff = matched.diff;
+        }
+      } else if (!activeDiff && matched.diff) {
         activeDiff = matched.diff;
       }
     } else if (stagedMultiFiles && stagedMultiFiles.length > 0) {
       let matched = stagedMultiFiles.find(sf => isSameFileReference(sf.file_path, filename));
-      if (matched && matched.diff) {
+      if (matched && !activeDiff && matched.diff) {
         activeDiff = matched.diff;
       }
     }
@@ -4714,6 +5252,9 @@
 
     if (forceEditedState !== null) {
       stagedDiffIsEdited = forceEditedState;
+    } else if (stagedMultiFiles && stagedMultiFiles.length > 0) {
+      const existingEntry = findStagedMultiFileEntry(filename);
+      stagedDiffIsEdited = existingEntry ? Boolean(existingEntry.isEdited) : false;
     } else if (!stagedDiffData || stagedDiffData.file !== filename) {
       stagedDiffIsEdited = false;
     }
@@ -4780,29 +5321,31 @@
     if (stagedFiles && stagedFiles.length > 0) {
       stagedMultiFiles = stagedFiles.map(sf => {
         const fp = sf.file_path || sf.file || filename;
-        const d = sf.diff !== undefined ? sf.diff : (isSameFileReference(fp, filename) ? diffText : '');
-        const lAdds = sf.adds !== undefined ? sf.adds : (d ? d.split('\n').filter(l => l.startsWith('+') && !l.startsWith('+++')).length : 0);
-        const lDels = sf.dels !== undefined ? sf.dels : (d ? d.split('\n').filter(l => l.startsWith('-') && !l.startsWith('---')).length : 0);
-        const existing = stagedMultiFiles ? stagedMultiFiles.find(item => isSameFileReference(item.file_path, fp)) : null;
+        const isCurrentTarget = isSameFileReference(fp, filename);
+        const d = (isCurrentTarget && diffText) ? diffText : (sf.diff !== undefined ? sf.diff : '');
+        const lAdds = (isCurrentTarget && diffText) ? adds : (sf.adds !== undefined ? sf.adds : (d ? d.split('\n').filter(l => l.startsWith('+') && !l.startsWith('+++')).length : 0));
+        const lDels = (isCurrentTarget && diffText) ? dels : (sf.dels !== undefined ? sf.dels : (d ? d.split('\n').filter(l => l.startsWith('-') && !l.startsWith('---')).length : 0));
+        const existing = stagedMultiFiles ? findStagedMultiFileEntry(fp) : null;
         return {
           file_path: fp,
           diff: d,
           applied: existing ? existing.applied : Boolean(sf.applied),
+          isEdited: existing ? Boolean(existing.isEdited) : Boolean(sf.isEdited),
           adds: lAdds,
           dels: lDels,
           error: existing ? existing.error : (sf.error || null),
-          baseContent: sf.baseContent || (existing ? existing.baseContent : (isSameFileReference(fp, filename) ? resolvedBaseContent : null))
+          baseContent: sf.baseContent || (existing ? existing.baseContent : (isCurrentTarget ? resolvedBaseContent : null))
         };
       });
     } else if (stagedMultiFiles && stagedMultiFiles.length > 0) {
-      const existing = stagedMultiFiles.find(item => isSameFileReference(item.file_path, filename));
+      const existing = findStagedMultiFileEntry(filename);
       if (existing) {
         existing.diff = diffText;
         existing.adds = adds;
         existing.dels = dels;
       }
     } else {
-      stagedMultiFiles = [{ file_path: filename, diff: diffText, applied: false, adds: adds, dels: dels, error: null }];
+      stagedMultiFiles = [{ file_path: filename, diff: diffText, applied: false, isEdited: Boolean(stagedDiffIsEdited), adds: adds, dels: dels, error: null }];
     }
 
     try {
@@ -4823,14 +5366,18 @@
     if (diffBadgeDel) diffBadgeDel.textContent = `-${dels}`;
     if (diffActionBar) diffActionBar.style.display = 'flex';
 
-    // Update Apply All and Accept Patch buttons
+    // Update Apply All, Accept Patch, and Discard buttons
     if (btnAcceptDiff) {
       const activeBase = filename ? filename.replace(/\\/g, '/').split('/').pop() : 'Patch';
       if (stagedMultiFiles.length > 1 && unappliedList.length > 1) {
-        btnAcceptDiff.textContent = `Apply ${activeBase}`;
+        btnAcceptDiff.textContent = `Apply to ${activeBase}`;
       } else {
-        btnAcceptDiff.textContent = 'Accept & Apply Patch';
+        btnAcceptDiff.textContent = 'Apply Patch';
       }
+    }
+
+    if (btnRejectDiff) {
+      btnRejectDiff.textContent = 'Discard';
     }
 
     if (btnAcceptAllDiff) {
@@ -4980,9 +5527,12 @@
             stagedDiffIsEdited = true;
 
             if (stagedMultiFiles && stagedMultiFiles.length > 0) {
-              const fileObj = stagedMultiFiles.find(f => f.file_path === stagedDiffData.file);
+              const fileObj = findStagedMultiFileEntry(stagedDiffData.file);
               if (fileObj) {
                 fileObj.diff = stagedDiffData.diff;
+                fileObj.isEdited = true;
+                fileObj.adds = updatedLines.filter(l => l.startsWith('+') && !l.startsWith('+++')).length;
+                fileObj.dels = updatedLines.filter(l => l.startsWith('-') && !l.startsWith('---')).length;
               }
             }
 
@@ -5030,12 +5580,12 @@
           });
           const data = await res.json();
           if (res.ok && data.status === 'success') {
-            const appliedFile = data.filename || stagedDiffData.file;
+            const appliedFile = data.rel_path || stagedDiffData.file || data.filename;
             showToast(`Patch applied cleanly to ${appliedFile}`, 'success');
             loadRepoTree(currentRepoPath);
 
             if (stagedMultiFiles && stagedMultiFiles.length > 0) {
-              const matched = stagedMultiFiles.find(f => isSameFileReference(f.file_path, appliedFile));
+              const matched = findStagedMultiFileEntry(appliedFile);
               if (matched) {
                 matched.applied = true;
               }
@@ -5074,6 +5624,12 @@
         showToast('All staged files are already applied', 'info', 2000);
         return;
       }
+      const conflictedFile = unapplied.find(f => hasConflictMarkers(f.diff));
+      if (conflictedFile) {
+        stageDiff(conflictedFile.file_path, conflictedFile.diff, stagedMultiFiles, null, conflictedFile.baseContent || null);
+        showToast(`Cannot Apply All: merge conflicts detected in ${conflictedFile.file_path}. Resolve conflicts first.`, 'warning', 4500);
+        return;
+      }
       btnAcceptAllDiff.disabled = true;
       btnAcceptAllDiff.textContent = 'Applying...';
 
@@ -5099,7 +5655,7 @@
           const data = await res.json();
           if (res.ok && (data.status === 'success' || data.status === 'partial')) {
             for (const r of (data.results || [])) {
-              const matched = stagedMultiFiles.find(f => isSameFileReference(f.file_path, r.file_path));
+              const matched = findStagedMultiFileEntry(r.file_path);
               if (matched) {
                 if (r.applied) matched.applied = true;
                 else matched.error = r.message;
@@ -7003,23 +7559,29 @@
       repoTreeCount.textContent = stats ? `${stats.total_files} Files` : `${fileCount} Files`;
     }
 
-    function getTagBadge(ext) {
+    function getFileBadge(ext) {
       const cleanExt = (ext || '').toLowerCase();
-      switch (cleanExt) {
-        case 'py': return '<span class="pixel-tag tag-py">[PY]</span>';
-        case 'ts': return '<span class="pixel-tag tag-ts">[TS]</span>';
-        case 'js': return '<span class="pixel-tag tag-js">[JS]</span>';
-        case 'json': return '<span class="pixel-tag tag-json">[JSON]</span>';
-        case 'html': return '<span class="pixel-tag tag-html">[HTML]</span>';
-        case 'css': return '<span class="pixel-tag tag-css">[CSS]</span>';
-        case 'md': return '<span class="pixel-tag tag-md">[DOC]</span>';
-        case 'sh': return '<span class="pixel-tag tag-sh">[SH]</span>';
-        case 'sql': return '<span class="pixel-tag tag-sql">[SQL]</span>';
-        case 'yaml':
-        case 'yml':
-        case 'toml': return '<span class="pixel-tag tag-cfg">[CFG]</span>';
-        default: return `<span class="pixel-tag tag-file">[${cleanExt.slice(0, 4).toUpperCase() || 'FILE'}]</span>`;
-      }
+      const iconMap = {
+        py:   { label: 'PY',   bg: 'rgba(53, 114, 165, 0.15)', border: '#3572A5', color: '#5dade2' },
+        ts:   { label: 'TS',   bg: 'rgba(49, 120, 198, 0.15)', border: '#3178C6', color: '#60a5fa' },
+        js:   { label: 'JS',   bg: 'rgba(247, 223, 30, 0.15)', border: '#D4AC0D', color: '#facc15' },
+        json: { label: '{}',   bg: 'rgba(234, 179, 8, 0.15)',  border: '#B7950B', color: '#eab308' },
+        html: { label: '<>',   bg: 'rgba(227, 79, 38, 0.15)',  border: '#E34F26', color: '#f87171' },
+        css:  { label: '#',    bg: 'rgba(21, 114, 182, 0.15)', border: '#1572B6', color: '#38bdf8' },
+        md:   { label: 'MD',   bg: 'rgba(8, 145, 178, 0.15)',  border: '#0891B2', color: '#22d3ee' },
+        sh:   { label: '$_',   bg: 'rgba(100, 116, 139, 0.15)', border: '#64748B', color: '#94a3b8' },
+        sql:  { label: 'SQL',  bg: 'rgba(168, 85, 247, 0.15)', border: '#A855F7', color: '#c084fc' },
+        yaml: { label: 'YML',  bg: 'rgba(249, 115, 22, 0.15)', border: '#F97316', color: '#fb923c' },
+        yml:  { label: 'YML',  bg: 'rgba(249, 115, 22, 0.15)', border: '#F97316', color: '#fb923c' },
+        toml: { label: 'CFG',  bg: 'rgba(107, 114, 128, 0.15)', border: '#6B7280', color: '#9ca3af' }
+      };
+      const conf = iconMap[cleanExt] || {
+        label: cleanExt ? cleanExt.slice(0, 3).toUpperCase() : '•',
+        bg: 'rgba(156, 163, 175, 0.12)',
+        border: 'rgba(156, 163, 175, 0.35)',
+        color: 'var(--text-secondary)'
+      };
+      return `<span class="file-type-badge" style="background:${conf.bg};border:1px solid ${conf.border};color:${conf.color};">${conf.label}</span>`;
     }
 
     function buildNodeHtml(node, depth = 0) {
@@ -7030,7 +7592,11 @@
         return `
           <div class="tree-dir-group" data-expanded="true">
             <div class="tree-node tree-folder" style="padding-left: ${indent + 6}px;" title="Click to collapse/expand">
-              <span class="tree-toggle-icon">[-]</span>
+              <span class="tree-toggle-icon">
+                <svg class="tree-chevron-icon" viewBox="0 0 16 16" width="10" height="10">
+                  <path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+              </span>
               <span class="tree-folder-name">${escapeHtml(node.name)}</span>
               <span class="tree-item-count">(${childCount})</span>
             </div>
@@ -7040,7 +7606,7 @@
           </div>
         `;
       } else {
-        const badge = getTagBadge(node.ext);
+        const badge = getFileBadge(node.ext);
         const linesStr = node.lines ? `${node.lines}L` : '';
         const sizeStr = node.size || '';
         const metaStr = [linesStr, sizeStr].filter(Boolean).join(' • ');
@@ -7076,7 +7642,7 @@
 
     repoFileTree.innerHTML = treeNodes.map(n => buildNodeHtml(n, 0)).join('');
 
-    // Attach folder collapse/expand listeners
+    // Attach folder collapse/expand listeners (smooth SVG chevron rotation)
     repoFileTree.querySelectorAll('.tree-folder').forEach(folder => {
       folder.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -7084,12 +7650,66 @@
         if (!group) return;
         const isExpanded = group.getAttribute('data-expanded') === 'true';
         group.setAttribute('data-expanded', isExpanded ? 'false' : 'true');
-        const icon = folder.querySelector('.tree-toggle-icon');
-        if (icon) icon.textContent = isExpanded ? '[+]' : '[-]';
         const children = group.querySelector('.tree-children');
         if (children) children.style.display = isExpanded ? 'none' : 'block';
       });
     });
+
+    // Instant filter search logic for repo file tree
+    function applyRepoTreeFilter() {
+      const filterInput = document.getElementById('repo-tree-filter');
+      const clearBtn = document.getElementById('btn-clear-tree-filter');
+      if (!filterInput || !repoFileTree) return;
+      const q = filterInput.value.trim().toLowerCase();
+      if (clearBtn) clearBtn.style.display = q ? 'inline-block' : 'none';
+
+      if (!q) {
+        repoFileTree.querySelectorAll('.tree-file').forEach(f => { f.style.display = 'flex'; });
+        repoFileTree.querySelectorAll('.tree-dir-group').forEach(d => { d.style.display = 'block'; });
+        return;
+      }
+
+      const fileNodes = repoFileTree.querySelectorAll('.tree-file');
+      fileNodes.forEach(f => {
+        const fPath = (f.getAttribute('data-file-path') || '').toLowerCase();
+        const fName = (f.querySelector('.tree-file-name')?.textContent || '').toLowerCase();
+        const matches = fPath.includes(q) || fName.includes(q);
+        if (matches) {
+          f.style.display = 'flex';
+          let parentGroup = f.closest('.tree-dir-group');
+          while (parentGroup) {
+            parentGroup.style.display = 'block';
+            parentGroup.setAttribute('data-expanded', 'true');
+            const children = parentGroup.querySelector('.tree-children');
+            if (children) children.style.display = 'block';
+            parentGroup = parentGroup.parentElement?.closest('.tree-dir-group');
+          }
+        } else {
+          f.style.display = 'none';
+        }
+      });
+
+      repoFileTree.querySelectorAll('.tree-dir-group').forEach(d => {
+        const hasVisible = Array.from(d.querySelectorAll('.tree-file')).some(f => f.style.display !== 'none');
+        d.style.display = hasVisible ? 'block' : 'none';
+      });
+    }
+
+    const repoTreeFilterInput = document.getElementById('repo-tree-filter');
+    const btnClearTreeFilter = document.getElementById('btn-clear-tree-filter');
+    if (repoTreeFilterInput && !repoTreeFilterInput._hasFilterListener) {
+      repoTreeFilterInput._hasFilterListener = true;
+      repoTreeFilterInput.addEventListener('input', applyRepoTreeFilter);
+    }
+    if (btnClearTreeFilter && !btnClearTreeFilter._hasClearListener) {
+      btnClearTreeFilter._hasClearListener = true;
+      btnClearTreeFilter.addEventListener('click', () => {
+        repoTreeFilterInput.value = '';
+        applyRepoTreeFilter();
+        repoTreeFilterInput.focus();
+      });
+    }
+    applyRepoTreeFilter();
 
     // Single-click selects file to focus Call Hierarchy, Double-click opens file in IDE / OS
     let fileClickTimer = null;
@@ -7168,8 +7788,6 @@
       allExpanded = !allExpanded;
       repoFileTree.querySelectorAll('.tree-dir-group').forEach(group => {
         group.setAttribute('data-expanded', allExpanded ? 'true' : 'false');
-        const icon = group.querySelector('.tree-toggle-icon');
-        if (icon) icon.textContent = allExpanded ? '[-]' : '[+]';
         const children = group.querySelector('.tree-children');
         if (children) children.style.display = allExpanded ? 'block' : 'none';
       });
@@ -7455,12 +8073,12 @@
         break;
 
       case 'patchApplied': {
-        const appliedFile = msg.file;
+        const appliedFile = msg.file_path || msg.file || (stagedDiffData ? stagedDiffData.file : '');
         showToast(`Patch applied cleanly to ${appliedFile}`, 'success');
         loadRepoTree(currentRepoPath);
 
         if (stagedMultiFiles && stagedMultiFiles.length > 0) {
-          const matched = stagedMultiFiles.find(f => isSameFileReference(f.file_path, appliedFile));
+          const matched = findStagedMultiFileEntry(appliedFile);
           if (matched) {
             matched.applied = true;
           }
@@ -7483,7 +8101,7 @@
         const results = msg.results || [];
         let allOk = true;
         for (const r of results) {
-          const matched = stagedMultiFiles.find(f => isSameFileReference(f.file_path, r.file_path));
+          const matched = findStagedMultiFileEntry(r.file_path);
           if (matched) {
             if (r.applied) {
               matched.applied = true;
@@ -7610,9 +8228,12 @@
         showToast(`AST Synced: ${fname}${linesInfo}`, 'info', 1800);
         const crumb = document.getElementById('crumb-status');
         if (crumb) {
-          const originalHtml = crumb.innerHTML;
-          crumb.innerHTML = '<span class="pill-dot" style="background:#4E9F3D;"></span>Synced';
-          setTimeout(() => { crumb.innerHTML = originalHtml; }, 1800);
+          crumb.classList.add('is-synced');
+          crumb.title = `AST Synced: ${fname}`;
+          setTimeout(() => {
+            crumb.classList.remove('is-synced');
+            crumb.title = crumb.classList.contains('is-offline') ? 'Offline // Backend Disconnected' : 'Live // Backend Connected';
+          }, 1800);
         }
         break;
       }
@@ -8012,6 +8633,117 @@
     // 1. Stash and protect complete or streaming code blocks
     const codeBlocks = [];
 
+    function highlightDiffContent(diff) {
+      return diff.split('\n').map(line => {
+        const esc = escapeHtml(line);
+        if (line.startsWith('+++') || line.startsWith('---')) {
+          return `<span class="hl-diff-header">${esc}</span>`;
+        }
+        if (line.startsWith('@@')) {
+          return `<span class="hl-diff-hunk">${esc}</span>`;
+        }
+        if (line.startsWith('+')) {
+          return `<span class="hl-diff-add">${esc}</span>`;
+        }
+        if (line.startsWith('-')) {
+          return `<span class="hl-diff-del">${esc}</span>`;
+        }
+        return esc;
+      }).join('\n');
+    }
+
+    function highlightCodeBlock(code, lang) {
+      if (!code) return '';
+      const cleanLang = (lang || '').toLowerCase().trim();
+      if (cleanLang === 'diff' || cleanLang === 'patch' || (code.includes('--- ') && code.includes('+++ ') && code.includes('@@'))) {
+        return highlightDiffContent(code);
+      }
+
+      const isPython = cleanLang === 'python' || cleanLang === 'py';
+      const isJsTs = cleanLang === 'javascript' || cleanLang === 'js' || cleanLang === 'typescript' || cleanLang === 'ts' || cleanLang === 'jsx' || cleanLang === 'tsx';
+      const isHtml = cleanLang === 'html' || cleanLang === 'xml' || cleanLang === 'svg';
+      const isCss = cleanLang === 'css' || cleanLang === 'scss' || cleanLang === 'less';
+      const isJson = cleanLang === 'json';
+
+      if (isHtml) {
+        return code.replace(/(<!--[\s\S]*?-->)|(<!DOCTYPE[^>]*>)|(<\/?)([a-zA-Z0-9:-]+)([^>]*?)(\/?>)/gi, (m, comment, doctype, open, tagName, attrs, close) => {
+          if (comment) return `<span class="hl-cmt">${escapeHtml(comment)}</span>`;
+          if (doctype) return `<span class="hl-doctype">${escapeHtml(doctype)}</span>`;
+          let res = escapeHtml(open) + `<span class="hl-tag">${escapeHtml(tagName)}</span>`;
+          if (attrs) {
+            res += attrs.replace(/([a-zA-Z0-9:-]+)(?:(=)("[^"]*"|'[^']*'|[^\s"'>]+))?/g, (attrM, name, eq, val) => {
+              let aOut = `<span class="hl-attr">${escapeHtml(name)}</span>`;
+              if (eq) aOut += `<span class="hl-op">${eq}</span>`;
+              if (val) aOut += `<span class="hl-str">${escapeHtml(val)}</span>`;
+              return aOut;
+            });
+          }
+          res += escapeHtml(close);
+          return res;
+        });
+      }
+
+      let kwdPattern = '\\b(def|class|import|from|as|return|if|elif|else|for|while|try|except|finally|with|lambda|yield|async|await|pass|break|continue|raise|in|is|not|and|or|None|True|False|self)\\b';
+      let cmtPattern = '#.*$';
+      let strPattern = '(?:"(?:\\\\.|[^"\\\\])*"|\'(?:\\\\.|[^\'\\\\])*\')';
+
+      if (isJsTs) {
+        kwdPattern = '\\b(const|let|var|function|return|if|else|for|while|do|switch|case|default|break|continue|try|catch|finally|throw|class|extends|new|this|super|import|export|from|as|async|await|typeof|instanceof|interface|type|enum|implements|public|private|protected|readonly|true|false|null|undefined|void)\\b';
+        cmtPattern = '\\/\\/.*$|\\/\\*[\\s\\S]*?\\*\\/';
+        strPattern = '(?:"(?:\\\\.|[^"\\\\])*"|\'(?:\\\\.|[^\'\\\\])*\'|`(?:\\\\.|[^`\\\\])*`)';
+      } else if (isCss) {
+        kwdPattern = '(@media|@import|@keyframes|@font-face|!important)';
+        cmtPattern = '\\/\\*[\\s\\S]*?\\*\\/';
+      } else if (isJson) {
+        kwdPattern = '\\b(true|false|null)\\b';
+        cmtPattern = '';
+      }
+
+      const parts = [];
+      if (cmtPattern) parts.push(`(?<cmt>${cmtPattern})`);
+      parts.push(`(?<str>${strPattern})`);
+      parts.push(`(?<kwd>${kwdPattern})`);
+      parts.push(`(?<num>\\b\\d+(?:\\.\\d+)?\\b)`);
+      parts.push(`(?<fn>\\b[a-zA-Z_$][a-zA-Z0-9_$]*(?=\\s*\\())`);
+
+      try {
+        const masterRegex = new RegExp(parts.join('|'), 'gm');
+        let lastIndex = 0;
+        let result = '';
+        let match;
+
+        while ((match = masterRegex.exec(code)) !== null) {
+          if (match.index > lastIndex) {
+            result += escapeHtml(code.slice(lastIndex, match.index));
+          }
+          const token = match[0];
+          const groups = match.groups || {};
+
+          if (groups.cmt) {
+            result += `<span class="hl-cmt">${escapeHtml(token)}</span>`;
+          } else if (groups.str) {
+            result += `<span class="hl-str">${escapeHtml(token)}</span>`;
+          } else if (groups.kwd) {
+            result += `<span class="hl-kwd">${escapeHtml(token)}</span>`;
+          } else if (groups.num) {
+            result += `<span class="hl-num">${escapeHtml(token)}</span>`;
+          } else if (groups.fn) {
+            result += `<span class="hl-fn">${escapeHtml(token)}</span>`;
+          } else {
+            result += escapeHtml(token);
+          }
+          lastIndex = masterRegex.lastIndex;
+        }
+
+        if (lastIndex < code.length) {
+          result += escapeHtml(code.slice(lastIndex));
+        }
+        return result;
+      } catch (e) {
+        return escapeHtml(code);
+      }
+    }
+
     function createCodeBlockHtml(displayLang, code) {
       const isMermaid = displayLang === 'mermaid' ||
         displayLang === 'flowchart' ||
@@ -8045,7 +8777,7 @@
         `<span class="btn-copy-code-text">Copy</span>` +
         `</button>` +
         `</div>` +
-        `<pre class="code-block-pre"><code>${escapeHtml(code)}</code></pre>` +
+        `<pre class="code-block-pre"><code>${highlightCodeBlock(code, displayLang)}</code></pre>` +
         `</div>`
       );
     }
@@ -8056,7 +8788,7 @@
       const index = codeBlocks.length;
       const drawerHtml = `
         <div class="thinking-drawer is-finished is-collapsed">
-          <div class="thinking-drawer-header" onclick="this.parentElement.classList.toggle('is-collapsed')">
+          <div class="thinking-drawer-header" onclick="const d=this.parentElement; const c=d.classList.toggle('is-collapsed'); d.classList.toggle('is-expanded', !c); const l=this.querySelector('.thinking-toggle-label'); if(l) l.textContent=c?'Expand':'Hide';">
             <div class="thinking-header-left">
               <span class="thinking-glyph-icon" style="display:inline-flex;">
                 <svg viewBox="0 0 10 10" width="8" height="8" fill="currentColor">
@@ -8305,7 +9037,7 @@
     const svgEl = copyBtn.querySelector('svg');
 
     copyBtn.classList.add('copied');
-    if (textSpan) textSpan.textContent = 'Copied!';
+    if (textSpan) textSpan.textContent = '✓ Copied!';
     if (svgEl) {
       svgEl.innerHTML = '<polyline points="20 6 9 17 4 12"></polyline>';
     }
@@ -8317,7 +9049,7 @@
         if (svgEl) {
           svgEl.innerHTML = '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>';
         }
-      }, 2000);
+      }, 1500);
     };
 
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -8346,15 +9078,15 @@
     const isCreationIntent = /\b(create|new\s+file|put\s+.*in|write\s+.*in|save\s+as|in\s+a\s+new\s+file|make\s+(?:a\s+)?(?:new\s+)?file)\b/i.test(lastUserQuery || '');
     const queryTarget = getPrimaryRepoFile(lastUserQuery || '');
     const repoActive = getActiveEditorFileInRepo();
-    const activeEditorFile = repoActive ? repoActive.replace(/\\/g, '/').split('/').pop() : null;
+    const activeEditorRelFile = repoActive ? getRepoRelativePath(repoActive) : null;
 
     if (!target) {
       if (isCreationIntent && queryTarget) {
         target = queryTarget;
-      } else if (queryTarget && (!repoActive || !isSameFileReference(queryTarget, activeEditorFile))) {
+      } else if (queryTarget && (!repoActive || !isSameFileReference(queryTarget, activeEditorRelFile))) {
         target = queryTarget;
       } else if (repoActive) {
-        target = activeEditorFile;
+        target = activeEditorRelFile;
       } else {
         target = queryTarget || getPrimaryRepoFile(rawText);
       }
@@ -8368,7 +9100,7 @@
       target = 'new_file.py';
     }
 
-    const isTargetActive = activeEditorFile && isSameFileReference(target, activeEditorFile);
+    const isTargetActive = activeEditorRelFile && isSameFileReference(target, activeEditorRelFile);
     const activeContentToSend = isTargetActive ? activeEditorContent : undefined;
     const isUnifiedDiff = rawText.startsWith('---') || rawText.includes('@@') || (wrapper && wrapper.getAttribute('data-is-diff') === 'true');
     const isLooseDiff = isUnifiedDiff || (function () {
@@ -8376,7 +9108,9 @@
       const editLines = lines.filter(l => (l.startsWith('+') || l.startsWith('-')) && !l.startsWith('+++') && !l.startsWith('---'));
       return editLines.length >= 2 && editLines.length / Math.max(1, lines.length) > 0.3;
     })();
-    const fileExists = currentRepoFilesList && currentRepoFilesList.some(f => f.name && f.name.toLowerCase() === target.toLowerCase());
+    const fileExists = currentRepoFilesList && currentRepoFilesList.some(
+      f => f && isSameFileReference(f.path || f.name, target)
+    );
 
     let finalDiff = rawText;
     let stagedFiles = null;
@@ -8393,6 +9127,7 @@
             workspace_path: currentRepoPath,
             target_file: target,
             code_or_snippet: rawText,
+            active_file: isTargetActive ? (repoActive || undefined) : undefined,
             active_file_content: activeContentToSend,
             preferred_line: isTargetActive ? activeEditorCursorLine : undefined
           })

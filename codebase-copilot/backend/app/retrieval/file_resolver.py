@@ -79,6 +79,7 @@ class WorkspaceFileResolver:
                 return cached_map
 
         file_map: Dict[str, Path] = {}
+        basename_lists: Dict[str, List[Path]] = {}
         for path in root.rglob("*"):
             if not path.is_file():
                 continue
@@ -95,8 +96,14 @@ class WorkspaceFileResolver:
                 continue
 
             rel_str = str(rel)
+            rel_posix = rel.as_posix()
             file_map[rel_str] = path
-            file_map[path.name] = path
+            file_map[rel_posix] = path
+            basename_lists.setdefault(path.name.lower(), []).append(path)
+
+        for bname_lower, paths in basename_lists.items():
+            if len(paths) == 1:
+                file_map[paths[0].name] = paths[0]
 
         cls._cached_files[cache_key] = (now, file_map)
         return file_map
@@ -121,6 +128,7 @@ class WorkspaceFileResolver:
                 continue
 
             dir_map[str(rel).lower()] = path
+            dir_map[rel.as_posix().lower()] = path
             dir_map[path.name.lower()] = path
 
         return dir_map
@@ -150,6 +158,7 @@ class WorkspaceFileResolver:
         clean_query = query.lower()
         # Normalize spaces around file extension dots (e.g. "test .py" or "test. py" -> "test.py")
         normalized_query = re.sub(r'(\w+)\s*\.\s*([a-zA-Z0-9]+)', r'\1.\2', clean_query)
+        normalized_query_slash = normalized_query.replace("\\", "/")
 
         # Extract potential word tokens
         tokens = [w.strip(".,;:?!'\"()[]{}<>`") for w in normalized_query.split()]
@@ -157,19 +166,25 @@ class WorkspaceFileResolver:
 
         matched_paths: Dict[str, Path] = {}
         matched_dirs: Dict[str, Path] = {}
-        all_basenames = [p.name.lower() for p in file_map.values()]
-        basename_to_path = {p.name.lower(): p for p in file_map.values()}
-        stem_to_path = {p.stem.lower(): p for p in file_map.values()}
+        unique_paths = list({str(p.resolve()): p for p in file_map.values()}.values())
+        all_basenames = list({p.name.lower() for p in unique_paths})
+        basename_to_paths: Dict[str, List[Path]] = {}
+        stem_to_paths: Dict[str, List[Path]] = {}
+        for p in unique_paths:
+            basename_to_paths.setdefault(p.name.lower(), []).append(p)
+            stem_to_paths.setdefault(p.stem.lower(), []).append(p)
 
         # 1. Exact & Substring Search on files
         for rel_str, p in file_map.items():
-            rel_lower = rel_str.lower()
+            rel_lower = rel_str.replace("\\", "/").lower()
             name_lower = p.name.lower()
             stem_lower = p.stem.lower()
 
-            if name_lower in normalized_query or rel_lower in normalized_query:
+            if rel_lower in normalized_query_slash or rel_str.lower() in normalized_query:
                 matched_paths[str(p.resolve())] = p
-            elif len(stem_lower) > 3 and stem_lower in tokens:
+            elif re.search(r'(?<![/\w])' + re.escape(name_lower), normalized_query_slash):
+                matched_paths[str(p.resolve())] = p
+            elif len(stem_lower) > 3 and stem_lower in tokens and len(stem_to_paths.get(stem_lower, [])) == 1:
                 matched_paths[str(p.resolve())] = p
 
         # 2. Match directory/package names (e.g. query mentions 'app.py' or 'app' when directory 'app' exists)
@@ -187,18 +202,18 @@ class WorkspaceFileResolver:
             fuzzy_names = difflib.get_close_matches(token, all_basenames, n=1, cutoff=0.65)
             if fuzzy_names:
                 target_name = fuzzy_names[0]
-                p = basename_to_path[target_name]
-                matched_paths[str(p.resolve())] = p
+                for p in basename_to_paths.get(target_name, []):
+                    matched_paths[str(p.resolve())] = p
                 continue
 
             # Match stem without extension
             token_stem = token.split(".")[0]
             if len(token_stem) >= 4:
-                fuzzy_stems = difflib.get_close_matches(token_stem, list(stem_to_path.keys()), n=1, cutoff=0.7)
+                fuzzy_stems = difflib.get_close_matches(token_stem, list(stem_to_paths.keys()), n=1, cutoff=0.7)
                 if fuzzy_stems:
                     target_stem = fuzzy_stems[0]
-                    p = stem_to_path[target_stem]
-                    matched_paths[str(p.resolve())] = p
+                    for p in stem_to_paths.get(target_stem, []):
+                        matched_paths[str(p.resolve())] = p
 
         # 4. If query refers to active/open editor file ("this file", "the file", "all contents", "recheck", etc.), resolve context_file
         is_casual = bool(re.match(r'^(hi|hello|hey|greetings|hola|good\s+(morning|afternoon|evening)|who are you|what can you do)[\s!.?]*$', clean_query))

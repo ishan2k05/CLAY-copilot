@@ -257,30 +257,62 @@ class SymbolEntityResolver:
         basename, and fuzzy sequence matching. Supports newly created files
         and folder-qualified paths.
         """
+        wpath = Path(workspace_dir).resolve() if workspace_dir else Path.cwd()
         if accessible_files is None:
             accessible_files = {}
-            wpath = Path(workspace_dir)
             if wpath.exists():
                 for p in wpath.rglob("*"):
                     if p.is_file() and not any(part.startswith(".") or part in ("node_modules", "venv", "__pycache__", "dist", "out") for part in p.parts):
-                        rel = str(p.relative_to(wpath))
+                        rel = str(p.relative_to(wpath)).replace("\\", "/")
                         accessible_files[rel] = p
+
+        # Build deduplicated list of (rel_clean, path_obj) from accessible_files
+        unique_accessible: List[Tuple[str, Path]] = []
+        seen_resolved: Set[str] = set()
+        for rel, path_obj in accessible_files.items():
+            try:
+                res_key = str(path_obj.resolve()).lower()
+                rel_clean = str(path_obj.resolve().relative_to(wpath)).replace("\\", "/")
+            except Exception:
+                res_key = str(path_obj).replace("\\", "/").lower()
+                rel_clean = rel.replace("\\", "/").strip("./")
+            if res_key not in seen_resolved:
+                seen_resolved.add(res_key)
+                unique_accessible.append((rel_clean, path_obj))
 
         matched_files: List[Tuple[float, str]] = []
 
         # 1. Exact token matches and extracted targets (including brand-new files & folder paths)
-        extracted_targets = cls.extract_target_filepaths(goal)
+        raw_extracted = cls.extract_target_filepaths(goal)
+        qualified_basenames = {
+            Path(t.replace("\\", "/").strip("./")).name.lower()
+            for t in raw_extracted
+            if "/" in t.replace("\\", "/").strip("./")
+        }
+        extracted_targets = [
+            t for t in raw_extracted
+            if "/" in t.replace("\\", "/").strip("./")
+            or Path(t.replace("\\", "/").strip("./")).name.lower() not in qualified_basenames
+        ]
         for target in extracted_targets:
             token_clean = target.replace("\\", "/").strip("./")
             token_name = Path(token_clean).name.lower()
+            has_dir = "/" in token_clean
 
             found_in_accessible = False
-            for rel, path_obj in accessible_files.items():
-                rel_clean = rel.replace("\\", "/")
-                if rel_clean.lower() == token_clean.lower() or path_obj.name.lower() == token_name:
-                    matched_files.append((1.0, rel_clean))
-                    found_in_accessible = True
-                    break
+            if has_dir:
+                for rel_clean, path_obj in unique_accessible:
+                    rel_low = rel_clean.lower()
+                    tok_low = token_clean.lower()
+                    if rel_low == tok_low or rel_low.endswith("/" + tok_low):
+                        matched_files.append((1.0, rel_clean))
+                        found_in_accessible = True
+                        break
+            else:
+                for rel_clean, path_obj in unique_accessible:
+                    if path_obj.name.lower() == token_name:
+                        matched_files.append((1.0, rel_clean))
+                        found_in_accessible = True
 
             if not found_in_accessible:
                 # Target is a new file or folder-qualified new path! Include it with top priority!
@@ -301,27 +333,27 @@ class SymbolEntityResolver:
         for w in words:
             if len(w) < 3 or w in ("the", "and", "for", "with", "into", "file", "code", "size", "make"):
                 continue
-            for rel, path_obj in accessible_files.items():
+            for rel_clean, path_obj in unique_accessible:
                 stem = path_obj.stem.lower()
                 name = path_obj.name.lower()
                 if w == stem or w == name:
-                    matched_files.append((0.9, rel))
+                    matched_files.append((0.9, rel_clean))
                 elif w in stem:
                     ratio = difflib.SequenceMatcher(None, w, stem).ratio()
                     if ratio > 0.65:
-                        matched_files.append((0.7 + ratio * 0.2, rel))
+                        matched_files.append((0.7 + ratio * 0.2, rel_clean))
 
         # 3. Content-aware keyword fallback: If no direct filename matched, scan files for distinctive keywords
         if not matched_files:
             goal_keywords = [w for w in words if len(w) >= 4 and w not in ("increase", "decrease", "update", "change", "modify", "should", "could", "would")]
             if goal_keywords:
-                for rel, path_obj in accessible_files.items():
+                for rel_clean, path_obj in unique_accessible:
                     if path_obj.suffix.lower() in (".py", ".js", ".ts", ".html", ".css", ".json"):
                         try:
                             sample = path_obj.read_text(encoding="utf-8", errors="ignore")[:8000].lower()
                             hits = sum(1 for kw in goal_keywords if kw in sample)
                             if hits > 0:
-                                matched_files.append((0.65 + min(0.3, hits * 0.1), rel))
+                                matched_files.append((0.65 + min(0.3, hits * 0.1), rel_clean))
                         except Exception:
                             pass
 
@@ -446,20 +478,38 @@ class AmbiguityDetector:
         if len(candidate_files) <= 1:
             return None
 
-        # If goal contains an exact filename with extension, it's NOT ambiguous
+        goal_norm = goal.replace("\\", "/").lower()
+        base_counts: Dict[str, int] = {}
         for f in candidate_files:
-            fname = Path(f).name
-            if fname.lower() in goal.lower():
+            bname = Path(f.replace("\\", "/")).name.lower()
+            base_counts[bname] = base_counts.get(bname, 0) + 1
+
+        # If goal explicitly names a folder-qualified path or a unique basename, it is NOT ambiguous
+        for f in candidate_files:
+            f_clean = f.replace("\\", "/").strip("./")
+            fname = Path(f_clean).name
+            if "/" in f_clean and f_clean.lower() in goal_norm:
+                return None
+            if fname.lower() in goal_norm and base_counts.get(fname.lower(), 0) == 1:
                 return None
 
-        # If candidates share the same extension or similar purpose (e.g. game.py vs game_multiplayer.py)
-        clean_candidates = [Path(f).name for f in candidate_files[:4]]
+        # Preserve relative paths when duplicate basenames exist or when paths include folders
+        clean_candidates = []
+        for f in candidate_files[:4]:
+            f_norm = f.replace("\\", "/").strip("./")
+            bname = Path(f_norm).name
+            if base_counts.get(bname.lower(), 0) > 1 or "/" in f_norm:
+                clean_candidates.append(f_norm)
+            else:
+                clean_candidates.append(bname)
+
         return {
+            "detected": True,
             "status": "ambiguous",
             "message": f"Multiple potential files match your request '{goal[:40]}...'",
             "question": "Which file would you like to update?",
             "candidates": clean_candidates,
-            "full_paths": candidate_files[:4]
+            "full_paths": [f.replace("\\", "/").strip("./") for f in candidate_files[:4]]
         }
 
 

@@ -385,13 +385,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case 'abortAgentExecution': {
                     try {
                         await this._backendClient.abortAgentExecution();
-                    } catch {}
+                    } catch { }
                     break;
                 }
                 case 'abortTerminalCommand': {
                     try {
                         await this._backendClient.abortTerminalCommand(data?.execution_id);
-                    } catch {}
+                    } catch { }
                     break;
                 }
                 case 'clearChatContext': {
@@ -518,6 +518,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 case 'applyPatch': {
                     try {
+                        const requestedFile = (data.file || '').replace(/\\/g, '/');
                         let targetFile = data.file;
                         const targetWorkspace = data.workspacePath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || (this._lastActiveDocument ? path.dirname(this._lastActiveDocument.uri.fsPath) : undefined);
                         const genericPlaceholders = new Set([
@@ -532,9 +533,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             targetFile = path.resolve(targetWorkspace, targetFile);
                         }
                         const res = await this._backendClient.applyPatch(targetFile, data.diff, targetWorkspace);
-                        const finalName = res?.filename || targetFile;
+                        const finalName = (!isGeneric && requestedFile) ? requestedFile : (res?.rel_path || res?.filename || targetFile);
                         vscode.window.showInformationMessage(`CLAY Copilot: Patch applied cleanly to ${finalName}`);
-                        this._view?.webview.postMessage({ command: 'patchApplied', file: finalName });
+                        this._view?.webview.postMessage({
+                            command: 'patchApplied',
+                            file: finalName,
+                            file_path: requestedFile || finalName,
+                            filename: res?.filename || path.basename(finalName)
+                        });
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`Failed to apply patch: ${err.message}`);
                     }
@@ -545,9 +551,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         const targetWorkspace = data.workspacePath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || (this._lastActiveDocument ? path.dirname(this._lastActiveDocument.uri.fsPath) : undefined);
                         const rawPatches: Array<{ file_path?: string; file?: string; diff: string }> = data.patches || [];
                         const resolvedPatches: Array<{ file_path: string; diff: string }> = [];
+                        const origPaths: string[] = [];
 
                         for (const p of rawPatches) {
-                            let tf = p.file_path || p.file || '';
+                            const origRel = (p.file_path || p.file || '').replace(/\\/g, '/');
+                            origPaths.push(origRel);
+                            let tf = origRel;
                             if (targetWorkspace && tf && !path.isAbsolute(tf)) {
                                 tf = path.resolve(targetWorkspace, tf);
                             }
@@ -555,10 +564,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         }
 
                         const res = await this._backendClient.applyAllPatches(resolvedPatches, targetWorkspace);
+                        const mappedResults = (res.results || []).map((r: any, idx: number) => ({
+                            ...r,
+                            file_path: origPaths[idx] || r.file_path
+                        }));
                         vscode.window.showInformationMessage(`CLAY Copilot: Applied ${res.applied_count || 0} of ${resolvedPatches.length} patches.`);
                         this._view?.webview.postMessage({
                             command: 'allPatchesApplied',
-                            results: res.results || [],
+                            results: mappedResults,
                             applied_count: res.applied_count || 0,
                             total_count: res.total_count || resolvedPatches.length
                         });
@@ -569,6 +582,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 case 'rebaseDiff': {
                     try {
+                        const requestedFile = (data.file || '').replace(/\\/g, '/');
                         let targetFile = data.file;
                         const targetWorkspace = data.workspacePath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || (this._lastActiveDocument ? path.dirname(this._lastActiveDocument.uri.fsPath) : undefined);
                         const genericPlaceholders = new Set([
@@ -583,9 +597,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             targetFile = path.resolve(targetWorkspace, targetFile);
                         }
                         const res = await this._backendClient.rebaseDiff(targetFile, data.baseContent, data.diff, data.currentContent, targetWorkspace, data.forceResolution);
+                        const finalName = (!isGeneric && requestedFile) ? requestedFile : targetFile;
                         this._view?.webview.postMessage({
                             command: 'diffRebased',
-                            file: targetFile,
+                            file: finalName,
                             result: res
                         });
                     } catch (err: any) {
@@ -974,7 +989,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const activeEditor = vscode.window.activeTextEditor;
                     const candidateFile = data.active_file || (activeEditor?.document?.uri?.scheme === 'file' ? activeEditor.document.uri.fsPath : undefined);
                     const activeFile = this._isFileInWorkspace(candidateFile, workspace) ? candidateFile : undefined;
-                    const isTargetActive = Boolean(activeFile && data.target_file && this._isSameFile(activeFile, data.target_file));
+                    const isTargetActive = Boolean(activeFile && data.target_file && this._isSameFile(activeFile, data.target_file, workspace));
                     const cursorLine = isTargetActive && (data.cursor_line !== undefined ? data.cursor_line : (activeEditor?.selection?.active?.line !== undefined ? activeEditor.selection.active.line + 1 : undefined));
 
                     // Look for target document among open VS Code documents to get live buffer if open
@@ -985,14 +1000,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                     if (data.target_file) {
                         const matchingDoc = vscode.workspace.textDocuments.find(d =>
-                            d.uri.scheme === 'file' && this._isSameFile(d.fileName, data.target_file)
+                            d.uri.scheme === 'file' && this._isSameFile(d.fileName, data.target_file, workspace)
                         );
                         if (matchingDoc) {
                             targetDocContent = matchingDoc.getText();
                         } else if (targetPathResolved && fs.existsSync(targetPathResolved)) {
                             try {
                                 targetDocContent = fs.readFileSync(targetPathResolved, 'utf-8');
-                            } catch {}
+                            } catch { }
                         }
                     }
 
@@ -1000,7 +1015,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const isStrictActiveTarget = Boolean(
                         activeEditor?.document?.uri?.scheme === 'file' &&
                         data.target_file &&
-                        this._isSameFile(activeEditor.document.uri.fsPath, data.target_file)
+                        this._isSameFile(activeEditor.document.uri.fsPath, data.target_file, workspace)
                     );
 
                     const activeFileContent = isStrictActiveTarget
@@ -1047,27 +1062,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         });
     }
 
-    private _isSameFile(f1: string | undefined, f2: string | undefined): boolean {
+    private _isSameFile(f1: string | undefined, f2: string | undefined, workspacePath?: string): boolean {
         if (!f1 || !f2) return false;
+        const effectiveWorkspace = workspacePath || this._context?.globalState.get<string>('lastRepoPath') || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         try {
-            const p1 = path.resolve(f1).toLowerCase();
-            const p2 = path.resolve(f2).toLowerCase();
+            const p1 = (effectiveWorkspace && !path.isAbsolute(f1) ? path.resolve(effectiveWorkspace, f1) : path.resolve(f1)).toLowerCase();
+            const p2 = (effectiveWorkspace && !path.isAbsolute(f2) ? path.resolve(effectiveWorkspace, f2) : path.resolve(f2)).toLowerCase();
             if (p1 === p2) return true;
-        } catch {}
-        const clean1 = f1.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
-        const clean2 = f2.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
+        } catch { }
+        const clean1 = f1.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '').toLowerCase();
+        const clean2 = f2.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '').toLowerCase();
         if (clean1 === clean2) return true;
-        if (clean1.endsWith('/' + clean2) || clean2.endsWith('/' + clean1)) {
-            return true;
-        }
         const hasDir1 = clean1.includes('/');
         const hasDir2 = clean2.includes('/');
-        if (!hasDir1 || !hasDir2) {
-            const b1 = path.basename(f1).toLowerCase();
-            const b2 = path.basename(f2).toLowerCase();
-            return b1 === b2;
+        if (hasDir1 && hasDir2) {
+            return clean1.endsWith('/' + clean2) || clean2.endsWith('/' + clean1);
         }
-        return false;
+        const b1 = path.basename(f1).toLowerCase();
+        const b2 = path.basename(f2).toLowerCase();
+        if (b1 !== b2) return false;
+        // Avoid matching a bare basename against an open document when multiple open documents share that basename
+        const openSameBaseCount = vscode.workspace.textDocuments.filter(
+            d => d.uri.scheme === 'file' && path.basename(d.fileName).toLowerCase() === b1
+        ).length;
+        if (openSameBaseCount > 1) {
+            return false;
+        }
+        return true;
     }
 
     private _isFileInWorkspace(filePath: string | undefined, workspacePath: string | undefined): boolean {
@@ -1197,7 +1218,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     } else {
                         child.kill('SIGKILL');
                     }
-                } catch {}
+                } catch { }
                 resolve({
                     exit_code: -1,
                     stdout: stdout,
@@ -1368,7 +1389,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 </span>
                 <span class="theme-switch-text" id="theme-switch-text">Dark</span>
             </button>
-            <span class="pill pill-teal" id="crumb-status"><span class="pill-dot"></span>Live</span>
+            <span class="pill-status-circle is-live" id="crumb-status" title="Live // Backend Connected" aria-label="Backend status: Live"></span>
         </div>
     </div>
 
@@ -1554,9 +1575,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         </div>
 
         <div class="sticky-review-bar" id="diff-action-bar" style="display: none;">
-            <button class="btn-reject" id="btn-reject-diff">Reject Changes</button>
-            <button class="btn-accept" id="btn-accept-diff">Accept & Apply Patch</button>
-            <button class="btn-accept-all" id="btn-accept-all-diff" style="display: none;">Apply All (0)</button>
+            <button class="btn-reject" id="btn-reject-diff">Discard</button>
+            <div class="diff-action-right">
+                <button class="btn-accept" id="btn-accept-diff">Apply Patch</button>
+                <button class="btn-accept-all" id="btn-accept-all-diff" style="display: none;">Apply All (0)</button>
+            </div>
         </div>
     </div>
 
@@ -1614,6 +1637,14 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
                 <button class="pixel-mini-btn" id="btn-expand-tree" title="Toggle expand/collapse all">± Toggle All</button>
                 <button class="pixel-mini-btn" id="btn-clear-file-selection" style="display: none;" title="Deselect active file">✕ Clear Selection</button>
             </div>
+            <div class="repo-filter-bar">
+                <svg class="search-icon" viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="7" cy="7" r="4.5"/>
+                    <line x1="10.5" y1="10.5" x2="14" y2="14"/>
+                </svg>
+                <input type="text" id="repo-tree-filter" class="repo-filter-input" placeholder="Filter files... (e.g. utils.py)" autocomplete="off">
+                <button type="button" id="btn-clear-tree-filter" class="btn-clear-filter" style="display: none;" title="Clear filter">✕</button>
+            </div>
             <div class="repo-file-tree" id="repo-file-tree">
                 <div class="tree-empty-state">
                     <span class="pixel-glyph">»</span> Loading repository files...
@@ -1624,19 +1655,29 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
 
     <!-- 5. Settings View (Reference Styled: Execution, Security Mode, Terminal) -->
     <div id="view-settings" class="view-container">
-        <!-- Section 0: Theme & IDE Bindings -->
+        <!-- Section 0: Theme -->
         <div class="settings-section">
-            <div class="settings-section-title">Theme &amp; IDE Bindings</div>
+            <div class="settings-section-title">Theme</div>
             <div class="theme-binding-grid" id="theme-mode-selector">
                 <div class="theme-binding-card active" data-theme="claude" id="card-theme-claude">
-                    <div class="theme-binding-badge">DEFAULT</div>
+                    <div class="theme-binding-badge">CLASSIC</div>
                     <div class="theme-binding-title">
                         <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
                             <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 1.5v11A5.5 5.5 0 0 1 8 2.5z"/>
                         </svg>
-                        CLAY Palette
+                        Classic
                     </div>
-                    <div class="theme-binding-desc">Signature warm minimalist canvas with custom CLAY Light &amp; Dark tones.</div>
+                    <div class="theme-binding-desc">Signature warm minimalist canvas with classic retro CLAY tones.</div>
+                </div>
+                <div class="theme-binding-card" data-theme="modern" id="card-theme-modern">
+                    <div class="theme-binding-badge">MODERN</div>
+                    <div class="theme-binding-title">
+                        <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
+                            <path d="M8 0a8 8 0 1 0 8 8A8.01 8.01 0 0 0 8 0zm0 14.5a6.5 6.5 0 1 1 6.5-6.5 6.51 6.51 0 0 1-6.5 6.5zM8 3a5 5 0 0 0-5 5h10a5 5 0 0 0-5-5z"/>
+                        </svg>
+                        Modern
+                    </div>
+                    <div class="theme-binding-desc">Obsidian &amp; espresso depth, layered surfaces, and warm ember glow.</div>
                 </div>
                 <div class="theme-binding-card" data-theme="vscode" id="card-theme-vscode">
                     <div class="theme-binding-badge">IDE BINDING</div>
@@ -1644,7 +1685,7 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
                         <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
                             <path d="M14.5 1.5l-5 4.5v4l5 4.5v-13zM1.5 5.2L7 1.5v13L1.5 10.8V5.2z"/>
                         </svg>
-                        IDE PALETTE
+                        IDE Binding
                     </div>
                     <div class="theme-binding-desc">Binds live to IDE editor tokens (background, foreground, diffs &amp; borders).</div>
                 </div>

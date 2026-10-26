@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import asyncio
 import hmac
@@ -902,21 +903,25 @@ async def chat_endpoint(req: ChatRequest):
         ollama_provider.num_predict = req.num_predict
 
     # Silent background sync: only run if a repository workspace is actively selected
+    accessible = {}
     if workspace_dir:
         await silent_sync_workspace(workspace_dir)
+        accessible = WorkspaceFileResolver.list_accessible_files(workspace_dir)
 
     # Sync live active file buffer and open files from VS Code in real-time
     if req.context_file:
         p_res = Path(req.context_file).resolve()
         if not workspace_dir or is_path_in_workspace(p_res, workspace_dir):
+            rel_ctx = to_workspace_rel_path(p_res, workspace_dir) if workspace_dir else p_res.name
             if not p_res.exists() and (req.active_file_content is None or not req.active_file_content.strip()):
                 req.context_file = None
                 req.active_file_content = None
                 live_file_buffers.pop(str(p_res), None)
-                live_file_buffers.pop(p_res.name, None)
+                live_file_buffers.pop(rel_ctx, None)
+                if not workspace_dir or p_res.name in accessible:
+                    live_file_buffers.pop(p_res.name, None)
             elif req.active_file_content is not None:
-                live_file_buffers[str(p_res)] = req.active_file_content
-                live_file_buffers[p_res.name] = req.active_file_content
+                update_live_file_buffer(p_res, req.active_file_content, workspace_dir, accessible or None)
                 if workspace_dir:
                     await reindex_file(str(p_res), req.active_file_content)
         else:
@@ -931,13 +936,15 @@ async def chat_endpoint(req: ChatRequest):
             if op and oc is not None:
                 opr = Path(op).resolve()
                 if not workspace_dir or is_path_in_workspace(opr, workspace_dir):
+                    rel_op = to_workspace_rel_path(opr, workspace_dir) if workspace_dir else opr.name
                     if opr.exists() or oc.strip():
-                        live_file_buffers[str(opr)] = oc
-                        live_file_buffers[opr.name] = oc
+                        update_live_file_buffer(opr, oc, workspace_dir, accessible or None)
                         clean_open_files.append(of)
                     else:
                         live_file_buffers.pop(str(opr), None)
-                        live_file_buffers.pop(opr.name, None)
+                        live_file_buffers.pop(rel_op, None)
+                        if not workspace_dir or opr.name in accessible:
+                            live_file_buffers.pop(opr.name, None)
         req.open_files = clean_open_files
 
     # If workspace is active and index is empty or workspace changed, re-index workspace
@@ -1030,27 +1037,25 @@ async def chat_endpoint(req: ChatRequest):
         if is_allowed and not SecretMasker.is_file_sensitive(str(fpath)):
             already_included = any(Path(c.file_path).resolve() == fpath for c in combined_chunks)
             if not already_included:
+                rel_name = to_workspace_rel_path(fpath, workspace_dir) if workspace_dir else fpath.name
                 # Hot-reload: prioritize active in-memory content from VS Code, then fresh disk, then live buffer
                 content = None
                 if req.context_file and str(Path(req.context_file).resolve()) == str(fpath) and req.active_file_content is not None:
                     content = req.active_file_content
                 elif fpath.exists() and fpath.is_file():
                     content = fpath.read_text(encoding="utf-8", errors="ignore") if fpath.stat().st_size > 0 else ""
-                    live_file_buffers[str(fpath)] = content
-                    live_file_buffers[fpath.name] = content
+                    update_live_file_buffer(fpath, content, workspace_dir, accessible or None)
+                elif rel_name in live_file_buffers:
+                    content = live_file_buffers[rel_name]
                 elif str(fpath) in live_file_buffers:
                     content = live_file_buffers[str(fpath)]
-                elif fpath.name in live_file_buffers:
+                elif (not workspace_dir or fpath.name in accessible) and fpath.name in live_file_buffers:
                     content = live_file_buffers[fpath.name]
                 else:
                     content = ""
 
                 lines = content.splitlines()
                 total_lines = len(lines)
-                try:
-                    rel_name = str(fpath.relative_to(Path(workspace_dir).resolve())) if workspace_dir else fpath.name
-                except Exception:
-                    rel_name = fpath.name
 
                 if not content.strip() or total_lines == 0:
                     if fpath.exists():
@@ -1671,6 +1676,73 @@ class PlanRequest(BaseModel):
     active_file_content: Optional[str] = None
     model_name: Optional[str] = None
 
+def to_workspace_rel_path(raw_path: Any, workspace_dir: Any) -> str:
+    """Converts a path to a clean forward-slash relative path within workspace_dir."""
+    if not raw_path:
+        return ""
+    raw_str = str(raw_path).strip()
+    if not raw_str:
+        return ""
+    try:
+        ws_res = Path(workspace_dir).resolve()
+        p = Path(raw_str)
+        if p.is_absolute():
+            return p.resolve().relative_to(ws_res).as_posix()
+        cand = (ws_res / p).resolve()
+        return cand.relative_to(ws_res).as_posix()
+    except Exception:
+        return raw_str.replace("\\", "/").strip("./")
+
+
+def is_same_workspace_file(
+    path_a: Any,
+    path_b: Any,
+    workspace_dir: Any,
+    allow_bare_basename: bool = False
+) -> bool:
+    """
+    Strictly checks if two file references point to the exact same file in workspace_dir.
+    Prevents tests/utils.py and src/utils.py from matching each other.
+    """
+    if not path_a or not path_b:
+        return False
+    rel_a = to_workspace_rel_path(path_a, workspace_dir).lower()
+    rel_b = to_workspace_rel_path(path_b, workspace_dir).lower()
+    if not rel_a or not rel_b:
+        return False
+    if rel_a == rel_b:
+        return True
+    if "/" in rel_a and "/" in rel_b:
+        return False
+    if allow_bare_basename and ("/" not in rel_a or "/" not in rel_b):
+        return Path(rel_a).name.lower() == Path(rel_b).name.lower()
+    return False
+
+
+def update_live_file_buffer(
+    file_path_or_obj: Any,
+    content: str,
+    workspace_dir: Any,
+    accessible: Optional[Dict[str, Path]] = None
+) -> None:
+    """Stores file content in live_file_buffers keyed by full path, relative path, and unambiguous basename."""
+    if not file_path_or_obj or content is None:
+        return
+    rel_p = to_workspace_rel_path(file_path_or_obj, workspace_dir)
+    if rel_p:
+        live_file_buffers[rel_p] = content
+        bname = Path(rel_p).name
+        if accessible is None or bname in accessible:
+            live_file_buffers[bname] = content
+    try:
+        p = Path(file_path_or_obj)
+        if not p.is_absolute() and workspace_dir:
+            p = Path(workspace_dir) / p
+        live_file_buffers[str(p.resolve())] = content
+    except Exception:
+        live_file_buffers[str(file_path_or_obj)] = content
+
+
 @app.post("/api/agent/plan")
 async def create_plan(req: PlanRequest):
     global active_agent_step_cancel
@@ -1683,19 +1755,19 @@ async def create_plan(req: PlanRequest):
     accessible = WorkspaceFileResolver.list_accessible_files(workspace_dir)
     target_files = SymbolEntityResolver.resolve_target_files(req.goal, workspace_dir, accessible)
 
-    # Strictly validate active_file against workspace_dir
+    # Strictly validate active_file against workspace_dir preserving relative subfolder path
     active_in_ws = None
     if req.active_file and is_path_in_workspace(req.active_file, workspace_dir):
-        active_in_ws = Path(req.active_file).resolve().name
+        active_in_ws = to_workspace_rel_path(req.active_file, workspace_dir)
 
     target_candidate = None
     if req.target_file:
         cand_p = Path(req.target_file)
         if cand_p.is_absolute():
             if is_path_in_workspace(cand_p, workspace_dir):
-                target_candidate = cand_p.name
+                target_candidate = to_workspace_rel_path(cand_p, workspace_dir)
         else:
-            target_candidate = cand_p.name
+            target_candidate = to_workspace_rel_path(cand_p, workspace_dir)
 
     # 1. Goal-extracted files take top priority.
     # 2. Only if goal had no explicit files, fallback to validated target_candidate or active_in_ws
@@ -1707,9 +1779,7 @@ async def create_plan(req: PlanRequest):
 
     # Only buffer active file content if verified inside workspace
     if active_in_ws and req.active_file_content:
-        live_file_buffers[active_in_ws] = req.active_file_content
-        if req.active_file and is_path_in_workspace(req.active_file, workspace_dir):
-            live_file_buffers[str(Path(req.active_file).resolve())] = req.active_file_content
+        update_live_file_buffer(req.active_file, req.active_file_content, workspace_dir, accessible)
 
     ambiguity = AmbiguityDetector.check_ambiguity(req.goal, target_files)
     change_specs = SymbolEntityResolver.extract_change_specs(req.goal)
@@ -1727,9 +1797,24 @@ async def create_plan(req: PlanRequest):
         provider=ollama_provider
     )
     
-    merged_targets = list(dict.fromkeys(list(dynamic_plan.get("target_files") or []) + list(target_files or [])))
+    merged_targets: List[str] = []
+    for tf in (target_files or []):
+        tf_norm = str(tf).replace("\\", "/").strip().lstrip("./")
+        if tf_norm and tf_norm not in merged_targets:
+            merged_targets.append(tf_norm)
+    for pf in (dynamic_plan.get("target_files") or []):
+        pf_norm = str(pf).replace("\\", "/").strip().lstrip("./")
+        if not pf_norm or pf_norm in merged_targets:
+            continue
+        if "/" not in pf_norm and any(
+            Path(existing).name.lower() == pf_norm.lower()
+            for existing in merged_targets
+        ):
+            continue
+        merged_targets.append(pf_norm)
     if merged_targets:
         dynamic_plan["target_files"] = merged_targets
+        dynamic_plan["target_file"] = merged_targets[0]
         effective_target_files = merged_targets
     else:
         effective_target_files = dynamic_plan.get("target_files") or target_files
@@ -1781,19 +1866,19 @@ async def execute_agent_step(req: StepExecuteRequest):
     accessible = WorkspaceFileResolver.list_accessible_files(workspace_dir)
     target_files = SymbolEntityResolver.resolve_target_files(req.goal, workspace_dir, accessible)
 
-    # Strictly validate active_file against workspace_dir
+    # Strictly validate active_file against workspace_dir preserving relative subfolder path
     active_in_ws = None
     if req.active_file and is_path_in_workspace(req.active_file, workspace_dir):
-        active_in_ws = Path(req.active_file).resolve().name
+        active_in_ws = to_workspace_rel_path(req.active_file, workspace_dir)
 
     valid_target_file = None
     if req.target_file:
         cand_p = Path(req.target_file)
         if cand_p.is_absolute():
             if is_path_in_workspace(cand_p, workspace_dir):
-                valid_target_file = cand_p.name
+                valid_target_file = to_workspace_rel_path(cand_p, workspace_dir)
         else:
-            valid_target_file = cand_p.name
+            valid_target_file = to_workspace_rel_path(cand_p, workspace_dir)
 
     if valid_target_file:
         if valid_target_file in target_files:
@@ -1821,12 +1906,12 @@ async def execute_agent_step(req: StepExecuteRequest):
     target_path_obj = None
 
     if target_files:
-        primary_name = target_files[0]
-        target_filename = Path(primary_name).name
+        primary_name = target_files[0].replace("\\", "/").strip("./")
+        target_filename = primary_name
         if primary_name in accessible:
             target_path_obj = accessible[primary_name]
-        elif target_filename in accessible:
-            target_path_obj = accessible[target_filename]
+        elif Path(primary_name).name in accessible and "/" not in primary_name:
+            target_path_obj = accessible[Path(primary_name).name]
         elif (Path(workspace_dir) / primary_name).exists() or "/" in primary_name or "\\" in primary_name:
             target_path_obj = Path(workspace_dir) / primary_name
         else:
@@ -1841,26 +1926,26 @@ async def execute_agent_step(req: StepExecuteRequest):
         direct_files = WorkspaceFileResolver.resolve_query_files(req.goal, workspace_dir)
         if direct_files:
             target_path_obj = Path(direct_files[0].file_path)
-            target_filename = target_path_obj.name
+            target_filename = to_workspace_rel_path(target_path_obj, workspace_dir)
         elif accessible:
             py_files = [p for p in accessible.values() if p.suffix == ".py"]
             if py_files:
                 target_path_obj = py_files[0]
-                target_filename = target_path_obj.name
+                target_filename = to_workspace_rel_path(target_path_obj, workspace_dir)
             else:
                 target_path_obj = list(accessible.values())[0]
-                target_filename = target_path_obj.name
+                target_filename = to_workspace_rel_path(target_path_obj, workspace_dir)
         else:
             extracted_from_goal = SymbolEntityResolver.extract_target_filepaths(req.goal)
             if extracted_from_goal:
-                target_filename = Path(extracted_from_goal[0]).name
+                target_filename = extracted_from_goal[0].replace("\\", "/").strip("./")
                 target_path_obj = Path(workspace_dir) / target_filename
             else:
                 words = req.goal.split()
                 for w in words:
                     clean_w = w.strip(".,;:?!'\"()[]{}<>`")
                     if "." in clean_w and not clean_w.startswith("."):
-                        target_filename = Path(clean_w).name
+                        target_filename = clean_w.replace("\\", "/").strip("./")
                         break
                 if not target_filename:
                     target_filename = "app.py"
@@ -2053,49 +2138,27 @@ async def execute_agent_step(req: StepExecuteRequest):
         preferred_line = req.cursor_line
 
         # Helper to check if active_file strictly refers to target_filename/target_path_obj
-        is_target_active_file = False
-        if req.active_file:
-            act_p = Path(req.active_file)
-            if target_path_obj:
-                try:
-                    if act_p.resolve() == target_path_obj.resolve():
-                        is_target_active_file = True
-                except Exception:
-                    pass
-            if not is_target_active_file and target_filename:
-                if act_p.name.lower() == Path(target_filename).name.lower():
-                    is_target_active_file = True
+        allow_bare_primary = bool(target_filename and "/" not in target_filename and Path(target_filename).name in accessible)
+        is_target_active_file = is_same_workspace_file(
+            req.active_file,
+            target_path_obj or target_filename,
+            workspace_dir,
+            allow_bare_basename=allow_bare_primary
+        )
 
         # Keep live buffer updated for the active file itself (if verified inside workspace)
         if req.active_file and req.active_file_content is not None and is_path_in_workspace(req.active_file, workspace_dir):
-            act_p = Path(req.active_file)
-            live_file_buffers[act_p.name] = req.active_file_content
-            try:
-                live_file_buffers[str(act_p.resolve())] = req.active_file_content
-            except Exception:
-                live_file_buffers[str(act_p)] = req.active_file_content
+            update_live_file_buffer(req.active_file, req.active_file_content, workspace_dir, accessible)
 
         # 1. Prioritize active_file_content ONLY if active_file strictly matches the target file
         if is_target_active_file and req.active_file_content is not None and req.active_file_content.strip():
             raw_file_content = req.active_file_content
-            if target_filename:
-                live_file_buffers[target_filename] = raw_file_content
-            if target_path_obj:
-                try:
-                    live_file_buffers[str(target_path_obj.resolve())] = raw_file_content
-                except Exception:
-                    live_file_buffers[str(target_path_obj)] = raw_file_content
+            update_live_file_buffer(target_path_obj or target_filename, raw_file_content, workspace_dir, accessible)
         # 2. Otherwise read target file directly from disk (ground truth)
         elif target_path_obj and target_path_obj.exists() and target_path_obj.is_file():
             try:
                 raw_file_content = target_path_obj.read_text(encoding="utf-8", errors="ignore")
-                # Keep live_file_buffers in sync with fresh disk content for target
-                if target_filename:
-                    live_file_buffers[target_filename] = raw_file_content
-                try:
-                    live_file_buffers[str(target_path_obj.resolve())] = raw_file_content
-                except Exception:
-                    pass
+                update_live_file_buffer(target_path_obj, raw_file_content, workspace_dir, accessible)
             except Exception:
                 raw_file_content = ""
         # 3. Check live in-memory buffer specifically for target file (never for active_file if different)
@@ -2167,17 +2230,39 @@ async def execute_agent_step(req: StepExecuteRequest):
         target_ext = Path(target_filename).suffix.lstrip(".")
         lang_hint = target_ext if target_ext else "python"
 
-        all_targets = list(dict.fromkeys((req.target_files or []) + target_files))
-        if target_filename and target_filename not in all_targets:
-            all_targets.insert(0, target_filename)
+        raw_all_targets = [str(t).replace("\\", "/").strip("./") for t in ((req.target_files or []) + target_files) if t]
+        if req.allow_multi_file is False and valid_target_file:
+            all_targets = [valid_target_file.replace("\\", "/").strip("./")]
+        else:
+            dedup_targets = list(dict.fromkeys(raw_all_targets))
+            qualified_bases = {Path(t).name.lower() for t in dedup_targets if "/" in t}
+            all_targets = [t for t in dedup_targets if "/" in t or Path(t).name.lower() not in qualified_bases]
+        if target_filename:
+            tf_clean = target_filename.replace("\\", "/").strip("./")
+            if tf_clean not in all_targets:
+                # Only insert bare target_filename if no folder-qualified target with the same basename already exists
+                if "/" in tf_clean or not any(Path(existing).name.lower() == Path(tf_clean).name.lower() for existing in all_targets):
+                    all_targets.insert(0, tf_clean)
+
+        base_counts: Dict[str, int] = {}
+        for at in all_targets:
+            bname = Path(str(at).replace("\\", "/")).name.lower()
+            base_counts[bname] = base_counts.get(bname, 0) + 1
 
         # Build file_orig_lines_map strictly from ground-truth disk / isolated live buffers
         file_orig_lines_map = {}
         for at in all_targets:
             at_clean = str(at).replace("\\", "/").strip("./")
+            bname_low = Path(at_clean).name.lower()
+            is_unique_base = (base_counts.get(bname_low, 0) == 1 and Path(at_clean).name in accessible)
             at_obj = PatchEngine.resolve_target_path(at_clean, workspace_dir)
             if not at_obj or not at_obj.exists():
-                at_obj = accessible.get(at) or accessible.get(at_clean) or accessible.get(Path(at_clean).name) or (Path(workspace_dir) / at_clean)
+                at_obj = (
+                    accessible.get(at)
+                    or accessible.get(at_clean)
+                    or (accessible.get(Path(at_clean).name) if is_unique_base and "/" not in at_clean else None)
+                    or (Path(workspace_dir) / at_clean)
+                )
 
             lines = []
             # 1. Ground truth: read exact file directly from disk first
@@ -2189,22 +2274,24 @@ async def execute_agent_step(req: StepExecuteRequest):
 
             # 2. Only override if req.active_file strictly matches this specific target file
             if req.active_file and is_path_in_workspace(req.active_file, workspace_dir):
-                act_p = Path(req.active_file)
-                if (act_p.name.lower() == Path(at_clean).name.lower() or (at_obj and act_p.resolve() == at_obj.resolve())) and req.active_file_content is not None and req.active_file_content.strip():
+                if is_same_workspace_file(req.active_file, at_clean, workspace_dir, allow_bare_basename=is_unique_base) and req.active_file_content is not None and req.active_file_content.strip():
                     lines = req.active_file_content.splitlines()
 
             # 3. Live buffer fallback only if file is newly created in memory
             elif not lines:
                 if at_clean in live_file_buffers and live_file_buffers[at_clean].strip():
                     lines = live_file_buffers[at_clean].splitlines()
-                elif at_obj and at_obj.name in live_file_buffers and live_file_buffers[at_obj.name].strip():
+                elif at_obj and str(at_obj) in live_file_buffers and live_file_buffers[str(at_obj)].strip():
+                    lines = live_file_buffers[str(at_obj)].splitlines()
+                elif is_unique_base and at_obj and at_obj.name in live_file_buffers and live_file_buffers[at_obj.name].strip():
                     lines = live_file_buffers[at_obj.name].splitlines()
 
             file_orig_lines_map[at] = lines
             file_orig_lines_map[at_clean] = lines
             if at_obj:
-                file_orig_lines_map[at_obj.name] = lines
                 file_orig_lines_map[str(at_obj)] = lines
+                if base_counts.get(bname_low, 0) == 1:
+                    file_orig_lines_map[at_obj.name] = lines
 
         if len(all_targets) > 1:
             multi_contexts = []
@@ -2265,7 +2352,7 @@ async def execute_agent_step(req: StepExecuteRequest):
             file_orig_lines_map=file_orig_lines_map,
             generated_text=generated,
             default_filename=target_filename,
-            allow_multi_file=True,
+            allow_multi_file=(len(all_targets) > 1),
             authorized_files=all_targets,
             preferred_line=preferred_line
         )
@@ -2277,7 +2364,9 @@ async def execute_agent_step(req: StepExecuteRequest):
         if final_diff and (not staged_files or len(staged_files) <= 1):
             header_match = re.search(r"\+\+\+\s+(?:b/)?([^\s\n\r]+)", final_diff)
             if header_match and header_match.group(1) != "/dev/null":
-                target_filename = Path(header_match.group(1)).name
+                hdr_rel = to_workspace_rel_path(header_match.group(1), workspace_dir)
+                if "/" in hdr_rel or "/" not in (target_filename or ""):
+                    target_filename = hdr_rel
 
         hunks = PatchEngine.split_into_hunks(final_diff)
 
@@ -2351,16 +2440,16 @@ async def execute_agent_step_stream(req: StepExecuteRequest):
 
     active_in_ws = None
     if req.active_file and is_path_in_workspace(req.active_file, workspace_dir):
-        active_in_ws = Path(req.active_file).resolve().name
+        active_in_ws = to_workspace_rel_path(req.active_file, workspace_dir)
 
     valid_target_file = None
     if req.target_file:
         cand_p = Path(req.target_file)
         if cand_p.is_absolute():
             if is_path_in_workspace(cand_p, workspace_dir):
-                valid_target_file = cand_p.name
+                valid_target_file = to_workspace_rel_path(cand_p, workspace_dir)
         else:
-            valid_target_file = cand_p.name
+            valid_target_file = to_workspace_rel_path(cand_p, workspace_dir)
 
     if valid_target_file:
         if valid_target_file in target_files:
@@ -2387,12 +2476,12 @@ async def execute_agent_step_stream(req: StepExecuteRequest):
     target_path_obj = None
 
     if target_files:
-        primary_name = target_files[0]
-        target_filename = Path(primary_name).name
+        primary_name = target_files[0].replace("\\", "/").strip("./")
+        target_filename = primary_name
         if primary_name in accessible:
             target_path_obj = accessible[primary_name]
-        elif target_filename in accessible:
-            target_path_obj = accessible[target_filename]
+        elif Path(primary_name).name in accessible and "/" not in primary_name:
+            target_path_obj = accessible[Path(primary_name).name]
         elif (Path(workspace_dir) / primary_name).exists() or "/" in primary_name or "\\" in primary_name:
             target_path_obj = Path(workspace_dir) / primary_name
         else:
@@ -2407,26 +2496,26 @@ async def execute_agent_step_stream(req: StepExecuteRequest):
         direct_files = WorkspaceFileResolver.resolve_query_files(req.goal, workspace_dir)
         if direct_files:
             target_path_obj = Path(direct_files[0].file_path)
-            target_filename = target_path_obj.name
+            target_filename = to_workspace_rel_path(target_path_obj, workspace_dir)
         elif accessible:
             py_files = [p for p in accessible.values() if p.suffix == ".py"]
             if py_files:
                 target_path_obj = py_files[0]
-                target_filename = target_path_obj.name
+                target_filename = to_workspace_rel_path(target_path_obj, workspace_dir)
             else:
                 target_path_obj = list(accessible.values())[0]
-                target_filename = target_path_obj.name
+                target_filename = to_workspace_rel_path(target_path_obj, workspace_dir)
         else:
             extracted_from_goal = SymbolEntityResolver.extract_target_filepaths(req.goal)
             if extracted_from_goal:
-                target_filename = Path(extracted_from_goal[0]).name
+                target_filename = extracted_from_goal[0].replace("\\", "/").strip("./")
                 target_path_obj = Path(workspace_dir) / target_filename
             else:
                 words = req.goal.split()
                 for w in words:
                     clean_w = w.strip(".,;:?!'\"()[]{}<>`")
                     if "." in clean_w and not clean_w.startswith("."):
-                        target_filename = Path(clean_w).name
+                        target_filename = clean_w.replace("\\", "/").strip("./")
                         break
                 if not target_filename:
                     target_filename = "app.py"
@@ -2490,49 +2579,27 @@ async def execute_agent_step_stream(req: StepExecuteRequest):
         preferred_line = req.cursor_line
 
         # Helper to check if active_file strictly refers to target_filename/target_path_obj
-        is_target_active_file = False
-        if req.active_file:
-            act_p = Path(req.active_file)
-            if target_path_obj:
-                try:
-                    if act_p.resolve() == target_path_obj.resolve():
-                        is_target_active_file = True
-                except Exception:
-                    pass
-            if not is_target_active_file and target_filename:
-                if act_p.name.lower() == Path(target_filename).name.lower():
-                    is_target_active_file = True
+        allow_bare_primary = bool(target_filename and "/" not in target_filename and Path(target_filename).name in accessible)
+        is_target_active_file = is_same_workspace_file(
+            req.active_file,
+            target_path_obj or target_filename,
+            workspace_dir,
+            allow_bare_basename=allow_bare_primary
+        )
 
         # Keep live buffer updated for the active file itself (if verified inside workspace)
         if req.active_file and req.active_file_content is not None and is_path_in_workspace(req.active_file, workspace_dir):
-            act_p = Path(req.active_file)
-            live_file_buffers[act_p.name] = req.active_file_content
-            try:
-                live_file_buffers[str(act_p.resolve())] = req.active_file_content
-            except Exception:
-                live_file_buffers[str(act_p)] = req.active_file_content
+            update_live_file_buffer(req.active_file, req.active_file_content, workspace_dir, accessible)
 
         # 1. Prioritize active_file_content ONLY if active_file strictly matches the target file
         if is_target_active_file and req.active_file_content is not None and req.active_file_content.strip():
             raw_file_content = req.active_file_content
-            if target_filename:
-                live_file_buffers[target_filename] = raw_file_content
-            if target_path_obj:
-                try:
-                    live_file_buffers[str(target_path_obj.resolve())] = raw_file_content
-                except Exception:
-                    live_file_buffers[str(target_path_obj)] = raw_file_content
+            update_live_file_buffer(target_path_obj or target_filename, raw_file_content, workspace_dir, accessible)
         # 2. Otherwise read target file directly from disk (ground truth)
         elif target_path_obj and target_path_obj.exists() and target_path_obj.is_file():
             try:
                 raw_file_content = target_path_obj.read_text(encoding="utf-8", errors="ignore")
-                # Keep live_file_buffers in sync with fresh disk content for target
-                if target_filename:
-                    live_file_buffers[target_filename] = raw_file_content
-                try:
-                    live_file_buffers[str(target_path_obj.resolve())] = raw_file_content
-                except Exception:
-                    pass
+                update_live_file_buffer(target_path_obj, raw_file_content, workspace_dir, accessible)
             except Exception:
                 raw_file_content = ""
         # 3. Check live in-memory buffer specifically for target file (never for active_file if different)
@@ -2603,17 +2670,39 @@ async def execute_agent_step_stream(req: StepExecuteRequest):
         target_ext = Path(target_filename).suffix.lstrip(".")
         lang_hint = target_ext if target_ext else "python"
 
-        all_targets = list(dict.fromkeys((req.target_files or []) + target_files))
-        if target_filename and target_filename not in all_targets:
-            all_targets.insert(0, target_filename)
+        raw_all_targets = [str(t).replace("\\", "/").strip("./") for t in ((req.target_files or []) + target_files) if t]
+        if req.allow_multi_file is False and valid_target_file:
+            all_targets = [valid_target_file.replace("\\", "/").strip("./")]
+        else:
+            dedup_targets = list(dict.fromkeys(raw_all_targets))
+            qualified_bases = {Path(t).name.lower() for t in dedup_targets if "/" in t}
+            all_targets = [t for t in dedup_targets if "/" in t or Path(t).name.lower() not in qualified_bases]
+        if target_filename:
+            tf_clean = target_filename.replace("\\", "/").strip("./")
+            if tf_clean not in all_targets:
+                # Only insert bare target_filename if no folder-qualified target with the same basename already exists
+                if "/" in tf_clean or not any(Path(existing).name.lower() == Path(tf_clean).name.lower() for existing in all_targets):
+                    all_targets.insert(0, tf_clean)
+
+        base_counts: Dict[str, int] = {}
+        for at in all_targets:
+            bname = Path(str(at).replace("\\", "/")).name.lower()
+            base_counts[bname] = base_counts.get(bname, 0) + 1
 
         # Build file_orig_lines_map strictly from ground-truth disk / isolated live buffers
         file_orig_lines_map = {}
         for at in all_targets:
             at_clean = str(at).replace("\\", "/").strip("./")
+            bname_low = Path(at_clean).name.lower()
+            is_unique_base = (base_counts.get(bname_low, 0) == 1 and Path(at_clean).name in accessible)
             at_obj = PatchEngine.resolve_target_path(at_clean, workspace_dir)
             if not at_obj or not at_obj.exists():
-                at_obj = accessible.get(at) or accessible.get(at_clean) or accessible.get(Path(at_clean).name) or (Path(workspace_dir) / at_clean)
+                at_obj = (
+                    accessible.get(at)
+                    or accessible.get(at_clean)
+                    or (accessible.get(Path(at_clean).name) if is_unique_base and "/" not in at_clean else None)
+                    or (Path(workspace_dir) / at_clean)
+                )
 
             lines = []
             # 1. Ground truth: read exact file directly from disk first
@@ -2625,22 +2714,24 @@ async def execute_agent_step_stream(req: StepExecuteRequest):
 
             # 2. Only override if req.active_file strictly matches this specific target file
             if req.active_file and is_path_in_workspace(req.active_file, workspace_dir):
-                act_p = Path(req.active_file)
-                if (act_p.name.lower() == Path(at_clean).name.lower() or (at_obj and act_p.resolve() == at_obj.resolve())) and req.active_file_content is not None and req.active_file_content.strip():
+                if is_same_workspace_file(req.active_file, at_clean, workspace_dir, allow_bare_basename=is_unique_base) and req.active_file_content is not None and req.active_file_content.strip():
                     lines = req.active_file_content.splitlines()
 
             # 3. Live buffer fallback only if file is newly created in memory
             elif not lines:
                 if at_clean in live_file_buffers and live_file_buffers[at_clean].strip():
                     lines = live_file_buffers[at_clean].splitlines()
-                elif at_obj and at_obj.name in live_file_buffers and live_file_buffers[at_obj.name].strip():
+                elif at_obj and str(at_obj) in live_file_buffers and live_file_buffers[str(at_obj)].strip():
+                    lines = live_file_buffers[str(at_obj)].splitlines()
+                elif is_unique_base and at_obj and at_obj.name in live_file_buffers and live_file_buffers[at_obj.name].strip():
                     lines = live_file_buffers[at_obj.name].splitlines()
 
             file_orig_lines_map[at] = lines
             file_orig_lines_map[at_clean] = lines
             if at_obj:
-                file_orig_lines_map[at_obj.name] = lines
                 file_orig_lines_map[str(at_obj)] = lines
+                if base_counts.get(bname_low, 0) == 1:
+                    file_orig_lines_map[at_obj.name] = lines
 
         if len(all_targets) > 1:
             multi_contexts = []
@@ -2716,7 +2807,7 @@ async def execute_agent_step_stream(req: StepExecuteRequest):
             file_orig_lines_map=file_orig_lines_map,
             generated_text=generated,
             default_filename=target_filename,
-            allow_multi_file=True,
+            allow_multi_file=(len(all_targets) > 1),
             authorized_files=all_targets,
             preferred_line=preferred_line
         )
@@ -2728,7 +2819,9 @@ async def execute_agent_step_stream(req: StepExecuteRequest):
         if final_diff and (not staged_files or len(staged_files) <= 1):
             header_match = re.search(r"\+\+\+\s+(?:b/)?([^\s\n\r]+)", final_diff)
             if header_match and header_match.group(1) != "/dev/null":
-                target_filename = Path(header_match.group(1)).name
+                hdr_rel = to_workspace_rel_path(header_match.group(1), workspace_dir)
+                if "/" in hdr_rel or "/" not in (target_filename or ""):
+                    target_filename = hdr_rel
 
         hunks = PatchEngine.split_into_hunks(final_diff)
 
@@ -2785,8 +2878,8 @@ async def apply_patch(req: ApplyPatchRequest):
             p_obj = Path(patched_file)
             if p_obj.exists():
                 new_text = p_obj.read_text(encoding="utf-8", errors="ignore")
-                live_file_buffers[str(p_obj.resolve())] = new_text
-                live_file_buffers[p_obj.name] = new_text
+                accessible = WorkspaceFileResolver.list_accessible_files(str(workspace))
+                update_live_file_buffer(p_obj, new_text, str(workspace), accessible)
                 await reindex_file(str(p_obj.resolve()), new_text)
         except Exception as e:
             logger.error(f"Failed to auto-reindex patched file {patched_file}: {e}")
@@ -2804,6 +2897,7 @@ class ApplyAllPatchesRequest(BaseModel):
 @app.post("/api/agent/apply-all-patches")
 async def apply_all_patches(req: ApplyAllPatchesRequest):
     workspace = resolve_workspace_path(req.workspace_path)
+    accessible = WorkspaceFileResolver.list_accessible_files(str(workspace))
     results = []
     applied_count = 0
 
@@ -2822,8 +2916,7 @@ async def apply_all_patches(req: ApplyAllPatchesRequest):
                     p_obj = Path(patched_file)
                     if p_obj.exists():
                         new_text = p_obj.read_text(encoding="utf-8", errors="ignore")
-                        live_file_buffers[str(p_obj.resolve())] = new_text
-                        live_file_buffers[p_obj.name] = new_text
+                        update_live_file_buffer(p_obj, new_text, str(workspace), accessible)
                         await reindex_file(str(p_obj.resolve()), new_text)
                 except Exception as e:
                     logger.error(f"Failed to auto-reindex patched file {patched_file}: {e}")
@@ -2877,40 +2970,39 @@ class ComputeDiffRequest(BaseModel):
 @app.post("/api/agent/compute-diff")
 async def compute_diff(req: ComputeDiffRequest):
     workspace = resolve_workspace_path(req.workspace_path)
+    accessible = WorkspaceFileResolver.list_accessible_files(str(workspace))
     target_path = PatchEngine.resolve_target_path(req.target_file, str(workspace))
     orig_lines = []
 
+    req_target_rel = to_workspace_rel_path(req.target_file, workspace) if req.target_file else to_workspace_rel_path(target_path, workspace)
+    allow_bare_target = bool(req_target_rel and "/" not in req_target_rel and Path(req_target_rel).name in accessible)
+
     is_target_active = False
     if req.active_file:
-        act_p = Path(req.active_file)
-        if target_path:
-            try:
-                if act_p.resolve() == target_path.resolve():
-                    is_target_active = True
-            except Exception:
-                pass
-        if not is_target_active:
-            if act_p.name.lower() == Path(req.target_file).name.lower() or act_p.name.lower() == target_path.name.lower():
-                is_target_active = True
+        is_target_active = is_same_workspace_file(
+            req.active_file,
+            req.target_file or target_path,
+            workspace,
+            allow_bare_basename=allow_bare_target
+        )
     elif req.active_file_content is not None and not (target_path.exists() and target_path.is_file()):
         is_target_active = True
 
     if is_target_active and req.active_file_content is not None:
         orig_lines = req.active_file_content.splitlines()
-        live_file_buffers[req.target_file] = req.active_file_content
-        live_file_buffers[target_path.name] = req.active_file_content
+        update_live_file_buffer(req.target_file or target_path, req.active_file_content, workspace, accessible)
     elif target_path.exists() and target_path.is_file():
         try:
             orig_lines = target_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-            live_file_buffers[req.target_file] = "\n".join(orig_lines)
-            live_file_buffers[target_path.name] = "\n".join(orig_lines)
+            update_live_file_buffer(target_path, "\n".join(orig_lines), workspace, accessible)
         except Exception:
             orig_lines = []
     elif req.target_file in live_file_buffers:
         orig_lines = live_file_buffers[req.target_file].splitlines()
-    elif target_path.name in live_file_buffers:
+    elif allow_bare_target and target_path.name in live_file_buffers:
         orig_lines = live_file_buffers[target_path.name].splitlines()
 
+    explicit_auth_targets: List[str] = []
     auth_targets: List[str] = []
     seen_auth = set()
     for tf in (req.target_files or []):
@@ -2918,6 +3010,7 @@ async def compute_diff(req: ComputeDiffRequest):
         if tf_norm and tf_norm.lower() not in seen_auth:
             seen_auth.add(tf_norm.lower())
             auth_targets.append(tf_norm)
+            explicit_auth_targets.append(tf_norm)
 
     if req.target_file:
         rf_norm = req.target_file.replace("\\", "/").strip("/ ")
@@ -2940,44 +3033,52 @@ async def compute_diff(req: ComputeDiffRequest):
 
     file_orig_lines_map: Dict[str, List[str]] = {}
     for at in auth_targets:
-        resolved_p = PatchEngine.resolve_target_path(at, str(workspace))
+        at_clean = at.replace("\\", "/").strip("./")
+        bname = Path(at_clean).name.lower()
+        is_unique_base = (base_counts.get(bname, 0) == 1 and Path(at_clean).name in accessible)
+        resolved_p = PatchEngine.resolve_target_path(at_clean, str(workspace))
         lines: List[str] = []
-        if at in live_file_buffers:
-            lines = live_file_buffers[at].splitlines()
-        elif at.replace("/", "\\") in live_file_buffers:
-            lines = live_file_buffers[at.replace("/", "\\")].splitlines()
-        elif str(resolved_p) in live_file_buffers:
-            lines = live_file_buffers[str(resolved_p)].splitlines()
-        elif resolved_p.exists() and resolved_p.is_file():
+        # 1. Read exact file from disk first
+        if resolved_p.exists() and resolved_p.is_file():
             try:
                 lines = resolved_p.read_text(encoding="utf-8", errors="ignore").splitlines()
             except Exception:
                 lines = []
 
-        file_orig_lines_map[at] = lines
-        file_orig_lines_map[at.replace("\\", "/")] = lines
-        file_orig_lines_map[str(resolved_p)] = lines
-        bname = Path(at).name.lower()
-        if base_counts.get(bname, 0) == 1:
-            file_orig_lines_map[Path(at).name] = lines
-            file_orig_lines_map[resolved_p.name] = lines
+        # 2. Override with active_file_content ONLY if active_file strictly matches this target
+        if req.active_file and req.active_file_content is not None:
+            if is_same_workspace_file(req.active_file, at_clean, workspace, allow_bare_basename=is_unique_base):
+                lines = req.active_file_content.splitlines()
+        elif not req.active_file and is_target_active and req.active_file_content is not None and len(auth_targets) == 1:
+            lines = req.active_file_content.splitlines()
+        # 3. Fallback to isolated live_file_buffers if not on disk
+        elif not lines:
+            if at_clean in live_file_buffers:
+                lines = live_file_buffers[at_clean].splitlines()
+            elif at.replace("/", "\\") in live_file_buffers:
+                lines = live_file_buffers[at.replace("/", "\\")].splitlines()
+            elif str(resolved_p) in live_file_buffers:
+                lines = live_file_buffers[str(resolved_p)].splitlines()
+            elif is_unique_base and resolved_p.name in live_file_buffers:
+                lines = live_file_buffers[resolved_p.name].splitlines()
 
-    if is_target_active and req.active_file_content is not None and req.target_file:
-        act_lines = req.active_file_content.splitlines()
-        file_orig_lines_map[req.target_file] = act_lines
-        file_orig_lines_map[req.target_file.replace("\\", "/")] = act_lines
-        live_file_buffers[req.target_file] = req.active_file_content
-        live_file_buffers[req.target_file.replace("\\", "/")] = req.active_file_content
+        file_orig_lines_map[at] = lines
+        file_orig_lines_map[at_clean] = lines
+        file_orig_lines_map[str(resolved_p)] = lines
+        if base_counts.get(bname, 0) == 1:
+            file_orig_lines_map[Path(at_clean).name] = lines
+            file_orig_lines_map[resolved_p.name] = lines
 
     is_multi = req.allow_multi_file if req.allow_multi_file is not None else (len(auth_targets) > 1)
 
-    default_f = req.target_file or target_path.name
+    default_f = req_target_rel or req.target_file or target_path.name
+    effective_authorized = explicit_auth_targets if explicit_auth_targets else auth_targets
     final_diff, staged_files = PatchEngine.build_multi_surgical_diff(
         file_orig_lines_map=file_orig_lines_map,
         generated_text=req.code_or_snippet,
         default_filename=default_f,
         allow_multi_file=is_multi,
-        authorized_files=auth_targets,
+        authorized_files=effective_authorized,
         preferred_line=req.preferred_line
     )
 
@@ -2986,7 +3087,7 @@ async def compute_diff(req: ComputeDiffRequest):
     hunks = PatchEngine.split_into_hunks(final_diff)
     return {
         "status": "success",
-        "target_file": target_path.name,
+        "target_file": req_target_rel or target_path.name,
         "diff": final_diff,
         "hunks": hunks,
         "staged_files": staged_files,
@@ -3018,8 +3119,15 @@ async def parse_instruction(req: ParseInstructionRequest):
     )
     if decomposed.get("target_files"):
         for tf in decomposed["target_files"]:
-            if tf not in target_files:
-                target_files.append(tf)
+            tf_norm = str(tf).replace("\\", "/").strip().lstrip("./")
+            if not tf_norm or tf_norm in target_files:
+                continue
+            if "/" not in tf_norm and any(
+                Path(existing).name.lower() == tf_norm.lower()
+                for existing in target_files
+            ):
+                continue
+            target_files.append(tf_norm)
     if decomposed.get("intent"):
         intent_info["intent"] = decomposed["intent"]
 
@@ -3048,23 +3156,34 @@ class DiscardHunkRequest(BaseModel):
     diff: str
     hunk_index: int
     workspace_path: Optional[str] = None
+    base_content: Optional[str] = None
 
 @app.post("/api/agent/discard-hunk")
 async def discard_diff_hunk(req: DiscardHunkRequest):
     workspace = resolve_workspace_path(req.workspace_path)
+    accessible = WorkspaceFileResolver.list_accessible_files(str(workspace))
     target_path = PatchEngine.resolve_target_path(req.file_path, str(workspace))
+    rel_target = to_workspace_rel_path(req.file_path or target_path, workspace) or target_path.name
     orig_lines = []
-    if target_path.exists() and target_path.is_file():
+    if req.base_content is not None and req.base_content.strip():
+        orig_lines = req.base_content.splitlines()
+    elif target_path.exists() and target_path.is_file():
         try:
             orig_lines = target_path.read_text(encoding="utf-8", errors="ignore").splitlines()
         except Exception:
             orig_lines = []
+    elif rel_target in live_file_buffers and live_file_buffers[rel_target].strip():
+        orig_lines = live_file_buffers[rel_target].splitlines()
+    elif str(target_path) in live_file_buffers and live_file_buffers[str(target_path)].strip():
+        orig_lines = live_file_buffers[str(target_path)].splitlines()
+    elif "/" not in rel_target and target_path.name in accessible and target_path.name in live_file_buffers:
+        orig_lines = live_file_buffers[target_path.name].splitlines()
 
-    new_diff = PatchEngine.discard_hunk(orig_lines, req.diff, req.hunk_index, target_path.name)
+    new_diff = PatchEngine.discard_hunk(orig_lines, req.diff, req.hunk_index, rel_target)
     hunks = PatchEngine.split_into_hunks(new_diff)
     return {
         "status": "success",
-        "file_path": target_path.name,
+        "file_path": rel_target,
         "diff": new_diff,
         "hunks": hunks
     }

@@ -422,6 +422,8 @@ class SurgicalDiffBuilder:
                     filtered_lines.pop()
                 code_lines = filtered_lines
 
+            code_lines = cls._strip_leading_filename_comment(code_lines, orig_lines, filename)
+
             return (
                 f"--- /dev/null\n+++ b/{filename}\n"
                 f"@@ -0,0 +1,{max(1, len(code_lines))} @@\n"
@@ -527,7 +529,7 @@ class SurgicalDiffBuilder:
                 return "\n".join(diff_iter).strip()
 
             # 3b. Fall back to standard difflib against orig_lines
-            code_lines = code_body.splitlines()
+            code_lines = cls._strip_leading_filename_comment(code_body.splitlines(), orig_lines, filename)
             diff_iter = difflib.unified_diff(
                 orig_lines,
                 code_lines,
@@ -540,6 +542,29 @@ class SurgicalDiffBuilder:
                 return computed_diff
 
         return diff_text
+
+    @staticmethod
+    def _strip_leading_filename_comment(
+        new_lines: List[str], orig_lines: List[str], filename: str
+    ) -> List[str]:
+        """Strips synthetic line-1 filename comments (e.g., '# calc.py' or '// src/app.ts') injected by multi-file prompts."""
+        if not new_lines or not filename:
+            return new_lines
+        first = new_lines[0].strip()
+        if orig_lines and orig_lines[0].strip() == first:
+            return new_lines
+        norm_name = filename.replace("\\", "/").strip("/ ")
+        base_name = Path(norm_name).name
+        for candidate in (norm_name, base_name):
+            if not candidate:
+                continue
+            pattern = rf'^(?:#|//|--|/\*+|<!--|;|\'\'\'|\"\"\")\s*(?:file\s*:?\s*|filepath\s*:?\s*|path\s*:?\s*|target\s*:?\s*)?[`\'\"]?{re.escape(candidate)}[`\'\"]?\s*(?:\*+/|-->|\'\'\'|\"\"\")?$'
+            if re.match(pattern, first, re.IGNORECASE):
+                stripped = new_lines[1:]
+                if stripped and not stripped[0].strip() and (not orig_lines or orig_lines[0].strip()):
+                    stripped = stripped[1:]
+                return stripped
+        return new_lines
 
 class PatchEngine:
     """
@@ -844,7 +869,17 @@ class PatchEngine:
                 direct = (ws / p).resolve()
                 if direct.exists():
                     return direct
-                if ws.exists() and ws.is_dir():
+                has_explicit_subdir = len(p.parts) > 1
+                if has_explicit_subdir and ws.exists() and ws.is_dir():
+                    p_rel_low = p.as_posix().lower()
+                    try:
+                        for sub in ws.rglob(p.name):
+                            if sub.is_file() and sub.resolve().as_posix().lower().endswith("/" + p_rel_low):
+                                return sub.resolve()
+                    except Exception:
+                        pass
+                    return direct
+                if not has_explicit_subdir and ws.exists() and ws.is_dir():
                     try:
                         for sub in ws.rglob(p.name):
                             if sub.is_file():
@@ -852,7 +887,7 @@ class PatchEngine:
                     except Exception:
                         pass
 
-                return (ws / p).resolve()
+                return direct
 
             # Map generic placeholder or unlocated extensionless target to actual repo file
             if ws.exists() and ws.is_dir():
@@ -897,9 +932,28 @@ class PatchEngine:
             if (diff_file and diff_file != "/dev/null" 
                     and diff_file.lower() not in cls.GENERIC_PLACEHOLDERS 
                     and Path(diff_file).name.lower() not in cls.GENERIC_PLACEHOLDERS):
-                diff_file_path = cls.resolve_target_path(diff_file, workspace_path)
-                if diff_file_path.exists() or not target_path.exists():
-                    target_path = diff_file_path
+                caller_clean = (file_path or "").strip().replace("\\", "/").strip("./")
+                if workspace_path:
+                    try:
+                        from ..retrieval.file_resolver import WorkspaceFileResolver
+                        ws_r = WorkspaceFileResolver._resolve_root(workspace_path).resolve()
+                        cp = Path(file_path)
+                        if cp.is_absolute():
+                            caller_clean = cp.resolve().relative_to(ws_r).as_posix()
+                    except Exception:
+                        pass
+                caller_is_generic = (
+                    not caller_clean
+                    or caller_clean.lower() in cls.GENERIC_PLACEHOLDERS
+                    or Path(caller_clean).name.lower() in cls.GENERIC_PLACEHOLDERS
+                )
+                caller_has_dir = "/" in caller_clean
+                diff_has_dir = "/" in diff_file.replace("\\", "/").strip("./")
+                # Do not let a bare basename header (+++ b/utils.py) override a caller-supplied folder path (tests/utils.py)
+                if caller_is_generic or (diff_has_dir and not caller_has_dir) or (not target_path.exists() and not caller_has_dir):
+                    diff_file_path = cls.resolve_target_path(diff_file, workspace_path)
+                    if diff_file_path.exists() or not target_path.exists():
+                        target_path = diff_file_path
 
         # Defense-in-depth: Strict Workspace Boundary Enforcement
         if workspace_path:
@@ -1033,6 +1087,7 @@ class PatchEngine:
         return {
             "status": "success",
             "file": str(target_path),
+            "rel_path": file_path.replace("\\", "/"),
             "filename": target_path.name,
             "created": is_new_file,
             "lines_written": len(new_content.splitlines()),
@@ -1930,21 +1985,85 @@ class PatchEngine:
         if not clean_gen:
             return "", []
 
+        auth_list: List[str] = []
         auth_set = set()
+        auth_basenames = set()
         if authorized_files:
             for af in authorized_files:
-                auth_set.add(af.replace("\\", "/").lower())
-                auth_set.add(Path(af).name.lower())
+                if af and af.strip() and af.strip().lower() != "untitled":
+                    norm_af = af.replace("\\", "/").strip("/ ")
+                    auth_list.append(norm_af)
+                    auth_set.add(norm_af.lower())
+                    auth_basenames.add(Path(norm_af).name.lower())
+
+        default_norm = (default_filename or "").replace("\\", "/").strip("/ ")
+        default_low = default_norm.lower()
+        default_base = Path(default_low).name if default_low else ""
+
+        def _matches_default(fpath: str) -> bool:
+            if not default_low or default_low == "untitled":
+                return True
+            norm_f = fpath.replace("\\", "/").strip("/ ").lower()
+            base_f = Path(norm_f).name
+            if norm_f == default_low:
+                return True
+            if norm_f.endswith("/" + default_low) or default_low.endswith("/" + norm_f):
+                return True
+            if base_f == default_base and ("/" not in norm_f or "/" not in default_low):
+                return True
+            return False
+
+        def resolve_authorized_path(fpath: str) -> str:
+            """Preserves canonical subfolder path from authorized_files when fpath is a bare basename."""
+            if not fpath:
+                return fpath
+            norm_f = fpath.replace("\\", "/").strip("/ ")
+            low_f = norm_f.lower()
+            for af in auth_list:
+                if af.lower() == low_f:
+                    return af
+            if "/" not in norm_f and auth_list:
+                matches_by_base = [af for af in auth_list if Path(af).name.lower() == low_f]
+                if len(matches_by_base) == 1:
+                    return matches_by_base[0]
+            if not allow_multi_file and default_norm and _matches_default(norm_f):
+                return default_norm
+            return norm_f
 
         def is_file_authorized(fpath: str) -> bool:
             if not fpath:
                 return False
-            clean_name = Path(fpath.replace("\\", "/")).name.lower()
-            if not clean_name or clean_name in (".", "..", "file", "filename", "unknown", "none"):
+            norm_f = fpath.replace("\\", "/").strip("/ ").lower()
+            clean_name = Path(norm_f).name.lower()
+            if not clean_name or clean_name in (".", "..", "file", "filename", "unknown", "none", "untitled"):
                 return False
             # Must look like a valid source or config filename
-            if "." not in clean_name:
+            if "." not in clean_name or len(clean_name) > 100:
                 return False
+            if any(c in clean_name for c in [' ', '\t', '\n', '*', '?', '"', '<', '>', '|']):
+                return False
+
+            # 1. Single-file scope enforcement when allow_multi_file is False
+            if not allow_multi_file:
+                if default_low and default_low != "untitled":
+                    return _matches_default(fpath)
+                if auth_set:
+                    return norm_f in auth_set or clean_name in auth_basenames
+                return True
+
+            # 2. Explicit authorized_files enforcement when provided
+            if auth_set:
+                if norm_f in auth_set:
+                    return True
+                for af_low in auth_set:
+                    if norm_f.endswith("/" + af_low) or af_low.endswith("/" + norm_f):
+                        return True
+                # Allow bare basename match only when unambiguous in auth_set
+                matching_auth = [af for af in auth_set if Path(af).name.lower() == clean_name]
+                if len(matching_auth) == 1 and ("/" not in norm_f or "/" not in matching_auth[0]):
+                    return True
+                return False
+
             return True
 
         # 1. Try unified diff multi-file split
@@ -1954,9 +2073,12 @@ class PatchEngine:
         if valid_chunks:
             filtered_chunks = []
             for chunk in valid_chunks:
-                fpath = chunk.get("file_path") or default_filename
-                if is_file_authorized(fpath):
-                    filtered_chunks.append(chunk)
+                raw_fpath = chunk.get("file_path") or default_filename
+                if is_file_authorized(raw_fpath):
+                    resolved_fpath = resolve_authorized_path(raw_fpath)
+                    filtered_chunks.append({**chunk, "file_path": resolved_fpath})
+                    if not allow_multi_file:
+                        break
 
             if filtered_chunks:
                 staged = []
@@ -1965,7 +2087,14 @@ class PatchEngine:
                     cdiff = chunk.get("diff", "")
                     orig = file_orig_lines_map.get(fpath)
                     if orig is None:
-                        orig = file_orig_lines_map.get(Path(fpath).name, [])
+                        orig = file_orig_lines_map.get(fpath.replace("/", "\\"))
+                    if orig is None:
+                        bname = Path(fpath).name.lower()
+                        matching_orig = [v for k, v in file_orig_lines_map.items() if Path(k.replace("\\", "/")).name.lower() == bname and v is not None]
+                        if len(matching_orig) == 1:
+                            orig = matching_orig[0]
+                    if orig is None:
+                        orig = []
 
                     valid, healed_diff, _ = cls.validate_and_heal_diff(orig, cdiff, fpath)
                     final_diff = healed_diff if (valid and healed_diff) else cdiff
@@ -2067,17 +2196,21 @@ class PatchEngine:
                     remaining_auth = [af.replace("\\", "/").strip("/ ") for af in authorized_files if af.replace("\\", "/").strip("/ ").lower() not in seen_files]
                     if remaining_auth:
                         found_filename = remaining_auth[0]
+                elif not found_filename and not allow_multi_file and default_norm and default_low not in seen_files:
+                    found_filename = default_norm
 
                 if found_filename and is_file_authorized(found_filename):
-                    norm_fn = found_filename.replace("\\", "/").strip("/ ")
-                    if norm_fn not in seen_files:
-                        seen_files.add(norm_fn)
+                    norm_fn = resolve_authorized_path(found_filename)
+                    if norm_fn.lower() not in seen_files:
+                        seen_files.add(norm_fn.lower())
                         code_sections.append({
                             "file_path": norm_fn,
                             "content": block_content
                         })
+                        if not allow_multi_file:
+                            break
 
-            if len(code_sections) >= 2 or (len(code_sections) == 1 and default_filename and Path(code_sections[0]["file_path"]).name.lower() != Path(default_filename).name.lower()):
+            if len(code_sections) >= 2 or (len(code_sections) == 1 and (not allow_multi_file or len(matches) >= 2 or (default_filename and Path(code_sections[0]["file_path"]).name.lower() != Path(default_filename).name.lower()))):
                 staged = []
                 for sec in code_sections:
                     fpath = sec["file_path"]
@@ -2089,7 +2222,7 @@ class PatchEngine:
                         orig = file_orig_lines_map.get(fpath.replace("\\", "/"))
                     if orig is None:
                         bname = Path(fpath).name.lower()
-                        matching = [v for k, v in file_orig_lines_map.items() if Path(k).name.lower() == bname and v is not None]
+                        matching = [v for k, v in file_orig_lines_map.items() if Path(k.replace("\\", "/")).name.lower() == bname and v is not None]
                         if len(matching) == 1:
                             orig = matching[0]
                     if orig is None:
@@ -2125,15 +2258,21 @@ class PatchEngine:
         if len(splits) >= 2:
             staged = []
             for i in range(len(splits)):
-                match_file = splits[i].group(1).strip()
+                raw_match_file = splits[i].group(1).strip()
                 start_pos = splits[i].end()
                 end_pos = splits[i + 1].start() if i + 1 < len(splits) else len(clean_gen)
                 section_text = clean_gen[start_pos:end_pos].strip()
 
-                if not is_file_authorized(match_file):
+                if not is_file_authorized(raw_match_file):
                     continue
+                match_file = resolve_authorized_path(raw_match_file)
 
-                orig = file_orig_lines_map.get(match_file) or file_orig_lines_map.get(Path(match_file).name, [])
+                orig = file_orig_lines_map.get(match_file)
+                if orig is None:
+                    bname = Path(match_file).name.lower()
+                    matching_orig = [v for k, v in file_orig_lines_map.items() if Path(k.replace("\\", "/")).name.lower() == bname and v is not None]
+                    orig = matching_orig[0] if len(matching_orig) == 1 else []
+
                 wrapped_sec = section_text if section_text.startswith("```") else f"```{Path(match_file).suffix.lstrip('.') or 'python'}\n{section_text}\n```"
                 file_diff = cls.build_surgical_diff(orig, wrapped_sec, match_file, preferred_line=preferred_line)
                 valid, healed_diff, _ = cls.validate_and_heal_diff(orig, file_diff, match_file)
@@ -2150,6 +2289,8 @@ class PatchEngine:
                     "dels": dels,
                     "applied": False
                 })
+                if not allow_multi_file:
+                    break
 
             if staged:
                 combined = "\n\n".join(s["diff"] for s in staged if s.get("diff"))
@@ -2254,7 +2395,14 @@ class PatchEngine:
         curr_lines = current_content.splitlines()
         lines_diff = diff_text.splitlines()
 
-        filename = Path(file_path).name
+        try:
+            ws_res = Path(workspace_path).resolve() if workspace_path else None
+            if ws_res and target_path.is_absolute():
+                filename = target_path.resolve().relative_to(ws_res).as_posix()
+            else:
+                filename = str(file_path).replace("\\", "/").strip("./") or Path(file_path).name
+        except Exception:
+            filename = str(file_path).replace("\\", "/").strip("./") or Path(file_path).name
 
         # If current editor buffer is identical to base snapshot, diff is fully valid as-is
         if curr_lines == orig_lines and not force_resolution:

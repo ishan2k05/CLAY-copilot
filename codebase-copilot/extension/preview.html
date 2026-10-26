@@ -15,16 +15,16 @@
       <div class="brand-crumb">
         <div class="clay-brand-badge">
           <svg viewBox="1 1 13 9" class="clay-cube-icon" shape-rendering="crispEdges">
-            <rect x="1" y="1" width="2" height="1" fill="#C15C3D"/>
-            <rect x="2" y="2" width="2" height="1" fill="#C15C3D"/>
-            <rect x="3" y="3" width="2" height="1" fill="#C15C3D"/>
-            <rect x="4" y="4" width="2" height="1" fill="#C15C3D"/>
-            <rect x="5" y="5" width="2" height="1" fill="#C15C3D"/>
-            <rect x="4" y="6" width="2" height="1" fill="#C15C3D"/>
-            <rect x="3" y="7" width="2" height="1" fill="#C15C3D"/>
-            <rect x="2" y="8" width="2" height="1" fill="#C15C3D"/>
-            <rect x="1" y="9" width="2" height="1" fill="#C15C3D"/>
-            <rect x="8" y="8" width="6" height="2" fill="#C15C3D"/>
+            <rect x="1" y="1" width="2" height="1" fill="#C15C3D" />
+            <rect x="2" y="2" width="2" height="1" fill="#C15C3D" />
+            <rect x="3" y="3" width="2" height="1" fill="#C15C3D" />
+            <rect x="4" y="4" width="2" height="1" fill="#C15C3D" />
+            <rect x="5" y="5" width="2" height="1" fill="#C15C3D" />
+            <rect x="4" y="6" width="2" height="1" fill="#C15C3D" />
+            <rect x="3" y="7" width="2" height="1" fill="#C15C3D" />
+            <rect x="2" y="8" width="2" height="1" fill="#C15C3D" />
+            <rect x="1" y="9" width="2" height="1" fill="#C15C3D" />
+            <rect x="8" y="8" width="6" height="2" fill="#C15C3D" />
           </svg>
           <span class="brand-title">CLAY</span>
         </div>
@@ -49,7 +49,7 @@
           </span>
           <span class="theme-switch-text" id="theme-switch-text">Dark</span>
         </button>
-        <span class="pill pill-teal" id="crumb-status"><span class="pill-dot"></span>Live</span>
+        <span class="pill-status-circle is-live" id="crumb-status" title="Live // Backend Connected" aria-label="Backend status: Live"></span>
       </div>
     </div>
 
@@ -165,7 +165,8 @@
           <div class="diff-file-selector" id="diff-file-selector" style="display: none;"></div>
         </div>
         <div class="diff-summary-controls">
-          <button type="button" class="btn-diff-view-toggle" id="btn-diff-view-mode" title="Toggle Split / Unified Diff View">
+          <button type="button" class="btn-diff-view-toggle" id="btn-diff-view-mode"
+            title="Toggle Split / Unified Diff View">
             <span id="diff-mode-label">Unified</span>
           </button>
           <div class="diff-badges-wrap">
@@ -214,9 +215,11 @@
       </div>
 
       <div class="sticky-review-bar" id="diff-action-bar" style="display: none;">
-        <button class="btn-reject" id="btn-reject-diff">Reject Changes</button>
-        <button class="btn-accept" id="btn-accept-diff">Accept & Apply Patch</button>
-        <button class="btn-accept-all" id="btn-accept-all-diff" style="display: none;">Apply All (0)</button>
+        <button class="btn-reject" id="btn-reject-diff">Discard</button>
+        <div class="diff-action-right">
+          <button class="btn-accept" id="btn-accept-diff">Apply Patch</button>
+          <button class="btn-accept-all" id="btn-accept-all-diff" style="display: none;">Apply All (0)</button>
+        </div>
       </div>
     </div>
 
@@ -231,8 +234,7 @@
         <div class="settings-group" style="margin-bottom: 10px;">
           <label class="settings-label">Local Repository Workspace Path</label>
           <div style="display: flex; gap: 6px;">
-            <input type="text" class="settings-input" id="input-repo-path"
-              value=""
+            <input type="text" class="settings-input" id="input-repo-path" value=""
               placeholder="Repository workspace folder (e.g. C:\path\to\repo)" style="margin-bottom: 0;">
             <button class="btn-secondary-action pixel-btn" id="btn-browse-repo-path"
               style="width: auto; padding: 0 10px;" title="Browse local repository folder">Browse</button>
@@ -257,16 +259,21 @@
             <div>Status: <strong id="repo-status-label">Ready to scan</strong></div>
           </div>
           <div style="display: flex; justify-content: space-between; align-items: center;">
-            <div>Security: <strong id="repo-security-label" style="color: #4ade80;">Zero Leaked Secrets Detected</strong></div>
-            <button class="pixel-mini-btn" id="btn-security-scan" style="padding: 2px 7px; font-size: 10px;" title="Scan repository for leaked credentials and sensitive files">Audit</button>
+            <div>Security: <strong id="repo-security-label" style="color: #4ade80;">Zero Leaked Secrets
+                Detected</strong></div>
+            <button class="pixel-mini-btn" id="btn-security-scan" style="padding: 2px 7px; font-size: 10px;"
+              title="Scan repository for leaked credentials and sensitive files">Audit</button>
           </div>
-          <div id="repo-security-details" style="display: none; margin-top: 6px; padding: 6px 8px; background: rgba(0,0,0,0.2); border-radius: 6px; font-size: 10px; font-family: var(--font-mono); max-height: 120px; overflow-y: auto;">
+          <div id="repo-security-details"
+            style="display: none; margin-top: 6px; padding: 6px 8px; background: rgba(0,0,0,0.2); border-radius: 6px; font-size: 10px; font-family: var(--font-mono); max-height: 120px; overflow-y: auto;">
           </div>
         </div>
       </div>
       <div class="task-card" style="margin-top: 10px;">
-        <div class="task-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-          <div class="task-title" style="margin-bottom: 0;" id="hierarchy-card-title">Call Hierarchy & Relationships</div>
+        <div class="task-header-row"
+          style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <div class="task-title" style="margin-bottom: 0;" id="hierarchy-card-title">Call Hierarchy & Relationships
+          </div>
         </div>
         <pre
           style="font-family: var(--font-mono); font-size: 10.5px; line-height: 1.4; color: var(--text-secondary); background: var(--surface-subtle); padding: 8px; border-radius: 10px; overflow-x: auto; white-space: normal;"
@@ -285,6 +292,14 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
           <button class="pixel-mini-btn" id="btn-refresh-tree" title="Refresh file tree">↻ Refresh</button>
           <button class="pixel-mini-btn" id="btn-expand-tree" title="Toggle expand/collapse all">± Toggle All</button>
         </div>
+        <div class="repo-filter-bar">
+          <svg class="search-icon" viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="7" cy="7" r="4.5"/>
+            <line x1="10.5" y1="10.5" x2="14" y2="14"/>
+          </svg>
+          <input type="text" id="repo-tree-filter" class="repo-filter-input" placeholder="Filter files... (e.g. utils.py)" autocomplete="off">
+          <button type="button" id="btn-clear-tree-filter" class="btn-clear-filter" style="display: none;" title="Clear filter">✕</button>
+        </div>
         <div class="repo-file-tree" id="repo-file-tree">
           <div class="tree-empty-state">
             <span class="pixel-glyph">»</span> Loading repository files...
@@ -295,27 +310,37 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
 
     <!-- 5. Settings View (Agent Security Mode, Sandbox Network, Ollama Daemon & Cloud Models) -->
     <div id="view-settings" class="view-container">
-      <!-- Section 0: Theme & IDE Bindings -->
+      <!-- Section 0: Theme -->
       <div class="settings-section">
-        <div class="settings-section-title">Theme &amp; IDE Bindings</div>
+        <div class="settings-section-title">Theme</div>
         <div class="theme-binding-grid" id="theme-mode-selector">
           <div class="theme-binding-card active" data-theme="claude" id="card-theme-claude">
-            <div class="theme-binding-badge">DEFAULT</div>
+            <div class="theme-binding-badge">CLASSIC</div>
             <div class="theme-binding-title">
               <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
-                <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 1.5v11A5.5 5.5 0 0 1 8 2.5z"/>
+                <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 1.5v11A5.5 5.5 0 0 1 8 2.5z" />
               </svg>
-              CLAY Palette
+              Classic
             </div>
-            <div class="theme-binding-desc">Signature warm minimalist canvas with custom CLAY Light &amp; Dark tones.</div>
+            <div class="theme-binding-desc">Signature warm minimalist canvas with classic retro CLAY tones.</div>
+          </div>
+          <div class="theme-binding-card" data-theme="modern" id="card-theme-modern">
+            <div class="theme-binding-badge">MODERN</div>
+            <div class="theme-binding-title">
+              <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
+                <path d="M8 0a8 8 0 1 0 8 8A8.01 8.01 0 0 0 8 0zm0 14.5a6.5 6.5 0 1 1 6.5-6.5 6.51 6.51 0 0 1-6.5 6.5zM8 3a5 5 0 0 0-5 5h10a5 5 0 0 0-5-5z"/>
+              </svg>
+              Modern
+            </div>
+            <div class="theme-binding-desc">Obsidian &amp; espresso depth, layered surfaces, and warm ember glow.</div>
           </div>
           <div class="theme-binding-card" data-theme="vscode" id="card-theme-vscode">
             <div class="theme-binding-badge">IDE BINDING</div>
             <div class="theme-binding-title">
               <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
-                <path d="M14.5 1.5l-5 4.5v4l5 4.5v-13zM1.5 5.2L7 1.5v13L1.5 10.8V5.2z"/>
+                <path d="M14.5 1.5l-5 4.5v4l5 4.5v-13zM1.5 5.2L7 1.5v13L1.5 10.8V5.2z" />
               </svg>
-              IDE PALETTE
+              IDE Binding
             </div>
             <div class="theme-binding-desc">Binds live to IDE editor tokens (background, foreground, diffs &amp; borders).</div>
           </div>
@@ -328,27 +353,48 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
       <div class="settings-section">
         <div class="settings-section-title">Agent security mode</div>
         <div class="security-mode-grid" id="security-mode-selector">
-          <div class="security-mode-card" data-mode="full" title="Executes shell commands across your system and modifies workspace files directly without containment or command safety filters.">
+          <div class="security-mode-card" data-mode="full"
+            title="Executes shell commands across your system and modifies workspace files directly without containment or command safety filters.">
             <div class="security-mode-title">
               Full access
-              <span class="settings-info-tooltip" title="Executes shell commands across your system and modifies workspace files directly without containment or command safety filters.">
-                <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="7"/><line x1="8" y1="7" x2="8" y2="12"/><circle cx="8" cy="4.5" r="0.8" fill="currentColor"/></svg>
+              <span class="settings-info-tooltip"
+                title="Executes shell commands across your system and modifies workspace files directly without containment or command safety filters.">
+                <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.6"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="8" cy="8" r="7" />
+                  <line x1="8" y1="7" x2="8" y2="12" />
+                  <circle cx="8" cy="4.5" r="0.8" fill="currentColor" />
+                </svg>
               </span>
             </div>
           </div>
-          <div class="security-mode-card active" data-mode="sandboxed" title="Confines execution to active workspace, blocks destructive OS commands via safety guardrails, and gates network access.">
+          <div class="security-mode-card active" data-mode="sandboxed"
+            title="Confines execution to active workspace, blocks destructive OS commands via safety guardrails, and gates network access.">
             <div class="security-mode-title">
               Sandboxed
-              <span class="settings-info-tooltip" title="Confines execution to active workspace, blocks destructive OS commands via safety guardrails, and gates network access.">
-                <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="7"/><line x1="8" y1="7" x2="8" y2="12"/><circle cx="8" cy="4.5" r="0.8" fill="currentColor"/></svg>
+              <span class="settings-info-tooltip"
+                title="Confines execution to active workspace, blocks destructive OS commands via safety guardrails, and gates network access.">
+                <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.6"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="8" cy="8" r="7" />
+                  <line x1="8" y1="7" x2="8" y2="12" />
+                  <circle cx="8" cy="4.5" r="0.8" fill="currentColor" />
+                </svg>
               </span>
             </div>
           </div>
-          <div class="security-mode-card" data-mode="strict" title="Zero-trust read-only containment: permits only non-mutating test &amp; diagnostic commands with strict file and secret isolation.">
+          <div class="security-mode-card" data-mode="strict"
+            title="Zero-trust read-only containment: permits only non-mutating test &amp; diagnostic commands with strict file and secret isolation.">
             <div class="security-mode-title">
               Strict
-              <span class="settings-info-tooltip" title="Zero-trust read-only containment: permits only non-mutating test &amp; diagnostic commands with strict file and secret isolation.">
-                <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="7"/><line x1="8" y1="7" x2="8" y2="12"/><circle cx="8" cy="4.5" r="0.8" fill="currentColor"/></svg>
+              <span class="settings-info-tooltip"
+                title="Zero-trust read-only containment: permits only non-mutating test &amp; diagnostic commands with strict file and secret isolation.">
+                <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.6"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="8" cy="8" r="7" />
+                  <line x1="8" y1="7" x2="8" y2="12" />
+                  <circle cx="8" cy="4.5" r="0.8" fill="currentColor" />
+                </svg>
               </span>
             </div>
           </div>
@@ -364,7 +410,8 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
           <div class="settings-row">
             <div class="settings-row-info">
               <div class="settings-row-title">Sandbox Allow Network</div>
-              <div class="settings-row-desc">When enabled, sandboxed commands are allowed to make network requests.</div>
+              <div class="settings-row-desc">When enabled, sandboxed commands are allowed to make network requests.
+              </div>
             </div>
             <label class="toggle-switch">
               <input type="checkbox" id="chk-sandbox-network" checked>
@@ -395,7 +442,8 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
               <option value="local" selected>Ollama Local (Background Daemon)</option>
               <option value="cloud">Ollama Cloud (API Key)</option>
             </select>
-            <div class="settings-subtext" id="connection-type-desc">Runs against local background Ollama (http://127.0.0.1:11434). Zero API keys required.</div>
+            <div class="settings-subtext" id="connection-type-desc">Runs against local background Ollama
+              (http://127.0.0.1:11434). Zero API keys required.</div>
           </div>
 
           <div class="settings-group" id="group-api-key" style="display: none;">
@@ -417,7 +465,8 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
                 </svg>
               </button>
             </div>
-            <div class="settings-subtext">Direct cloud model access without running Ollama in the background. Authenticated with Bearer token.</div>
+            <div class="settings-subtext">Direct cloud model access without running Ollama in the background.
+              Authenticated with Bearer token.</div>
           </div>
 
           <div class="settings-group">
