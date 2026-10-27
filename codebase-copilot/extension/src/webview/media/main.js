@@ -51,7 +51,7 @@
   }
 
   // State
-  let currentModel = 'gemma4:31b-cloud';
+  let currentModel = '';
   let currentHost = 'http://127.0.0.1:11434';
   let currentTemperature = parseFloat(localStorage.getItem('clay_temperature') || '0.20');
   let currentNumCtx = parseInt(localStorage.getItem('clay_num_ctx') || '32768', 10);
@@ -341,6 +341,15 @@
             return (f.path || f.name).replace(/\\/g, '/');
           }
         }
+      }
+    }
+
+    // Prioritize the currently active editor file if it belongs to the workspace
+    const activeEditorRepoFile = getActiveEditorFileInRepo();
+    if (activeEditorRepoFile) {
+      const relActive = getRepoRelativePath(activeEditorRepoFile);
+      if (relActive) {
+        return relActive.replace(/\\/g, '/');
       }
     }
 
@@ -952,16 +961,23 @@
         crumbStatus.setAttribute('aria-label', 'Backend status: Offline');
         crumbStatus.innerHTML = '';
       }
+      currentModel = '';
+      updateActiveModelDisplays('');
     }
   }
 
   function updateActiveModelDisplays(model) {
-    currentModel = model;
-    if (welcomeModelText) welcomeModelText.textContent = model;
-    if (inputModelHint) inputModelHint.textContent = 'CLAY // ' + model;
+    currentModel = model || '';
+    if (welcomeModelText) welcomeModelText.textContent = model || '';
+    if (inputModelHint) {
+      inputModelHint.textContent = model ? 'CLAY // ' + model : 'CLAY // Offline';
+    }
     const chatModelBadge = document.getElementById('chat-active-model');
-    if (chatModelBadge) chatModelBadge.textContent = model;
+    if (chatModelBadge) chatModelBadge.textContent = model || '';
   }
+
+  // Show no model name initially until Ollama connection is established
+  updateActiveModelDisplays('');
 
   if (modelSelect) {
     modelSelect.addEventListener('change', () => {
@@ -1358,7 +1374,7 @@
     const modelName = currentModel || 'CLAY Core';
 
     // 1. Identify explicit or active file/symbol context
-    let explicitFile = getPrimaryRepoFile(raw);
+    let explicitFile = getExplicitFileFromGoal(raw);
     let activeFileRel = null;
     const activeRaw = getActiveEditorFileInRepo();
     if (activeRaw) {
@@ -1429,7 +1445,8 @@
 
     // 3. Classify technical intent archetype with non-repetitive phrasing pools
     let step1Title = '';
-    let step1Badge = extractedSymbol || (explicitFile ? explicitFile.split('/').pop() : null);
+    const primaryContextFile = explicitFile || activeFileRel;
+    let step1Badge = extractedSymbol || (primaryContextFile ? primaryContextFile.split('/').pop() : null);
     let step1Detail = '';
     let modelPhases = [];
 
@@ -3093,7 +3110,7 @@
       let targetFilename = null;
 
       const isCreationQuery = /\b(create|new\s+file|put\s+.*in|write\s+.*in|save\s+as|in\s+a\s+new\s+file|make\s+(?:a\s+)?(?:new\s+)?file)\b/i.test(lastUserQuery || '');
-      const queryFile = getPrimaryRepoFile(lastUserQuery || '');
+      const queryFile = getExplicitFileFromGoal(lastUserQuery || '') || (isCreationQuery ? getPrimaryRepoFile(lastUserQuery || '') : null);
       const streamActiveFile = getActiveEditorFileInRepo();
       const repoActiveFilename = streamActiveFile ? getRepoRelativePath(streamActiveFile) : null;
 
@@ -9037,7 +9054,7 @@
     const svgEl = copyBtn.querySelector('svg');
 
     copyBtn.classList.add('copied');
-    if (textSpan) textSpan.textContent = '✓ Copied!';
+    if (textSpan) textSpan.textContent = 'Copied!';
     if (svgEl) {
       svgEl.innerHTML = '<polyline points="20 6 9 17 4 12"></polyline>';
     }
@@ -9076,7 +9093,7 @@
     let target = extractDiffFilename(rawText);
 
     const isCreationIntent = /\b(create|new\s+file|put\s+.*in|write\s+.*in|save\s+as|in\s+a\s+new\s+file|make\s+(?:a\s+)?(?:new\s+)?file)\b/i.test(lastUserQuery || '');
-    const queryTarget = getPrimaryRepoFile(lastUserQuery || '');
+    const queryTarget = getExplicitFileFromGoal(lastUserQuery || '') || (isCreationIntent ? getPrimaryRepoFile(lastUserQuery || '') : null);
     const repoActive = getActiveEditorFileInRepo();
     const activeEditorRelFile = repoActive ? getRepoRelativePath(repoActive) : null;
 

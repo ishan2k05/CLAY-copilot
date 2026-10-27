@@ -77,8 +77,9 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('codebaseCopilot.checkOllama', async () => {
             const status = await backendClient.checkOllamaStatus();
             if (status.connected) {
+                const activeModel = status.active_model || (status.models && status.models[0]) || 'Connected';
                 vscode.window.showInformationMessage(
-                    `CLAY Copilot: Ollama connected! Active model: gemma4:31b-cloud.`
+                    `CLAY Copilot: Ollama connected! Active model: ${activeModel}.`
                 );
             } else {
                 vscode.window.showWarningMessage(
@@ -126,11 +127,11 @@ export async function activate(context: vscode.ExtensionContext) {
             const selection = editor ? editor.document.getText(editor.selection) : '';
 
             if (selection && selection.trim()) {
-                const fileName = path.basename(editor!.document.fileName);
+                const filePath = vscode.workspace.asRelativePath(editor!.document.uri);
                 const startLine = editor!.selection.start.line + 1;
                 const endLine = editor!.selection.end.line + 1;
                 const lang = editor!.document.languageId || '';
-                const prompt = `Regarding this code in \`${fileName}\` (L${startLine}-L${endLine}):\n\`\`\`${lang}\n${selection.trim()}\n\`\`\`\n`;
+                const prompt = `Regarding this code in \`${filePath}\` (L${startLine}-L${endLine}):\n\`\`\`${lang}\n${selection.trim()}\n\`\`\`\n`;
                 sidebarProvider.focusChatWithPrompt(prompt, false);
             } else {
                 sidebarProvider.focusChatWithPrompt('', false);
@@ -152,14 +153,14 @@ export async function activate(context: vscode.ExtensionContext) {
                 return;
             }
 
-            const fileName = path.basename(editor.document.fileName);
+            const filePath = vscode.workspace.asRelativePath(editor.document.uri);
             const startLine = editor.selection.start.line + 1;
             const endLine = editor.selection.end.line + 1;
             const lang = editor.document.languageId || '';
 
             await vscode.commands.executeCommand('codebaseCopilot.sidebarView.focus');
             sidebarProvider.focusChatWithPrompt(
-                `Explain this code from \`${fileName}\` (L${startLine}-L${endLine}):\n\`\`\`${lang}\n${selection.trim()}\n\`\`\`\nBreak down its architecture, behavior, edge cases, and any potential optimizations.`,
+                `Explain this code from \`${filePath}\` (L${startLine}-L${endLine}):\n\`\`\`${lang}\n${selection.trim()}\n\`\`\`\nBreak down its architecture, behavior, edge cases, and any potential optimizations.`,
                 true
             );
         })
@@ -183,12 +184,12 @@ export async function activate(context: vscode.ExtensionContext) {
             const targetError = errors.find(e => e.range.contains(editor.selection.active)) || errors[0];
             const errorLine = targetError.range.start.line;
             const lineContent = editor.document.lineAt(errorLine).text;
-            const fileName = path.basename(editor.document.fileName);
+            const filePath = vscode.workspace.asRelativePath(editor.document.uri);
             const lang = editor.document.languageId || '';
 
             await vscode.commands.executeCommand('codebaseCopilot.sidebarView.focus');
             sidebarProvider.focusChatWithPrompt(
-                `Diagnose and fix this error in \`${fileName}\` at line ${errorLine + 1}:\n` +
+                `Diagnose and fix this error in \`${filePath}\` at line ${errorLine + 1}:\n` +
                 `Error Message: "${targetError.message}"\n` +
                 `Offending Code:\n\`\`\`${lang}\n${lineContent.trim()}\n\`\`\`\n` +
                 `Please analyze the root cause and provide the minimal surgical patch to resolve it.`,
