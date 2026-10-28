@@ -1,6 +1,7 @@
 import asyncio
 import os
 import platform
+import re
 import shutil
 import signal
 import subprocess
@@ -99,10 +100,15 @@ class TerminalAgent:
         "cat", "type", "echo", "pwd", "whoami", "get-childitem", "get-content"
     )
 
+    # Shell chaining and subshell execution characters disallowed in strict mode
+    SHELL_CHAINING_PATTERN = re.compile(r"[;&|`\r\n]|\$\(|\$\{")
+
     # Commands requiring network access
     NETWORK_COMMANDS = (
         "curl", "wget", "git clone", "git pull", "git push", "git fetch",
-        "npm install", "npm i", "pip install", "pip3 install", "ssh", "scp", "sftp"
+        "npm install", "npm i", "yarn add", "pip install", "pip3 install",
+        "invoke-webrequest", "iwr ", "invoke-restmethod", "irm ",
+        "start-bitstransfer", "netcat", "ncat", "socat", "ssh", "scp", "sftp"
     )
 
     def run_command_sync(
@@ -123,7 +129,20 @@ class TerminalAgent:
 
         # 1. Mode: Strict (Command review & read-only enforcement)
         if security_mode == "strict":
-            is_strict_safe = any(cmd_clean.lower().startswith(prefix) for prefix in self.STRICT_SAFE_COMMAND_PREFIXES)
+            if self.SHELL_CHAINING_PATTERN.search(cmd_clean):
+                return {
+                    "execution_id": exec_id,
+                    "exit_code": -1,
+                    "stdout": "",
+                    "stderr": "Execution blocked: Command chaining and subshells (;, &, |, `, $()) are disallowed in Strict mode.",
+                    "passed": False,
+                    "os": self.os_type,
+                    "security_mode": "strict",
+                    "workspace": self.workspace_path
+                }
+
+            cmd_lower = cmd_clean.lower()
+            is_strict_safe = any(cmd_lower == prefix or cmd_lower.startswith(prefix + " ") for prefix in self.STRICT_SAFE_COMMAND_PREFIXES)
             if not is_strict_safe:
                 return {
                     "execution_id": exec_id,

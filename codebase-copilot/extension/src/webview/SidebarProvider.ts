@@ -1126,7 +1126,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 'python --version', 'python3 --version', 'node -v', 'npm -v',
                 'cat', 'type', 'echo', 'pwd', 'whoami', 'get-childitem', 'get-content'
             ];
-            const isSafe = strictSafePrefixes.some(prefix => cmdClean.toLowerCase().startsWith(prefix));
+            // Reject shell chaining and subshell execution in strict mode
+            if (/[;&|`\r\n]|\$\(|\$\{/.test(cmdClean)) {
+                return {
+                    exit_code: -1,
+                    stdout: '',
+                    stderr: 'Execution blocked: Command chaining and subshells (;, &, |, `, $()) are disallowed in Strict mode.',
+                    passed: false,
+                    os: osType,
+                    workspace: cwd
+                };
+            }
+            const cmdLower = cmdClean.toLowerCase();
+            const isSafe = strictSafePrefixes.some(prefix => cmdLower === prefix || cmdLower.startsWith(prefix + ' '));
             if (!isSafe) {
                 return {
                     exit_code: -1,
@@ -1182,7 +1194,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
 
             if (!allowNetwork) {
-                const netCommands = ['curl', 'wget', 'git clone', 'git pull', 'git push', 'npm install', 'npm i', 'pip install', 'pip3 install'];
+                const netCommands = [
+                    'curl', 'wget', 'git clone', 'git pull', 'git push', 'git fetch',
+                    'npm install', 'npm i', 'yarn add', 'pip install', 'pip3 install',
+                    'invoke-webrequest', 'iwr ', 'invoke-restmethod', 'irm ',
+                    'start-bitstransfer', 'netcat', 'ncat', 'socat', 'ssh', 'scp', 'sftp'
+                ];
                 if (netCommands.some(nc => cmdClean.toLowerCase().includes(nc))) {
                     return { exit_code: -1, stdout: '', stderr: 'Execution blocked: Sandboxed network requests are disabled in settings.', passed: false, os: osType, workspace: cwd };
                 }
@@ -1319,6 +1336,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this._view?.webview.postMessage({
                     command: 'streamToken',
                     token: `\n\n[Error: ${err}]`
+                });
+                this._view?.webview.postMessage({
+                    command: 'streamComplete',
+                    diff: undefined,
+                    citations: []
                 });
             },
             effectiveWorkspace,

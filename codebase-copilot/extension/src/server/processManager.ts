@@ -128,15 +128,27 @@ export class ServerProcessManager {
         this.outputChannel.appendLine(`[Sidecar] Attempting to reclaim occupied port ${port}...`);
         try {
             if (process.platform === 'win32') {
-                const stdout = cp.execSync(`netstat -ano -p tcp | findstr :${port}`, { encoding: 'utf-8', timeout: 3000 });
+                const stdout = cp.execSync(`netstat -ano -p tcp`, { encoding: 'utf-8', timeout: 3000 });
                 const lines = stdout.split('\n');
+                const portRegex = new RegExp(`:(?:${port})\\s+.*LISTENING\\s+(\\d+)`, 'i');
                 for (const line of lines) {
-                    const match = line.trim().match(/LISTENING\s+(\d+)$/i);
+                    const match = line.trim().match(portRegex);
                     if (match && match[1]) {
                         const holdingPid = parseInt(match[1], 10);
                         if (holdingPid > 4) { // Don't touch System (PID 4)
-                            this.outputChannel.appendLine(`[Sidecar] Terminating stale process on port ${port} (PID ${holdingPid})...`);
-                            this.killProcessTree(holdingPid);
+                            try {
+                                const procInfo = cp.execSync(`tasklist /FI "PID eq ${holdingPid}" /FO CSV /NH`, { encoding: 'utf-8', timeout: 2000 });
+                                const isClayOrPython = /"?(clay-server\.exe|python\.exe|pythonw\.exe)"?/i.test(procInfo);
+                                if (isClayOrPython) {
+                                    this.outputChannel.appendLine(`[Sidecar] Terminating stale CLAY server process on port ${port} (PID ${holdingPid})...`);
+                                    this.killProcessTree(holdingPid);
+                                } else {
+                                    this.outputChannel.appendLine(`[Sidecar] Port ${port} is occupied by non-CLAY process (PID ${holdingPid}: ${procInfo.trim()}). Skipping kill.`);
+                                }
+                            } catch {
+                                // If tasklist check fails, do not blindly kill arbitrary processes
+                                this.outputChannel.appendLine(`[Sidecar] Could not verify process name for PID ${holdingPid}. Skipping.`);
+                            }
                         }
                     }
                 }

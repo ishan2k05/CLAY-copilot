@@ -296,6 +296,7 @@ export class BackendClient {
 
             const reader = (response.body as any).getReader();
             const decoder = new TextDecoder();
+            let rawBuffer = '';
 
             while (true) {
                 if (signal.aborted) {
@@ -305,15 +306,43 @@ export class BackendClient {
                 const { done, value } = await reader.read();
                 if (done) break;
 
-                const text = decoder.decode(value, { stream: true });
-                const lines = text.split('\n');
+                rawBuffer += decoder.decode(value, { stream: true });
+                const lines = rawBuffer.split('\n');
+                rawBuffer = lines.pop() || '';
 
                 for (const line of lines) {
                     if (signal.aborted) break;
-                    if (line.startsWith('data: ')) {
-                        const dataStr = line.replace('data: ', '').trim();
+                    const trimmedLine = line.trim();
+                    if (!trimmedLine) continue;
+
+                    if (trimmedLine.startsWith('data: ')) {
+                        const dataStr = trimmedLine.replace(/^data:\s*/, '').trim();
                         if (dataStr === '[DONE]') continue;
 
+                        try {
+                            const parsed = JSON.parse(dataStr);
+                            if (parsed.token) {
+                                onToken(parsed.token);
+                            }
+                            if (parsed.diff) {
+                                accumulatedDiff = parsed.diff;
+                            }
+                            if (parsed.citations) {
+                                citations = parsed.citations;
+                            }
+                        } catch {
+                            onToken(dataStr);
+                        }
+                    }
+                }
+            }
+
+            // Flush any remaining buffered line upon stream EOF
+            if (rawBuffer.trim() && !signal.aborted) {
+                const trimmedLine = rawBuffer.trim();
+                if (trimmedLine.startsWith('data: ')) {
+                    const dataStr = trimmedLine.replace(/^data:\s*/, '').trim();
+                    if (dataStr !== '[DONE]') {
                         try {
                             const parsed = JSON.parse(dataStr);
                             if (parsed.token) {

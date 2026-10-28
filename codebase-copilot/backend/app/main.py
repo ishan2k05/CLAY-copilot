@@ -1125,11 +1125,15 @@ async def chat_endpoint(req: ChatRequest):
             m_name = pm.get("name", "")
             m_path = pm.get("path", "")
             if m_type == "file" and m_path:
-                full_p = Path(m_path)
-                if not full_p.is_absolute() and workspace_dir:
-                    full_p = Path(workspace_dir) / full_p
+                full_p = (Path(workspace_dir) / m_path).resolve() if not Path(m_path).is_absolute() else Path(m_path).resolve()
+                if not is_path_in_workspace(full_p, workspace_dir):
+                    continue
+                if SecretMasker.is_file_sensitive(str(full_p)):
+                    continue
                 if full_p.exists() and full_p.is_file():
-                    content = full_p.read_text(encoding="utf-8", errors="ignore")
+                    content = full_p.read_text(encoding="utf-8", errors="ignore")[:50000]
+                    if runtime_settings.get("privacy_filter", True):
+                        content = SecretMasker.mask_text(content)
                     p_blocks.append(f"<pinned_file path=\"{m_path}\">\n{content}\n</pinned_file>")
             elif m_type == "symbol" and m_name:
                 sym_matches = await graph_store.find_symbols(m_name, limit=3)
@@ -1137,23 +1141,28 @@ async def chat_endpoint(req: ChatRequest):
                     sym = sym_matches[0]
                     f_path = Path(sym["file_path"])
                     if not f_path.is_absolute() and workspace_dir:
-                        f_path = Path(workspace_dir) / f_path
-                    if f_path.exists() and f_path.is_file():
-                        lines = f_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-                        s_line = max(0, (sym.get("start_line") or 1) - 1)
-                        e_line = min(len(lines), sym.get("end_line") or len(lines))
-                        code_slice = "\n".join(lines[s_line:e_line])
-                        p_blocks.append(
-                            f"<pinned_symbol name=\"{m_name}\" kind=\"{sym.get('symbol_type', 'symbol')}\" file=\"{m_path}\" lines=\"{s_line+1}-{e_line}\">\n"
-                            f"{code_slice}\n"
-                            f"</pinned_symbol>"
-                        )
+                        f_path = (Path(workspace_dir) / f_path).resolve()
+                    else:
+                        f_path = f_path.resolve()
+                    if is_path_in_workspace(f_path, workspace_dir) and not SecretMasker.is_file_sensitive(str(f_path)):
+                        if f_path.exists() and f_path.is_file():
+                            lines = f_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+                            s_line = max(0, (sym.get("start_line") or 1) - 1)
+                            e_line = min(len(lines), sym.get("end_line") or len(lines))
+                            code_slice = "\n".join(lines[s_line:e_line])
+                            if runtime_settings.get("privacy_filter", True):
+                                code_slice = SecretMasker.mask_text(code_slice)
+                            p_blocks.append(
+                                f"<pinned_symbol name=\"{m_name}\" kind=\"{sym.get('symbol_type', 'symbol')}\" file=\"{m_path}\" lines=\"{s_line+1}-{e_line}\">\n"
+                                f"{code_slice}\n"
+                                f"</pinned_symbol>"
+                            )
             elif m_type == "folder" and m_path:
-                full_fld = Path(m_path)
-                if not full_fld.is_absolute() and workspace_dir:
-                    full_fld = Path(workspace_dir) / full_fld
+                full_fld = (Path(workspace_dir) / m_path).resolve() if not Path(m_path).is_absolute() else Path(m_path).resolve()
+                if not is_path_in_workspace(full_fld, workspace_dir):
+                    continue
                 if full_fld.exists() and full_fld.is_dir():
-                    dir_files = [f.name for f in full_fld.iterdir() if not f.name.startswith(".")]
+                    dir_files = [f.name for f in full_fld.iterdir() if not f.name.startswith(".") and not SecretMasker.is_file_sensitive(str(f))]
                     p_blocks.append(f"<pinned_folder path=\"{m_path}\">\nFiles: {', '.join(dir_files[:30])}\n</pinned_folder>")
         if p_blocks:
             pinned_context = "<user_pinned_context>\n" + "\n\n".join(p_blocks) + "\n</user_pinned_context>"
@@ -1620,42 +1629,63 @@ class FileOpenRequest(BaseModel):
 async def open_file_in_system(req: FileOpenRequest):
     """
     Opens the requested file using the operating system default application/helper.
-    Restricted strictly to the active workspace to prevent arbitrary system execution.
+    Restricted strictly to safe text/document types inside the active workspace to prevent arbitrary execution.
     """
     raw_path = req.file_path.strip()
-    p = Path(raw_path).resolve()
-    if not p.exists() and req.repo_path:
-        alt_p = (Path(req.repo_path) / raw_path).resolve()
-        if alt_p.exists():
-            p = alt_p
-    if not p.exists() and runtime_settings.get("repo_path"):
-        alt_p = (Path(runtime_settings.get("repo_path")) / raw_path).resolve()
-        if alt_p.exists():
-            p = alt_p
+    active_ws = resolve_workspace_path(runtime_settings.get("repo_path"))
+    
+    # Path resolution bounded strictly to workspace
+    p = Path(raw_path)
+    if not p.is_absolute():
+        p = (active_ws / p).resolve()
+    else:
+        p = p.resolve()
+
+    if not p.exists():
+        # Fallback check relative to req.repo_path ONLY if req.repo_path is within active_ws
+        if req.repo_path:
+            candidate_ws = resolve_workspace_path(req.repo_path)
+            if is_path_in_workspace(candidate_ws, active_ws) or candidate_ws == active_ws:
+                alt_p = (candidate_ws / raw_path).resolve()
+                if alt_p.exists():
+                    p = alt_p
+
     if not p.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {raw_path}")
     
     # Path Jailing: target file must reside strictly inside active workspace
-    ws = resolve_workspace_path(req.repo_path or runtime_settings.get("repo_path"))
-    if not is_path_in_workspace(p, ws):
+    if not is_path_in_workspace(p, active_ws):
         raise HTTPException(status_code=403, detail=f"Access denied: file '{p.name}' is outside the active workspace.")
 
-    # Block opening executable binary file types
-    DISALLOWED_OPEN_EXTS = {
-        ".exe", ".bat", ".cmd", ".vbs", ".ps1", ".com",
-        ".scr", ".pif", ".msi", ".reg", ".wsf", ".sh", ".bash", ".cpl", ".hta"
+    # Strict Allowlist: Only non-executable, safe document and text formats
+    ALLOWED_OPEN_EXTS = {
+        # Text, Code & Markup (safe preview/read)
+        ".txt", ".md", ".markdown", ".rst", ".json", ".yaml", ".yml", ".xml", ".csv", ".tsv",
+        ".html", ".css", ".scss", ".less", ".ts", ".tsx", ".js", ".jsx", ".py", ".pyi",
+        ".c", ".cpp", ".cc", ".h", ".hpp", ".cs", ".go", ".rs", ".java", ".kt", ".kts",
+        ".sql", ".env.example", ".gitignore", ".dockerignore", ".toml", ".ini", ".cfg",
+        # Non-executable media / docs
+        ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".webp", ".ico"
     }
-    if p.suffix.lower() in DISALLOWED_OPEN_EXTS:
+    ext = p.suffix.lower()
+    if ext not in ALLOWED_OPEN_EXTS:
         raise HTTPException(
             status_code=403,
-            detail=f"Execution blocked: opening executable files ({p.suffix}) directly is not permitted."
+            detail=f"Execution blocked: opening file type '{ext}' is not permitted for security reasons."
         )
+
+    # Executable script extensions that Windows/Unix might execute directly if passed to shell
+    SCRIPT_EXTS = {".py", ".js", ".jsx", ".ts", ".tsx"}
 
     import platform, subprocess
     os_name = platform.system().lower()
     try:
         if os_name == "windows":
-            os.startfile(str(p))
+            if ext in SCRIPT_EXTS:
+                # Open with notepad to prevent python/wscript execution via shell associations
+                subprocess.Popen(["notepad.exe", str(p)])
+            else:
+                os.startfile(str(p))
         elif os_name == "darwin":
             subprocess.Popen(["open", str(p)])
         else:
@@ -3324,33 +3354,56 @@ async def restart_system():
                 host = sys.argv[i + 1]
 
         backend_dir = str(Path(__file__).resolve().parent.parent)
-        cmd = [sys.executable, "-m", "uvicorn", "app.main:app", "--host", host, "--port", str(port)]
+        is_frozen = getattr(sys, "frozen", False)
+
         try:
-            if os.name == "nt":
-                launcher_code = (
-                    f"import time, subprocess; "
-                    f"time.sleep(1.2); "
-                    f"subprocess.Popen({repr(cmd)}, cwd={repr(backend_dir)})"
-                )
-                creation_flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-                subprocess.Popen(
-                    [sys.executable, "-c", launcher_code],
-                    cwd=backend_dir,
-                    creationflags=creation_flags,
-                    close_fds=True
-                )
+            if is_frozen:
+                # Embedded executable (clay-server.exe) runner
+                cmd = [sys.executable, "--host", host, "--port", str(port)]
+                if os.name == "nt":
+                    creation_flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+                    delay_cmd = f'ping 127.0.0.1 -n 2 > nul & "{sys.executable}" --host {host} --port {port}'
+                    subprocess.Popen(
+                        ["cmd.exe", "/c", delay_cmd],
+                        cwd=backend_dir,
+                        creationflags=creation_flags,
+                        close_fds=True
+                    )
+                else:
+                    subprocess.Popen(
+                        ["sh", "-c", f'sleep 1.0 && "{sys.executable}" --host {host} --port {port}'],
+                        cwd=backend_dir,
+                        start_new_session=True,
+                        close_fds=True
+                    )
             else:
-                launcher_code = (
-                    f"import time, subprocess; "
-                    f"time.sleep(0.8); "
-                    f"subprocess.Popen({repr(cmd)}, cwd={repr(backend_dir)})"
-                )
-                subprocess.Popen(
-                    [sys.executable, "-c", launcher_code],
-                    cwd=backend_dir,
-                    start_new_session=True,
-                    close_fds=True
-                )
+                # Python source runner via Uvicorn
+                cmd = [sys.executable, "-m", "uvicorn", "app.main:app", "--host", host, "--port", str(port)]
+                if os.name == "nt":
+                    launcher_code = (
+                        f"import time, subprocess; "
+                        f"time.sleep(1.2); "
+                        f"subprocess.Popen({repr(cmd)}, cwd={repr(backend_dir)})"
+                    )
+                    creation_flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+                    subprocess.Popen(
+                        [sys.executable, "-c", launcher_code],
+                        cwd=backend_dir,
+                        creationflags=creation_flags,
+                        close_fds=True
+                    )
+                else:
+                    launcher_code = (
+                        f"import time, subprocess; "
+                        f"time.sleep(0.8); "
+                        f"subprocess.Popen({repr(cmd)}, cwd={repr(backend_dir)})"
+                    )
+                    subprocess.Popen(
+                        [sys.executable, "-c", launcher_code],
+                        cwd=backend_dir,
+                        start_new_session=True,
+                        close_fds=True
+                    )
             os._exit(0)
         except Exception:
             os._exit(1)
