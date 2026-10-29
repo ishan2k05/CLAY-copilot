@@ -7075,41 +7075,56 @@
 
   let currentGraphNodesMeta = {};
 
+  function parseHierarchyNode(token) {
+    if (!token) return null;
+    const trimmed = token.trim();
+    const m = trimmed.match(/^([^\s\[\]]+)(?:\s*\[(?:"|')?([^"'\]]+)(?:"|')?\])?$/);
+    if (!m) return { id: trimmed, label: trimmed };
+    return { id: m[1], label: m[2] || m[1] };
+  }
+
   function renderInteractiveHierarchyLine(line, nodesMeta) {
     const trimmed = line.trim();
     if (!trimmed || trimmed === 'graph TD' || trimmed === 'graph LR') {
       return `<div class="hierarchy-header-line">${escapeHtml(trimmed || '')}</div>`;
     }
 
-    // 1. Edge with relation label: A -->|calls| B
-    const labeledEdgeMatch = trimmed.match(/^([^\s\-\>\|\[\]]+)\s*(?:-->|---\>)\s*\|([^|]+)\|\s*([^\s\-\>\|\[\]]+)$/);
+    // 1. Edge with relation label: A -->|calls| B or A["labelA"] -->|calls| B["labelB"]
+    const labeledEdgeMatch = trimmed.match(/^(.+?)\s*(?:-->|---\>)\s*\|([^|]+)\|\s*(.+)$/);
     if (labeledEdgeMatch) {
-      const [_, src, rel, tgt] = labeledEdgeMatch;
-      const srcMeta = (nodesMeta && nodesMeta[src]) || null;
-      const tgtMeta = (nodesMeta && nodesMeta[tgt]) || null;
-      const srcTitle = srcMeta && srcMeta.file ? `Jump to definition: ${srcMeta.file.split(/[\\/]/).pop() || srcMeta.file}:${srcMeta.line}` : `Click to jump to definition of ${src}`;
-      const tgtTitle = tgtMeta && tgtMeta.file ? `Jump to definition: ${tgtMeta.file.split(/[\\/]/).pop() || tgtMeta.file}:${tgtMeta.line}` : `Click to jump to definition of ${tgt}`;
-      return `<div class="hierarchy-row"><span class="hierarchy-sym-btn" data-symbol="${escapeHtml(src)}" title="${escapeHtml(srcTitle)}">${escapeHtml(src)}</span><span class="hierarchy-arrow">&rarr; ${escapeHtml(rel)} &rarr;</span><span class="hierarchy-sym-btn" data-symbol="${escapeHtml(tgt)}" title="${escapeHtml(tgtTitle)}">${escapeHtml(tgt)}</span></div>`;
+      const parsedSrc = parseHierarchyNode(labeledEdgeMatch[1]);
+      const rel = labeledEdgeMatch[2].trim();
+      const parsedTgt = parseHierarchyNode(labeledEdgeMatch[3]);
+      if (parsedSrc && parsedTgt) {
+        const srcMeta = (nodesMeta && (nodesMeta[parsedSrc.id] || nodesMeta[parsedSrc.label])) || null;
+        const tgtMeta = (nodesMeta && (nodesMeta[parsedTgt.id] || nodesMeta[parsedTgt.label])) || null;
+        const srcTitle = srcMeta && srcMeta.file ? `Jump to definition: ${srcMeta.file.split(/[\\/]/).pop() || srcMeta.file}:${srcMeta.line}` : `Click to jump to definition of ${parsedSrc.label}`;
+        const tgtTitle = tgtMeta && tgtMeta.file ? `Jump to definition: ${tgtMeta.file.split(/[\\/]/).pop() || tgtMeta.file}:${tgtMeta.line}` : `Click to jump to definition of ${parsedTgt.label}`;
+        return `<div class="hierarchy-row"><span class="hierarchy-sym-btn" data-symbol="${escapeHtml(parsedSrc.label)}" title="${escapeHtml(srcTitle)}">${escapeHtml(parsedSrc.label)}</span><span class="hierarchy-arrow">&rarr; ${escapeHtml(rel)} &rarr;</span><span class="hierarchy-sym-btn" data-symbol="${escapeHtml(parsedTgt.label)}" title="${escapeHtml(tgtTitle)}">${escapeHtml(parsedTgt.label)}</span></div>`;
+      }
     }
 
-    // 2. Unlabeled edge: A --> B
-    const unlabeledEdgeMatch = trimmed.match(/^([^\s\-\>\|\[\]]+)\s*(?:-->|---\>)\s*([^\s\-\>\|\[\]]+)$/);
+    // 2. Unlabeled edge: A --> B or A["labelA"] --> B["labelB"]
+    const unlabeledEdgeMatch = trimmed.match(/^(.+?)\s*(?:-->|---\>)\s*(.+)$/);
     if (unlabeledEdgeMatch) {
-      const [_, src, tgt] = unlabeledEdgeMatch;
-      const srcMeta = (nodesMeta && nodesMeta[src]) || null;
-      const tgtMeta = (nodesMeta && nodesMeta[tgt]) || null;
-      const srcTitle = srcMeta && srcMeta.file ? `Jump to definition: ${srcMeta.file.split(/[\\/]/).pop() || srcMeta.file}:${srcMeta.line}` : `Click to jump to definition of ${src}`;
-      const tgtTitle = tgtMeta && tgtMeta.file ? `Jump to definition: ${tgtMeta.file.split(/[\\/]/).pop() || tgtMeta.file}:${tgtMeta.line}` : `Click to jump to definition of ${tgt}`;
-      return `<div class="hierarchy-row"><span class="hierarchy-sym-btn" data-symbol="${escapeHtml(src)}" title="${escapeHtml(srcTitle)}">${escapeHtml(src)}</span><span class="hierarchy-arrow">&rarr;</span><span class="hierarchy-sym-btn" data-symbol="${escapeHtml(tgt)}" title="${escapeHtml(tgtTitle)}">${escapeHtml(tgt)}</span></div>`;
+      const parsedSrc = parseHierarchyNode(unlabeledEdgeMatch[1]);
+      const parsedTgt = parseHierarchyNode(unlabeledEdgeMatch[2]);
+      if (parsedSrc && parsedTgt) {
+        const srcMeta = (nodesMeta && (nodesMeta[parsedSrc.id] || nodesMeta[parsedSrc.label])) || null;
+        const tgtMeta = (nodesMeta && (nodesMeta[parsedTgt.id] || nodesMeta[parsedTgt.label])) || null;
+        const srcTitle = srcMeta && srcMeta.file ? `Jump to definition: ${srcMeta.file.split(/[\\/]/).pop() || srcMeta.file}:${srcMeta.line}` : `Click to jump to definition of ${parsedSrc.label}`;
+        const tgtTitle = tgtMeta && tgtMeta.file ? `Jump to definition: ${tgtMeta.file.split(/[\\/]/).pop() || tgtMeta.file}:${tgtMeta.line}` : `Click to jump to definition of ${parsedTgt.label}`;
+        return `<div class="hierarchy-row"><span class="hierarchy-sym-btn" data-symbol="${escapeHtml(parsedSrc.label)}" title="${escapeHtml(srcTitle)}">${escapeHtml(parsedSrc.label)}</span><span class="hierarchy-arrow">&rarr;</span><span class="hierarchy-sym-btn" data-symbol="${escapeHtml(parsedTgt.label)}" title="${escapeHtml(tgtTitle)}">${escapeHtml(parsedTgt.label)}</span></div>`;
+      }
     }
 
     // 3. Node definition: A["function: A"] or A[A]
     const nodeMatch = trimmed.match(/^([^\s\[\]]+)\s*\[(?:"|')?([^"'\]]+)(?:"|')?\]$/);
     if (nodeMatch) {
       const [_, sym, label] = nodeMatch;
-      const meta = (nodesMeta && nodesMeta[sym]) || null;
-      const title = meta && meta.file ? `Jump to definition: ${meta.file.split(/[\\/]/).pop() || meta.file}:${meta.line}` : `Click to jump to definition of ${sym}`;
-      return `<div class="hierarchy-row"><span class="hierarchy-sym-btn" data-symbol="${escapeHtml(sym)}" title="${escapeHtml(title)}">${escapeHtml(label || sym)}</span></div>`;
+      const meta = (nodesMeta && (nodesMeta[sym] || nodesMeta[label])) || null;
+      const title = meta && meta.file ? `Jump to definition: ${meta.file.split(/[\\/]/).pop() || meta.file}:${meta.line}` : `Click to jump to definition of ${label || sym}`;
+      return `<div class="hierarchy-row"><span class="hierarchy-sym-btn" data-symbol="${escapeHtml(label || sym)}" title="${escapeHtml(title)}">${escapeHtml(label || sym)}</span></div>`;
     }
 
     return `<div class="hierarchy-raw-line">${escapeHtml(line)}</div>`;
@@ -8805,7 +8820,7 @@
       const index = codeBlocks.length;
       const drawerHtml = `
         <div class="thinking-drawer is-finished is-collapsed">
-          <div class="thinking-drawer-header" onclick="const d=this.parentElement; const c=d.classList.toggle('is-collapsed'); d.classList.toggle('is-expanded', !c); const l=this.querySelector('.thinking-toggle-label'); if(l) l.textContent=c?'Expand':'Hide';">
+          <div class="thinking-drawer-header">
             <div class="thinking-header-left">
               <span class="thinking-glyph-icon" style="display:inline-flex;">
                 <svg viewBox="0 0 10 10" width="8" height="8" fill="currentColor">
@@ -9037,6 +9052,22 @@
 
     return finalHtml;
   }
+
+  // Delegated click listener for thought process drawers (<think> blocks)
+  document.addEventListener('click', (e) => {
+    const header = e.target.closest('.thinking-drawer-header');
+    if (!header) return;
+    const drawer = header.closest('.thinking-drawer');
+    if (!drawer) return;
+
+    const isCollapsed = drawer.classList.toggle('is-collapsed');
+    drawer.classList.toggle('is-expanded', !isCollapsed);
+
+    const label = header.querySelector('.thinking-toggle-label');
+    if (label) {
+      label.textContent = isCollapsed ? 'Expand' : 'Hide';
+    }
+  });
 
   // Delegated dynamic copy button listener for code blocks
   document.addEventListener('click', (e) => {

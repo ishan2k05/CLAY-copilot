@@ -199,18 +199,29 @@ class LocalVectorStore:
 
     def _sync_delete_file_chunks(self, file_path: str):
         self._sync_init_db()
-        target_name = Path(file_path).name
         try:
-            target_norm = str(Path(file_path).resolve())
+            norm = str(Path(file_path).resolve())
         except Exception:
-            target_norm = str(file_path)
+            norm = str(file_path)
+        orig = str(file_path)
+
+        # Match exact path variants (Windows vs POSIX slashes) for this specific file only
+        candidates = tuple(set([
+            norm,
+            norm.replace("\\", "/"),
+            norm.replace("/", "\\"),
+            orig,
+            orig.replace("\\", "/"),
+            orig.replace("/", "\\")
+        ]))
+        placeholders = ",".join("?" for _ in candidates)
 
         conn = self._get_connection()
         try:
-            conn.execute("""
+            conn.execute(f"""
                 DELETE FROM vector_chunks
-                WHERE file_path = ? OR file_path = ? OR file_path LIKE ?
-            """, (target_norm, file_path, f"%{target_name}"))
+                WHERE file_path IN ({placeholders})
+            """, candidates)
             conn.commit()
         finally:
             if self.db_path != ":memory:":
@@ -233,23 +244,21 @@ class LocalVectorStore:
         await asyncio.to_thread(self._sync_clear_db)
 
     def remove_chunks_for_file(self, file_path: str):
-        """Purges both chunks and their corresponding embeddings for a file to maintain exact synchronization."""
-        target_name = Path(file_path).name
+        """Purges both chunks and their corresponding embeddings for a specific file to maintain exact synchronization."""
         try:
-            target_norm = str(Path(file_path).resolve())
+            target_norm = os.path.normcase(str(Path(file_path).resolve()))
         except Exception:
-            target_norm = str(file_path)
+            target_norm = os.path.normcase(str(file_path))
 
         new_chunks = []
         new_vectors = []
         for chunk, vec in zip(self._chunks, self._vectors):
             try:
-                c_norm = str(Path(chunk.file_path).resolve())
+                c_norm = os.path.normcase(str(Path(chunk.file_path).resolve()))
             except Exception:
-                c_norm = str(chunk.file_path)
-            c_name = Path(chunk.file_path).name
+                c_norm = os.path.normcase(str(chunk.file_path))
 
-            if c_norm != target_norm and c_name != target_name:
+            if c_norm != target_norm:
                 new_chunks.append(chunk)
                 new_vectors.append(vec)
 

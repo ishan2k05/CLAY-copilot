@@ -1385,27 +1385,46 @@ async def get_mermaid_graph(path: Optional[str] = None, file: Optional[str] = No
                                 continue
                     except Exception:
                         pass
-                clean_src = src.split("#")[-1].replace(".", "_")
-                clean_tgt = tgt.split("#")[-1].replace(".", "_")
-                edge = f"  {clean_src} -->|{rel}| {clean_tgt}"
+                clean_src_raw = src.split("#")[-1]
+                clean_tgt_raw = tgt.split("#")[-1]
+
+                # Sanitize identifiers to alphanumeric/underscore and prefix with node_
+                src_id = "node_" + re.sub(r'[^a-zA-Z0-9_]', '_', clean_src_raw).strip('_')
+                tgt_id = "node_" + re.sub(r'[^a-zA-Z0-9_]', '_', clean_tgt_raw).strip('_')
+                if not src_id or src_id == "node_":
+                    src_id = "node_src"
+                if not tgt_id or tgt_id == "node_":
+                    tgt_id = "node_tgt"
+
+                label_src = clean_src_raw.replace('"', "'")
+                label_tgt = clean_tgt_raw.replace('"', "'")
+                clean_rel = re.sub(r'["<>]', '', rel).strip() or "calls"
+
+                edge = f'  {src_id}["{label_src}"] -->|{clean_rel}| {tgt_id}["{label_tgt}"]'
                 if edge not in seen_edges:
                     seen_edges.add(edge)
                     diagram_lines.append(edge)
 
-                if clean_src not in nodes_meta and fpath:
-                    nodes_meta[clean_src] = {
-                        "file": fpath,
-                        "line": lnum or 1,
-                        "type": "function",
-                        "name": src.split("#")[-1]
-                    }
-                if clean_tgt not in nodes_meta and fpath:
-                    nodes_meta[clean_tgt] = {
-                        "file": fpath,
-                        "line": lnum or 1,
-                        "type": "function",
-                        "name": tgt.split("#")[-1]
-                    }
+                meta_src = {
+                    "file": fpath,
+                    "line": lnum or 1,
+                    "type": "function",
+                    "name": clean_src_raw
+                }
+                meta_tgt = {
+                    "file": fpath,
+                    "line": lnum or 1,
+                    "type": "function",
+                    "name": clean_tgt_raw
+                }
+
+                if fpath:
+                    for k in (src_id, clean_src_raw, clean_src_raw.replace(".", "_")):
+                        if k not in nodes_meta:
+                            nodes_meta[k] = meta_src
+                    for k in (tgt_id, clean_tgt_raw, clean_tgt_raw.replace(".", "_")):
+                        if k not in nodes_meta:
+                            nodes_meta[k] = meta_tgt
 
             # If no call relationships exist, fallback to displaying indexed functions & classes
             if len(diagram_lines) == 1:
@@ -1435,18 +1454,24 @@ async def get_mermaid_graph(path: Optional[str] = None, file: Optional[str] = No
                                     continue
                         except Exception:
                             pass
-                    clean_name = sname.split("#")[-1].replace(".", "_")
-                    node_line = f"  {clean_name}[\"{stype}: {clean_name}\"]"
+                    clean_name_raw = sname.split("#")[-1]
+                    node_id = "node_" + re.sub(r'[^a-zA-Z0-9_]', '_', clean_name_raw).strip('_')
+                    if not node_id or node_id == "node_":
+                        node_id = "node_sym"
+                    display_name = clean_name_raw.replace('"', "'")
+                    node_line = f'  {node_id}["{stype}: {display_name}"]'
                     if node_line not in seen_edges:
                         seen_edges.add(node_line)
                         diagram_lines.append(node_line)
-                    if clean_name not in nodes_meta:
-                        nodes_meta[clean_name] = {
-                            "file": sfpath,
-                            "line": sline or 1,
-                            "type": stype,
-                            "name": sname.split("#")[-1]
-                        }
+                    meta_sym = {
+                        "file": sfpath,
+                        "line": sline or 1,
+                        "type": stype,
+                        "name": clean_name_raw
+                    }
+                    for k in (node_id, clean_name_raw, clean_name_raw.replace(".", "_")):
+                        if k not in nodes_meta:
+                            nodes_meta[k] = meta_sym
     except Exception:
         pass
 
