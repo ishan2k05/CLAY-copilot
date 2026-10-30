@@ -10,14 +10,14 @@ if str(_root_dir) not in sys.path:
     sys.path.insert(0, str(_root_dir))
 
 from fastapi.testclient import TestClient
-from app.main import app
+from app.main import app, ACTIVE_SESSION_TOKEN
 from app.agent.patch_engine import PatchEngine
 
 class TestMultiFileAndHunkStageEndpoints(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.client = TestClient(app)
+        cls.client = TestClient(app, headers={"X-Clay-Auth-Token": ACTIVE_SESSION_TOKEN})
 
     def test_parse_instruction_endpoint(self):
         resp = self.client.post("/api/agent/parse-instruction", json={

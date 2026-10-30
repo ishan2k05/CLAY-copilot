@@ -2,7 +2,7 @@
   "name": "clay-copilot",
   "displayName": "CLAY Copilot",
   "description": "Autonomous Repository Intelligence & Coding Agent Platform for VS Code",
-  "version": "1.6.14",
+  "version": "2.7.20",
   "publisher": "CLAYCopilot",
   "license": "MIT",
   "icon": "resources/icon.png",

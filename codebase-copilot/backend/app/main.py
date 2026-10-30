@@ -170,7 +170,7 @@ class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
                     pass
         return await call_next(request)
 
-app = FastAPI(title="CLAY Copilot", version="1.6.14")
+app = FastAPI(title="CLAY Copilot", version="2.7.20")
 
 # Security Middleware Stack (Middlewares run in reverse order of addition)
 # 1. Innermost: Ephemeral Token Handshake
@@ -3471,7 +3471,7 @@ async def health_check():
         "status": "healthy",
         "pid": os.getpid(),
         "model": ollama_provider.model_name,
-        "version": "1.6.14",
+        "version": "2.7.20",
         "workspace": str(resolve_workspace_path(ws)) if ws else ""
     }
 

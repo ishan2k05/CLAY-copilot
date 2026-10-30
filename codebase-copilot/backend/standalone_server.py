@@ -166,7 +166,7 @@ class CopilotRequestHandler(BaseHTTPRequestHandler):
                 "service": "codebase-copilot-backend",
                 "model": OLLAMA_MODEL,
                 "server": "standalone_standard_library",
-                "version": "1.6.14",
+                "version": "2.7.20",
                 "workspace": str(Path(ws_val).resolve()) if ws_val else ""
             }
             self.wfile.write(json.dumps(data).encode("utf-8"))

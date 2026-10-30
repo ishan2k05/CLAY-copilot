@@ -1393,7 +1393,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     <rect x="8" y="8" width="6" height="2" fill="#C15C3D"/>
                 </svg>
                 <span class="brand-title">CLAY</span>
-                <span class="brand-version" style="font-size: 9px; font-weight: 700; opacity: 0.55; margin-left: 5px; font-family: var(--font-mono, monospace); letter-spacing: 0.3px;">v1.6.14</span>
+                <span class="brand-version" style="font-size: 9px; font-weight: 700; opacity: 0.55; margin-left: 5px; font-family: var(--font-mono, monospace); letter-spacing: 0.3px;">v2.7.20</span>
             </div>
         </div>
         <div class="context-pills">
@@ -1449,7 +1449,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     </svg>
                 </div>
                 <div class="empty-state-title">CLAY Copilot</div>
-                <div class="empty-state-version" style="font-size: 11px; opacity: 0.5; font-family: var(--font-mono, monospace); margin-top: 2px;">v1.6.14</div>
+                <div class="empty-state-version" style="font-size: 11px; opacity: 0.5; font-family: var(--font-mono, monospace); margin-top: 2px;">v2.7.20</div>
             </div>
         </div>
     </div>
@@ -1879,7 +1879,7 @@ Click 'Scan & Index Workspace' to analyze codebase structure.</pre>
                     Save All Settings
                 </button>
                 <div class="settings-version-footer" style="text-align: center; margin-top: 16px; padding-bottom: 6px; font-size: 11px; opacity: 0.45; font-family: var(--font-mono, monospace);">
-                    CLAY Copilot &bull; v1.6.14
+                    CLAY Copilot &bull; v2.7.20
                 </div>
             </div>
         </div>
